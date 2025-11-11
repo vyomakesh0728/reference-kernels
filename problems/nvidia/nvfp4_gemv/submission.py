@@ -20,15 +20,16 @@ cuda_source = r"""
 
 using namespace cute;
 
-// Kernel configuration tuned for B200 - fits within 48KB static shared memory
-constexpr int kTM = 64;       // M tile: 64 rows per block (fits in 48KB static smem)
-constexpr int kTK = 128;      // K tile: 128 elements
+// Kernel configuration optimized for B200 with dynamic shared memory
+// Balances tile size with 228KB dynamic smem limit
+constexpr int kTM = 128;      // M tile: 128 rows per block
+constexpr int kTK = 320;      // K tile: 320 elements (fits in 180KB)
 constexpr int kThreads = 256; // 8 warps * 32 threads
 constexpr int kWarps = 8;
 constexpr int kVecSize = 16;  // FP4 block size
 
-// Warp tile configuration for MMA
-constexpr int kWarpM = 8;     // Each warp processes 8 rows
+// Warp tile configuration
+constexpr int kWarpM = 16;    // Each warp processes 16 rows
 constexpr int kWarpK = 64;    // Process 64 K elements at a time
 
 // FP4 E2M1 lookup table for faster decoding
@@ -108,13 +109,21 @@ fused_fp4_gemv_mma_kernel(
     const int warp_m_start = warp_id * kWarpM;
     const int warp_m_end = min(warp_m_start + kWarpM, m_rows);
 
-    // Shared memory with bank-conflict-free layout
-    __shared__ __align__(128) float smem_a[kTM][kTK + 8];      // +8 for bank conflict avoidance
-    __shared__ __align__(128) float smem_b[kTK + 8];
-    __shared__ __align__(128) float smem_sfa[kTM][kTK/kVecSize + 1];
-    __shared__ __align__(128) float smem_sfb[kTK/kVecSize + 1];
+    // Dynamic shared memory allocation for large tiles
+    extern __shared__ float smem[];
 
-    // Register file for accumulation (reduced to 1 since each thread handles 1 row)
+    // Partition shared memory with alignment
+    const int smem_a_size = kTM * (kTK + 8);
+    const int smem_b_size = (kTK + 8);
+    const int smem_sfa_size = kTM * (kTK/kVecSize + 1);
+    const int smem_sfb_size = (kTK/kVecSize + 1);
+
+    float* smem_a = smem;
+    float* smem_b = smem_a + smem_a_size;
+    float* smem_sfa = smem_b + smem_b_size;
+    float* smem_sfb = smem_sfa + smem_sfa_size;
+
+    // Register file for accumulation (1 row per thread)
     float accum[1] = {0.0f};
 
     // Batch offsets
@@ -158,7 +167,7 @@ fused_fp4_gemv_mma_kernel(
                 int k_idx = idx % num_scales;
                 int m_global = m_start + m_idx;
                 if (m_global < M) {
-                    smem_sfa[m_idx][k_idx] = decode_fp8_fast(
+                    smem_sfa[m_idx * (kTK/kVecSize + 1) + k_idx] = decode_fp8_fast(
                         SFA[batch_offset_SFA + m_global * K_scales + k_scales_start + k_idx]
                     );
                 }
@@ -216,7 +225,7 @@ fused_fp4_gemv_mma_kernel(
                         decode_fp4_fast((a_packed >> 4) & 0xF);
 
                     int scale_idx = k_local / kVecSize;
-                    smem_a[m_local][k_local] = a_val * smem_sfa[m_local][scale_idx];
+                    smem_a[m_local * (kTK + 8) + k_local] = a_val * smem_sfa[m_local * (kTK/kVecSize + 1) + scale_idx];
                 }
             }
         }
@@ -224,25 +233,25 @@ fused_fp4_gemv_mma_kernel(
         __syncthreads();
 
         // === Phase 3: Compute using warp-level primitives ===
-        // With kWarpM=8, each warp processes 8 rows, distributed across 32 threads
-        // Each thread handles its assigned row (lane_id < 8)
-        if (warp_m_start < m_rows) {
+        // With kWarpM=16, each warp processes 16 rows
+        // lanes 0-15 handle rows 0-15, lanes 16-31 duplicate work (could optimize further)
+        if (warp_m_start < m_rows && lane_id < kWarpM) {
             int m_local = warp_m_start + lane_id;
             if (m_local < warp_m_end && m_local < m_rows) {
                 float partial = 0.0f;
 
                 // Vectorized dot product with manual unrolling
-                #pragma unroll 8
+                #pragma unroll 20
                 for (int k_local = 0; k_local < k_size; k_local += 4) {
                     if (k_local + 3 < k_size) {
-                        float4 a_vec = *reinterpret_cast<float4*>(&smem_a[m_local][k_local]);
+                        float4 a_vec = *reinterpret_cast<float4*>(&smem_a[m_local * (kTK + 8) + k_local]);
                         float4 b_vec = *reinterpret_cast<float4*>(&smem_b[k_local]);
                         partial += a_vec.x * b_vec.x + a_vec.y * b_vec.y +
                                    a_vec.z * b_vec.z + a_vec.w * b_vec.w;
                     } else {
                         // Handle remainder
                         for (int k = k_local; k < k_size; k++) {
-                            partial += smem_a[m_local][k] * smem_b[k];
+                            partial += smem_a[m_local * (kTK + 8) + k] * smem_b[k];
                         }
                         break;
                     }
@@ -256,7 +265,7 @@ fused_fp4_gemv_mma_kernel(
     }
 
     // === Phase 4: Write results ===
-    if (warp_m_start < m_rows) {
+    if (warp_m_start < m_rows && lane_id < kWarpM) {
         int m_local = warp_m_start + lane_id;
         int m_global = m_start + m_local;
         if (m_local < warp_m_end && m_local < m_rows && m_global < M) {
@@ -280,14 +289,14 @@ void launch_ultimate_fp4_gemv(
     );
     dim3 block(kThreads);
 
-    // Calculate shared memory requirement
-    // With kTM=64, kTK=128: ~37 KB (fits within 48KB static shared memory limit)
+    // Calculate dynamic shared memory requirement
+    // With kTM=128, kTK=320: ~180 KB (fits B200's 228KB limit)
     size_t smem_size = sizeof(float) * (
-        kTM * (kTK + 8) +           // smem_a: 64 * 136 = 8,704
-        (kTK + 8) +                  // smem_b: 136
-        kTM * (kTK/kVecSize + 1) +  // smem_sfa: 64 * 9 = 576
-        (kTK/kVecSize + 1)          // smem_sfb: 9
-    );  // Total: 9,425 floats * 4 bytes = ~37 KB
+        kTM * (kTK + 8) +           // smem_a: 128 * 328 = 41,984
+        (kTK + 8) +                  // smem_b: 328
+        kTM * (kTK/kVecSize + 1) +  // smem_sfa: 128 * 21 = 2,688
+        (kTK/kVecSize + 1)          // smem_sfb: 21
+    );  // Total: 45,021 floats * 4 bytes = ~180 KB
 
     // Get raw pointers
     const uint8_t* A_ptr = A.view(torch::kUInt8).data_ptr<uint8_t>();
@@ -336,9 +345,9 @@ module = None
 def get_module():
     global module
     if module is None:
-        # Changed name to force recompilation with fixed shared memory usage
+        # Changed name to force recompilation with dynamic shared memory
         module = load_inline(
-            name="nvfp4_gemv_v2_fixed",
+            name="nvfp4_gemv_v3_dynamic",
             cpp_sources=cpp_source,
             cuda_sources=cuda_source,
             functions=["launch_ultimate_fp4_gemv"],
