@@ -78,13 +78,20 @@ fp4_gemv_sm100_tc_optimized(
 
     // Shared memory for MMA operations
     __shared__ half A_smem[kTileM][kTileK + 8];
-    __shared__ half B_smem[kTileK][16];  // Wider for better MMA utilization
+    __shared__ half B_smem[kTileK][8];  // 8 columns for m16n8k16 MMA
 
-    // Per-warp accumulators (each thread only needs rows_per_warp elements)
-    constexpr int rows_per_warp = kTileM / (kThreads / 32);
-    float acc[rows_per_warp];
+    // MMA tile configuration for SM100 (m16n8k16 for FP16)
+    constexpr int kMmaM = 16;  // MMA output: 16 rows
+    constexpr int kMmaN = 8;   // MMA output: 8 columns
+    constexpr int kMmaK = 16;  // MMA K dimension
+    constexpr int kNumMmaM = kTileM / kMmaM;  // Number of MMA tiles in M
+    constexpr int kNumMmaK = kTileK / kMmaK;  // Number of MMA tiles in K
+
+    // Accumulators: each warp processes multiple M tiles
+    // For GEMV, we accumulate across N dimension (which is broadcast)
+    float acc[kNumMmaM];
     #pragma unroll
-    for (int i = 0; i < rows_per_warp; i++) {
+    for (int i = 0; i < kNumMmaM; i++) {
         acc[i] = 0.0f;
     }
 
@@ -117,7 +124,7 @@ fp4_gemv_sm100_tc_optimized(
             }
         }
 
-        // Load and unpack B tile (broadcast to 16 columns)
+        // Load and unpack B tile (broadcast to 8 columns for MMA)
         for (int col_packed = tid; col_packed < kTileK / 2; col_packed += kThreads) {
             if ((k_packed_tile + col_packed) < K_packed) {
                 uint8_t packed = B_batch[k_packed_tile + col_packed];
@@ -131,13 +138,13 @@ fp4_gemv_sm100_tc_optimized(
                 half val1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
 
                 #pragma unroll
-                for (int n = 0; n < 16; n++) {
+                for (int n = 0; n < 8; n++) {
                     B_smem[col_packed * 2][n] = val0;
                     B_smem[col_packed * 2 + 1][n] = val1;
                 }
             } else if (col_packed * 2 < kTileK) {
                 #pragma unroll
-                for (int n = 0; n < 16; n++) {
+                for (int n = 0; n < 8; n++) {
                     B_smem[col_packed * 2][n] = __float2half(0.0f);
                     B_smem[col_packed * 2 + 1][n] = __float2half(0.0f);
                 }
@@ -146,43 +153,101 @@ fp4_gemv_sm100_tc_optimized(
 
         __syncthreads();
 
-        // Compute: Each warp handles multiple rows, lanes process K dimension
+        // ====================================================================
+        // Tensor Core Computation using PTX mma.sync for SM100
+        // Instruction: mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
+        // ====================================================================
+
         #pragma unroll
-        for (int r = 0; r < rows_per_warp; r++) {
-            const int local_row = warp_id * rows_per_warp + r;
-            if (local_row >= kTileM) continue;
-            if (m_cta + local_row >= M) continue;
+        for (int k_mma = 0; k_mma < kNumMmaK; k_mma++) {
+            const int k_base = k_mma * kMmaK;
 
-            // Each lane processes strided K elements
-            float partial_sum = 0.0f;
-            #pragma unroll 4
-            for (int k = lane_id; k < kTileK; k += 32) {
-                half a_val = A_smem[local_row][k];
-                half b_val = B_smem[k][0];  // Use first column (all identical)
-                partial_sum += __half2float(a_val) * __half2float(b_val);
-            }
-
-            // Warp reduction
             #pragma unroll
-            for (int offset = 16; offset > 0; offset /= 2) {
-                partial_sum += __shfl_xor_sync(0xFFFFFFFF, partial_sum, offset);
-            }
+            for (int m_mma = 0; m_mma < kNumMmaM; m_mma++) {
+                // Each warp handles specific M tiles
+                if (warp_id != (m_mma % num_warps)) continue;
 
-            // Lane 0 accumulates
-            if (lane_id == 0) {
-                acc[r] += partial_sum;
+                const int m_base = m_mma * kMmaM;
+                if (m_cta + m_base >= M) continue;
+
+                // Load A fragment: 16x16 FP16 matrix (4 registers = 8 half values)
+                half a_frag[8];
+                #pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    int row = (lane_id / 4) + ((i / 4) * 8);
+                    int col = (lane_id % 4) * 2 + ((i % 4) / 2);
+                    if (row < kMmaM && col < kMmaK) {
+                        a_frag[i] = A_smem[m_base + row][k_base + col];
+                    } else {
+                        a_frag[i] = __float2half(0.0f);
+                    }
+                }
+
+                // Load B fragment: 16x8 FP16 matrix (2 registers = 4 half values)
+                half b_frag[4];
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    int row = (lane_id / 4) + (i * 4);
+                    int col = (lane_id % 4) * 2;
+                    if (row < kMmaK && col < kMmaN) {
+                        b_frag[i] = B_smem[k_base + row][col];
+                    } else {
+                        b_frag[i] = __float2half(0.0f);
+                    }
+                }
+
+                // Output accumulator: 16x8 F32 matrix (4 registers)
+                float c_frag[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+                #if __CUDA_ARCH__ >= 1000
+                // PTX mma.sync for SM100 Blackwell
+                uint32_t const *a_ptr = reinterpret_cast<uint32_t const*>(&a_frag[0]);
+                uint32_t const *b_ptr = reinterpret_cast<uint32_t const*>(&b_frag[0]);
+
+                asm volatile(
+                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                    "{%0, %1, %2, %3}, "
+                    "{%4, %5, %6, %7}, "
+                    "{%8, %9}, "
+                    "{%10, %11, %12, %13};"
+                    : "=f"(c_frag[0]), "=f"(c_frag[1]), "=f"(c_frag[2]), "=f"(c_frag[3])
+                    : "r"(a_ptr[0]), "r"(a_ptr[1]), "r"(a_ptr[2]), "r"(a_ptr[3]),
+                      "r"(b_ptr[0]), "r"(b_ptr[1]),
+                      "f"(c_frag[0]), "f"(c_frag[1]), "f"(c_frag[2]), "f"(c_frag[3])
+                );
+                #else
+                // Fallback for non-SM100 (should not execute on B200)
+                for (int i = 0; i < 8; i++) {
+                    for (int j = 0; j < 4; j++) {
+                        c_frag[0] += __half2float(a_frag[i]) * __half2float(b_frag[j]);
+                    }
+                }
+                #endif
+
+                // Accumulate results (sum across N dimension for GEMV)
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    acc[m_mma] += c_frag[i];
+                }
             }
         }
     }
 
-    // Write output - each warp writes its own rows
+    // ========================================================================
+    // Write output - each warp writes its MMA tile results
+    // ========================================================================
     if (lane_id == 0) {
         #pragma unroll
-        for (int r = 0; r < rows_per_warp; r++) {
-            const int local_row = warp_id * rows_per_warp + r;
-            const int global_row = m_cta + local_row;
-            if (global_row < M) {
-                D_batch[global_row] = __float2half(acc[r]);
+        for (int m_mma = 0; m_mma < kNumMmaM; m_mma++) {
+            if (warp_id == (m_mma % num_warps)) {
+                #pragma unroll
+                for (int m_off = 0; m_off < kMmaM; m_off++) {
+                    const int global_row = m_cta + m_mma * kMmaM + m_off;
+                    if (global_row < M) {
+                        // Divide by kMmaN since we summed across 8 columns
+                        D_batch[global_row] = __float2half(acc[m_mma] / float(kMmaN));
+                    }
+                }
             }
         }
     }
