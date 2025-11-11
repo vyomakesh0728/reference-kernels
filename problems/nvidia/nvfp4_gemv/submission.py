@@ -185,23 +185,26 @@ fp4_gemv_sm100_mma_kernel(
             // ================================================================
             // PTX MMA.SYNC for SM100 Tensor Cores (Blackwell)
             // Instruction: mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
+            // Fragment sizes: A=4 regs (16×16 FP16), B=2 regs (16×8 FP16), C=4 regs (16×8 FP32)
             // ================================================================
             float c_reg[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
             #if __CUDA_ARCH__ >= 1000
             // SM100 Blackwell tensor core via PTX
+            // Cast fragments to uint32_t for register packing
             uint32_t const *a_ptr = reinterpret_cast<uint32_t const*>(&a_reg[0]);
             uint32_t const *b_ptr = reinterpret_cast<uint32_t const*>(&b_reg[0]);
 
+            // Correct operand counts: A=4, B=2, C/D=4 (per SM100 spec)
             asm volatile(
                 "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                "{%0, %1, %2, %3}, "
-                "{%4, %5, %6, %7}, "
-                "{%8, %9, %10, %11}, "
-                "{%12, %13, %14, %15};\\n"
+                "{%0, %1, %2, %3}, "        // Output C: 4× f32
+                "{%4, %5, %6, %7}, "        // Input A: 4× r32 (16×16 FP16)
+                "{%8, %9}, "                // Input B: 2× r32 (16×8 FP16) - FIXED!
+                "{%10, %11, %12, %13};"     // Input D: 4× f32 (accumulator)
                 : "=f"(c_reg[0]), "=f"(c_reg[1]), "=f"(c_reg[2]), "=f"(c_reg[3])
                 : "r"(a_ptr[0]), "r"(a_ptr[1]), "r"(a_ptr[2]), "r"(a_ptr[3]),
-                  "r"(b_ptr[0]), "r"(b_ptr[1]), "r"(b_ptr[2]), "r"(b_ptr[3]),
+                  "r"(b_ptr[0]), "r"(b_ptr[1]),  // Only 2 registers for B matrix
                   "f"(c_reg[0]), "f"(c_reg[1]), "f"(c_reg[2]), "f"(c_reg[3])
             );
             #else
