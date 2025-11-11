@@ -304,13 +304,22 @@ def custom_kernel(data: input_t) -> output_t:
     b = b.permute(2, 0, 1).cuda().contiguous()
     c = c.permute(2, 0, 1).cuda().contiguous()
 
-    # Use simple scale factor format [M, K_scales, L] -> [L, M, K_scales]
-    sfa = sfa_ref_cpu.permute(2, 0, 1).cuda().contiguous().to(dtype=torch.float8_e4m3fn)
-    sfb = sfb_ref_cpu.permute(2, 0, 1).cuda().contiguous().to(dtype=torch.float8_e4m3fn)
+    # Reinterpret FP4 tensors as raw bytes (uint8)
+    # FP4 tensors are stored as torch.float4_e2m1fn_x2 but underlying storage is uint8
+    a_bytes = a.view(torch.uint8)
+    b_bytes = b.view(torch.uint8)
+
+    # Scale factors: convert from CPU to GPU and reinterpret as uint8
+    # sfa_ref_cpu/sfb_ref_cpu are torch.float8_e4m3fn, need to view as uint8
+    sfa = sfa_ref_cpu.permute(2, 0, 1).cuda().contiguous()
+    sfb = sfb_ref_cpu.permute(2, 0, 1).cuda().contiguous()
+    sfa_bytes = sfa.view(torch.uint8)
+    sfb_bytes = sfb.view(torch.uint8)
 
     # Launch kernel with dynamic shared memory (no state caching)
+    # Kernel expects: uint8 for A, B, SFA, SFB; float16 for D
     mod = get_module()
-    mod.launch_fp4_gemv_dynamic(a, b, sfa, sfb, c, M, K, L)
+    mod.launch_fp4_gemv_dynamic(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L)
 
     # Permute output back to [M, 1, L]
     c = c.permute(1, 2, 0).contiguous()
