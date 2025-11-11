@@ -233,31 +233,33 @@ fused_fp4_gemv_mma_kernel(
         __syncthreads();
 
         // === Phase 3: Compute using warp-level primitives ===
-        // With kWarpM=16, each warp processes 16 rows
-        // lanes 0-15 handle rows 0-15, lanes 16-31 duplicate work (could optimize further)
-        if (warp_m_start < m_rows && lane_id < kWarpM) {
-            int m_local = warp_m_start + lane_id;
-            if (m_local < warp_m_end && m_local < m_rows) {
-                float partial = 0.0f;
+        // With kWarpM=16, use all 32 threads: each handles one row, process 2 iterations
+        if (warp_m_start < m_rows) {
+            #pragma unroll 2
+            for (int r = 0; r < 2; r++) {
+                int m_local = warp_m_start + lane_id % kWarpM + r * kWarpM;
+                if (m_local < warp_m_end && m_local < m_rows) {
+                    float partial = 0.0f;
 
-                // Vectorized dot product with manual unrolling
-                #pragma unroll 20
-                for (int k_local = 0; k_local < k_size; k_local += 4) {
-                    if (k_local + 3 < k_size) {
-                        float4 a_vec = *reinterpret_cast<float4*>(&smem_a[m_local * (kTK + 8) + k_local]);
-                        float4 b_vec = *reinterpret_cast<float4*>(&smem_b[k_local]);
-                        partial += a_vec.x * b_vec.x + a_vec.y * b_vec.y +
-                                   a_vec.z * b_vec.z + a_vec.w * b_vec.w;
-                    } else {
-                        // Handle remainder
-                        for (int k = k_local; k < k_size; k++) {
-                            partial += smem_a[m_local * (kTK + 8) + k] * smem_b[k];
+                    // Vectorized dot product with aggressive unrolling
+                    #pragma unroll 20
+                    for (int k_local = 0; k_local < k_size; k_local += 4) {
+                        if (k_local + 3 < k_size) {
+                            float4 a_vec = *reinterpret_cast<float4*>(&smem_a[m_local * (kTK + 8) + k_local]);
+                            float4 b_vec = *reinterpret_cast<float4*>(&smem_b[k_local]);
+                            partial += a_vec.x * b_vec.x + a_vec.y * b_vec.y +
+                                       a_vec.z * b_vec.z + a_vec.w * b_vec.w;
+                        } else {
+                            // Handle remainder
+                            for (int k = k_local; k < k_size; k++) {
+                                partial += smem_a[m_local * (kTK + 8) + k] * smem_b[k];
+                            }
+                            break;
                         }
-                        break;
                     }
-                }
 
-                accum[0] += partial;
+                    accum[0] += partial;
+                }
             }
         }
 
@@ -265,8 +267,8 @@ fused_fp4_gemv_mma_kernel(
     }
 
     // === Phase 4: Write results ===
-    if (warp_m_start < m_rows && lane_id < kWarpM) {
-        int m_local = warp_m_start + lane_id;
+    if (warp_m_start < m_rows) {
+        int m_local = warp_m_start + lane_id % kWarpM;
         int m_global = m_start + m_local;
         if (m_local < warp_m_end && m_local < m_rows && m_global < M) {
             D[(int64_t)batch_id * M + m_global] = __float2half(accum[0]);
