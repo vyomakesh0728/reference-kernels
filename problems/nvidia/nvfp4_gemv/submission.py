@@ -97,9 +97,10 @@ __global__ void fp4_gemv_dynamic_smem_kernel(
         }
 
         // Load B tile (single vector, all threads cooperate)
+        // B is [128, K_packed], explicitly index row 0
         for (int offset = tid; offset < k_packed_size; offset += kBlockSize) {
             if ((k_packed_start + offset) < K_packed) {
-                B_smem[offset] = B[k_packed_start + offset];  // B is padded to 128 rows, use row 0
+                B_smem[offset] = B[0 * K_packed + k_packed_start + offset];  // Row 0 of padded B
             }
         }
 
@@ -117,9 +118,10 @@ __global__ void fp4_gemv_dynamic_smem_kernel(
             }
         }
 
+        // Load SFB scale factors - SFB is [128, K_scales], explicitly index row 0
         for (int offset = tid; offset < k_scale_size; offset += kBlockSize) {
             if ((k_scale_start + offset) < K_scales) {
-                SFB_smem[offset] = SFB[k_scale_start + offset];  // B scale factors, row 0
+                SFB_smem[offset] = SFB[0 * K_scales + k_scale_start + offset];  // Row 0 of padded SFB
             }
         }
 
