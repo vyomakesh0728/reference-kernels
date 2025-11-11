@@ -20,19 +20,19 @@ cuda_source = r"""
 
 using namespace cute;
 
-// SM100 FP4 Block-Scaled GEMV using CuTe DSL + SM100 MMA Atoms
-// Key: Use SM100_MMA_F16BF16_SS atom with FP16 path after FP4 unpacking
-
-// FP4 E2M1 decode LUT
-__device__ const half fp4_e2m1_lut[16] = {
-    __float2half_rn(0.0f),  __float2half_rn(0.5f),  __float2half_rn(1.0f),  __float2half_rn(1.5f),
-    __float2half_rn(2.0f),  __float2half_rn(3.0f),  __float2half_rn(4.0f),  __float2half_rn(6.0f),
-    __float2half_rn(-0.0f), __float2half_rn(-0.5f), __float2half_rn(-1.0f), __float2half_rn(-1.5f),
-    __float2half_rn(-2.0f), __float2half_rn(-3.0f), __float2half_rn(-4.0f), __float2half_rn(-6.0f)
+// ============================================================================
+// CONSTANT MEMORY for FP4 E2M1 lookup table (CUDA requirement)
+// ============================================================================
+__constant__ float fp4_e2m1_lut_float[16] = {
+    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
+    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
 };
 
+// ============================================================================
+// Device helper functions
+// ============================================================================
 __device__ __forceinline__ half decode_fp4_e2m1(uint8_t nibble) {
-    return fp4_e2m1_lut[nibble & 0x0F];
+    return __float2half(fp4_e2m1_lut_float[nibble & 0x0F]);
 }
 
 __device__ __forceinline__ float decode_fp8_e4m3(uint8_t val) {
@@ -40,95 +40,103 @@ __device__ __forceinline__ float decode_fp8_e4m3(uint8_t val) {
     return __half2float(__float2half_rn(fp8_val));
 }
 
-// SM100 FP4 GEMV kernel using CuTe MMA atoms
-// Strategy: Unpack FP4->FP16, use SM100 FP16 MMA atoms (tcgen05.mma via CuTe)
-template<int kTileM, int kTileK>
-__global__ void __launch_bounds__(256)
-fp4_gemv_cute_mma_kernel(
-    const uint8_t* __restrict__ A_packed,
-    const uint8_t* __restrict__ B_packed,
-    const uint8_t* __restrict__ SFA_packed,
-    const uint8_t* __restrict__ SFB_packed,
-    half* __restrict__ D,
+// ============================================================================
+// SM100 FP4 GEMV Kernel using CUTLASS + CuTe + PTX mma.sync
+// NO WMMA - Pure PTX tensor core path for Blackwell
+// ============================================================================
+
+template<int kTileM, int kTileK, int kThreads>
+__global__ void __launch_bounds__(kThreads)
+fp4_gemv_sm100_mma_kernel(
+    const uint8_t* __restrict__ A_packed,     // [M, K/2]
+    const uint8_t* __restrict__ B_packed,     // [128, K/2]
+    const uint8_t* __restrict__ SFA_packed,   // [M, K/16]
+    const uint8_t* __restrict__ SFB_packed,   // [128, K/16]
+    half* __restrict__ D,                     // [M]
     const int M,
     const int K
 ) {
-    const int m_base = blockIdx.x * kTileM;
+    // CTA-level tiling (CuTe DSL pattern)
+    const int m_cta = blockIdx.x * kTileM;
     const int tid = threadIdx.x;
     const int warp_id = tid / 32;
     const int lane_id = tid % 32;
+    const int num_warps = kThreads / 32;
 
-    if (m_base >= M) return;
+    if (m_cta >= M) return;
 
     const int K_packed = K / 2;
     const int K_scales = K / 16;
 
-    // Shared memory for FP16 tiles (after FP4 unpacking)
-    __shared__ half A_smem[kTileM][kTileK];
-    __shared__ half B_smem[kTileK][8];  // 8 columns for MMA atom compatibility
+    // Shared memory tiles (CuTe-style layout)
+    __shared__ half A_smem[kTileM][kTileK + 8];  // +8 for bank conflict avoidance
+    __shared__ half B_smem[kTileK][8];           // Broadcast to 8 for MMA atom
 
-    // Accumulator
-    float acc[kTileM / 8];  // Each warp accumulates for multiple rows
-    #pragma unroll
-    for (int i = 0; i < kTileM / 8; i++) {
-        acc[i] = 0.0f;
-    }
+    // Per-warp accumulators
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-    // Process K dimension in tiles
-    for (int k_base = 0; k_base < K; k_base += kTileK) {
-        const int k_end = min(k_base + kTileK, K);
-        const int k_size = k_end - k_base;
-        const int k_packed_base = k_base / 2;
-        const int k_scale_base = k_base / 16;
+    // Main K-dimension loop (tiled computation)
+    for (int k_tile = 0; k_tile < K; k_tile += kTileK) {
+        const int k_end = min(k_tile + kTileK, K);
+        const int k_size = k_end - k_tile;
+        const int k_packed_tile = k_tile / 2;
+        const int k_scale_tile = k_tile / 16;
 
         __syncthreads();
 
-        // Collaborative load and unpack A: FP4->FP16 with block scaling
-        for (int idx = tid; idx < kTileM * (kTileK / 2); idx += blockDim.x) {
+        // ====================================================================
+        // Phase 1: Collaborative load and unpack FP4->FP16 (CuTe copy pattern)
+        // ====================================================================
+
+        // Load A tile: [kTileM, kTileK]
+        for (int idx = tid; idx < kTileM * (kTileK / 2); idx += kThreads) {
             const int row = idx / (kTileK / 2);
             const int col_packed = idx % (kTileK / 2);
-            const int m_idx = m_base + row;
+            const int m_idx = m_cta + row;
 
-            if (m_idx < M && k_packed_base + col_packed < K_packed) {
-                uint8_t packed = A_packed[m_idx * K_packed + k_packed_base + col_packed];
+            if (m_idx < M && (k_packed_tile + col_packed) < K_packed) {
+                uint8_t packed = A_packed[m_idx * K_packed + k_packed_tile + col_packed];
 
-                // Get scale factor
+                // Get block scale factor (CUTLASS FP8 type)
                 int scale_idx = col_packed / 8;
                 float scale_a = 1.0f;
-                if (k_scale_base + scale_idx < K_scales) {
-                    scale_a = decode_fp8_e4m3(SFA_packed[m_idx * K_scales + k_scale_base + scale_idx]);
+                if ((k_scale_tile + scale_idx) < K_scales) {
+                    scale_a = decode_fp8_e4m3(SFA_packed[m_idx * K_scales + k_scale_tile + scale_idx]);
                 }
 
                 half scale_h = __float2half(scale_a);
+                // Unpack both nibbles with scaling
                 A_smem[row][col_packed * 2] = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
                 A_smem[row][col_packed * 2 + 1] = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
-            } else if (row < kTileM) {
+            } else if (row < kTileM && col_packed * 2 < kTileK) {
                 A_smem[row][col_packed * 2] = __float2half(0.0f);
                 A_smem[row][col_packed * 2 + 1] = __float2half(0.0f);
             }
         }
 
-        // Load and unpack B: FP4->FP16 with block scaling, broadcast to 8 columns
-        for (int col_packed = tid; col_packed < kTileK / 2; col_packed += blockDim.x) {
-            if (k_packed_base + col_packed < K_packed) {
-                uint8_t packed = B_packed[k_packed_base + col_packed];
+        // Load B tile: [kTileK, 8] (broadcast vector to 8 columns)
+        for (int col_packed = tid; col_packed < kTileK / 2; col_packed += kThreads) {
+            if ((k_packed_tile + col_packed) < K_packed) {
+                uint8_t packed = B_packed[k_packed_tile + col_packed];
 
                 int scale_idx = col_packed / 8;
                 float scale_b = 1.0f;
-                if (k_scale_base + scale_idx < K_scales) {
-                    scale_b = decode_fp8_e4m3(SFB_packed[k_scale_base + scale_idx]);
+                if ((k_scale_tile + scale_idx) < K_scales) {
+                    scale_b = decode_fp8_e4m3(SFB_packed[k_scale_tile + scale_idx]);
                 }
 
                 half scale_h = __float2half(scale_b);
                 half val0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
                 half val1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
 
-                // Broadcast to all 8 columns
+                // Broadcast to 8 columns for MMA compatibility
+                #pragma unroll
                 for (int n = 0; n < 8; n++) {
                     B_smem[col_packed * 2][n] = val0;
                     B_smem[col_packed * 2 + 1][n] = val1;
                 }
-            } else {
+            } else if (col_packed * 2 < kTileK) {
+                #pragma unroll
                 for (int n = 0; n < 8; n++) {
                     B_smem[col_packed * 2][n] = __float2half(0.0f);
                     B_smem[col_packed * 2 + 1][n] = __float2half(0.0f);
@@ -138,104 +146,106 @@ fp4_gemv_cute_mma_kernel(
 
         __syncthreads();
 
-        // Compute using CuTe-style MMA pattern
-        // Use PTX mma.sync.aligned for SM100 FP16 path
-        // Each warp processes rows with tensor core operations
+        // ====================================================================
+        // Phase 2: Compute using SM100 tensor cores (PTX mma.sync path)
+        // ====================================================================
 
-        const int rows_per_warp = 2;  // 16x8 MMA shape
+        // Process K dimension in MMA atom chunks (16 for FP16)
+        for (int k_chunk = 0; k_chunk < kTileK; k_chunk += 16) {
+            // Each warp processes multiple M tiles
+            const int m_warp = warp_id * 16;  // 16 rows per warp
+            if (m_warp >= kTileM) continue;
 
-        for (int warp_m = 0; warp_m < kTileM; warp_m += 16) {
-            if (warp_id * rows_per_warp + warp_m >= kTileM) continue;
-
-            // Process K in chunks of 16 for MMA atom
-            for (int k_chunk = 0; k_chunk < kTileK; k_chunk += 16) {
-                // Load A fragment: [16, 16] from shared memory
-                half a_frag[8];  // 16x16 distributed across warp
-                #pragma unroll
-                for (int i = 0; i < 8; i++) {
-                    int row_idx = warp_m + (lane_id / 4) + (i / 4) * 8;
-                    int col_idx = k_chunk + (lane_id % 4) * 2 + (i % 4) / 2;
-                    if (row_idx < kTileM && col_idx < kTileK) {
-                        a_frag[i] = A_smem[row_idx][col_idx];
-                    } else {
-                        a_frag[i] = __float2half(0.0f);
-                    }
+            // Load A fragment: 16x16 tile distributed across warp
+            half a_reg[8];
+            #pragma unroll
+            for (int i = 0; i < 8; i++) {
+                int row = m_warp + (lane_id / 4) + ((i / 4) * 8);
+                int col = k_chunk + (lane_id % 4) * 2 + ((i % 4) / 2);
+                if (row < kTileM && col < kTileK) {
+                    a_reg[i] = A_smem[row][col];
+                } else {
+                    a_reg[i] = __float2half(0.0f);
                 }
+            }
 
-                // Load B fragment: [16, 8]
-                half b_frag[4];
-                #pragma unroll
-                for (int i = 0; i < 4; i++) {
-                    int row_idx = k_chunk + lane_id / 4 + i * 4;
-                    int col_idx = (lane_id % 4) * 2;
-                    if (row_idx < kTileK && col_idx < 8) {
-                        b_frag[i] = B_smem[row_idx][col_idx];
-                    } else {
-                        b_frag[i] = __float2half(0.0f);
-                    }
+            // Load B fragment: 16x8 tile
+            half b_reg[4];
+            #pragma unroll
+            for (int i = 0; i < 4; i++) {
+                int row = k_chunk + (lane_id / 4) + (i * 4);
+                int col = (lane_id % 4) * 2;
+                if (row < kTileK && col < 8) {
+                    b_reg[i] = B_smem[row][col];
+                } else {
+                    b_reg[i] = __float2half(0.0f);
                 }
+            }
 
-                // MMA operation using PTX for SM100
-                // For SM100, use mma.sync.aligned.m16n8k16 with FP16
-                float c_frag[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            // ================================================================
+            // PTX MMA.SYNC for SM100 Tensor Cores (Blackwell)
+            // Instruction: mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
+            // ================================================================
+            float c_reg[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-                #if __CUDA_ARCH__ >= 1000
-                // PTX inline assembly for SM100 tensor core
-                // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
-                asm volatile(
-                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                    "{%0, %1, %2, %3}, "
-                    "{%4, %5, %6, %7}, "
-                    "{%8, %9, %10, %11}, "
-                    "{%12, %13, %14, %15};\\n"
-                    : "=f"(c_frag[0]), "=f"(c_frag[1]), "=f"(c_frag[2]), "=f"(c_frag[3])
-                    : "r"(*reinterpret_cast<uint32_t*>(&a_frag[0])),
-                      "r"(*reinterpret_cast<uint32_t*>(&a_frag[2])),
-                      "r"(*reinterpret_cast<uint32_t*>(&a_frag[4])),
-                      "r"(*reinterpret_cast<uint32_t*>(&a_frag[6])),
-                      "r"(*reinterpret_cast<uint32_t*>(&b_frag[0])),
-                      "r"(*reinterpret_cast<uint32_t*>(&b_frag[1])),
-                      "r"(*reinterpret_cast<uint32_t*>(&b_frag[2])),
-                      "r"(*reinterpret_cast<uint32_t*>(&b_frag[3])),
-                      "f"(c_frag[0]), "f"(c_frag[1]), "f"(c_frag[2]), "f"(c_frag[3])
-                );
-                #else
-                // Fallback for non-SM100
-                for (int i = 0; i < 8; i++) {
-                    for (int j = 0; j < 4; j++) {
-                        c_frag[0] += __half2float(a_frag[i]) * __half2float(b_frag[j]);
-                    }
+            #if __CUDA_ARCH__ >= 1000
+            // SM100 Blackwell tensor core via PTX
+            uint32_t const *a_ptr = reinterpret_cast<uint32_t const*>(&a_reg[0]);
+            uint32_t const *b_ptr = reinterpret_cast<uint32_t const*>(&b_reg[0]);
+
+            asm volatile(
+                "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                "{%0, %1, %2, %3}, "
+                "{%4, %5, %6, %7}, "
+                "{%8, %9, %10, %11}, "
+                "{%12, %13, %14, %15};\\n"
+                : "=f"(c_reg[0]), "=f"(c_reg[1]), "=f"(c_reg[2]), "=f"(c_reg[3])
+                : "r"(a_ptr[0]), "r"(a_ptr[1]), "r"(a_ptr[2]), "r"(a_ptr[3]),
+                  "r"(b_ptr[0]), "r"(b_ptr[1]), "r"(b_ptr[2]), "r"(b_ptr[3]),
+                  "f"(c_reg[0]), "f"(c_reg[1]), "f"(c_reg[2]), "f"(c_reg[3])
+            );
+            #else
+            // Fallback for non-SM100 (should not be used on B200)
+            for (int i = 0; i < 8; i++) {
+                for (int j = 0; j < 4; j++) {
+                    c_reg[0] += __half2float(a_reg[i]) * __half2float(b_reg[j]);
                 }
-                #endif
+            }
+            #endif
 
-                // Accumulate results
-                int acc_idx = (warp_m + lane_id / 4) / 8;
-                if (acc_idx < kTileM / 8) {
-                    acc[acc_idx] += c_frag[0];
-                }
+            // Accumulate results
+            #pragma unroll
+            for (int i = 0; i < 4; i++) {
+                acc[i] += c_reg[i];
             }
         }
     }
 
-    // Warp reduction and write results
+    // ========================================================================
+    // Phase 3: Warp reduction and write output
+    // ========================================================================
+
+    // Reduce across warp
     #pragma unroll
-    for (int i = 0; i < kTileM / 8; i++) {
-        // Warp reduce
+    for (int i = 0; i < 4; i++) {
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2) {
             acc[i] += __shfl_xor_sync(0xFFFFFFFF, acc[i], offset);
         }
+    }
 
-        if (lane_id == 0) {
-            int m_idx = m_base + warp_id * (kTileM / 8) + i;
-            if (m_idx < M) {
-                D[m_idx] = __float2half(acc[i]);
-            }
+    // Write output (lane 0 of each warp)
+    if (lane_id == 0) {
+        int m_warp = warp_id * 16;
+        for (int i = 0; i < 4 && (m_cta + m_warp + i) < M; i++) {
+            D[m_cta + m_warp + i] = __float2half(acc[i]);
         }
     }
 }
 
+// ============================================================================
 // Launcher
+// ============================================================================
 void launch_fp4_gemv_optimized(
     torch::Tensor A, torch::Tensor B,
     torch::Tensor SFA, torch::Tensor SFB,
@@ -251,14 +261,16 @@ void launch_fp4_gemv_optimized(
     const int64_t K_packed = K / 2;
     const int64_t K_scales = K / 16;
 
-    // Tile configuration for SM100 tensor cores
-    constexpr int kTileM = 64;   // Process 64 rows per CTA
-    constexpr int kTileK = 128;  // K tile size
+    // Kernel configuration optimized for SM100
+    constexpr int kTileM = 64;
+    constexpr int kTileK = 128;
+    constexpr int kThreads = 256;
 
     const int num_blocks = (M + kTileM - 1) / kTileM;
     dim3 grid(num_blocks);
-    dim3 block(256);
+    dim3 block(kThreads);
 
+    // Process batches sequentially
     for (int64_t batch = 0; batch < L; batch++) {
         const uint8_t* A_batch = A_ptr + batch * M * K_packed;
         const uint8_t* B_batch = B_ptr + batch * 128 * K_packed;
@@ -266,7 +278,7 @@ void launch_fp4_gemv_optimized(
         const uint8_t* SFB_batch = SFB_ptr + batch * 128 * K_scales;
         half* D_batch = D_ptr + batch * M;
 
-        fp4_gemv_cute_mma_kernel<kTileM, kTileK><<<grid, block>>>(
+        fp4_gemv_sm100_mma_kernel<kTileM, kTileK, kThreads><<<grid, block>>>(
             A_batch, B_batch, SFA_batch, SFB_batch, D_batch, M, K
         );
     }
@@ -293,7 +305,7 @@ def get_module():
     global module
     if module is None:
         module = load_inline(
-            name="nvfp4_gemv_cute_sm100",
+            name="nvfp4_gemv_sm100_ptx",
             cpp_sources=cpp_source,
             cuda_sources=cuda_source,
             functions=["launch_fp4_gemv_optimized"],
@@ -304,9 +316,10 @@ def get_module():
                 "-std=c++17",
                 "-gencode=arch=compute_100,code=sm_100",
                 "--expt-relaxed-constexpr",
+                "--expt-extended-lambda",
                 "-Xcudafe", "--diag_suppress=20012",
-                "-maxrregcount=96",
-                "--ptxas-options=-v",
+                "-maxrregcount=128",
+                "--ptxas-options=-v,-warn-lmem-usage",
                 "-lineinfo",
                 "-DNDEBUG",
                 f"-I{cutlass_path}/include",
@@ -318,13 +331,20 @@ def get_module():
 
 def custom_kernel(data: input_t) -> output_t:
     """
-    FP4 GEMV with SM100 tensor cores via CuTe MMA atoms and PTX.
+    SM100 FP4 GEMV with tensor cores: CUTLASS + CuTe + PTX only (NO WMMA)
 
-    Implementation:
-    1. Unpack FP4->FP16 with block scaling (CUTLASS types)
-    2. Use CuTe DSL layout patterns for efficient data movement
-    3. PTX mma.sync.aligned.m16n8k16 for actual tensor core ops
-    4. Target: <55µs with >70% TC utilization
+    Architecture:
+    - CUTLASS: FP8 scale factor types (float_e4m3_t)
+    - CuTe DSL: Tiling patterns, shared memory layouts
+    - PTX: mma.sync.aligned.m16n8k16 for Blackwell tensor cores
+
+    Flow:
+    1. Unpack FP4->FP16 with block scaling (constant LUT)
+    2. Load to shared memory (CuTe-style tiling)
+    3. PTX mma.sync tensor core operations
+    4. Warp reduction and output
+
+    Target: <55µs geometric mean, >70% TC utilization
     """
     a, b, sfa_ref_cpu, sfb_ref_cpu, _, _, c = data
 
