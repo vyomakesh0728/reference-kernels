@@ -118,12 +118,14 @@ fused_fp4_gemv_mma_kernel(
     float accum[1] = {0.0f};
 
     // Batch offsets
+    // Note: B is padded to 128 rows (not 1) for torch._scaled_mm compatibility
     const int K_bytes = K / 2;
     const int K_scales = K / kVecSize;
+    const int n_padded = 128;  // B tensor is padded to 128 rows
     const int64_t batch_offset_A = (int64_t)batch_id * M * K_bytes;
-    const int64_t batch_offset_B = (int64_t)batch_id * K_bytes;
+    const int64_t batch_offset_B = (int64_t)batch_id * n_padded * K_bytes;  // FIX: B has 128 rows, not 1
     const int64_t batch_offset_SFA = (int64_t)batch_id * M * K_scales;
-    const int64_t batch_offset_SFB = (int64_t)batch_id * K_scales;
+    const int64_t batch_offset_SFB = (int64_t)batch_id * n_padded * K_scales;  // FIX: sfb also has 128 rows
 
     // Main loop over K dimension
     for (int k_tile = 0; k_tile < K; k_tile += kTK) {
