@@ -219,6 +219,26 @@ void launch_fp4_gemv_dynamic(
     const size_t smem_size = kTileM * kTileK_packed + kTileK_packed +
                              kTileM * (kTileK / 16) + (kTileK / 16);
 
+    // B200/SM100 requires explicit opt-in for dynamic shared memory > 48KB
+    // Max is 227 KB per block on B200
+    // Call only once to avoid racing conditions
+    static bool smem_configured = false;
+    if (!smem_configured) {
+        cudaError_t err = cudaFuncSetAttribute(
+            fp4_gemv_dynamic_smem_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            smem_size
+        );
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("Failed to set dynamic shared memory size: ") +
+                cudaGetErrorString(err) +
+                " (requested " + std::to_string(smem_size) + " bytes)"
+            );
+        }
+        smem_configured = true;
+    }
+
     // Grid configuration
     const int num_blocks = (M + kTileM - 1) / kTileM;
     dim3 grid(num_blocks);
