@@ -236,20 +236,23 @@ fp4_gemv_sm100_tc_optimized(
     }
 
     // ========================================================================
-    // Write output - each thread writes its 2 owned rows per MMA tile
+    // Write output - only threads with column 0 write (avoid race condition)
     // ========================================================================
     #pragma unroll
     for (int m_mma = 0; m_mma < kNumMmaM; m_mma++) {
         if (warp_id == (m_mma % num_warps)) {
-            // Each thread owns 2 rows in the MMA output
-            int row0 = m_cta + m_mma * kMmaM + 2 * (lane_id / 4);
-            int row1 = row0 + 1;
+            // Only lanes handling column 0 (lane_id % 4 == 0) write output
+            // This avoids race condition where multiple threads write same row
+            if ((lane_id % 4) == 0) {
+                int row0 = m_cta + m_mma * kMmaM + 2 * (lane_id / 4);
+                int row1 = row0 + 1;
 
-            if (row0 < M) {
-                D_batch[row0] = __float2half(acc[m_mma][0]);
-            }
-            if (row1 < M) {
-                D_batch[row1] = __float2half(acc[m_mma][1]);
+                if (row0 < M) {
+                    D_batch[row0] = __float2half(acc[m_mma][0]);
+                }
+                if (row1 < M) {
+                    D_batch[row1] = __float2half(acc[m_mma][1]);
+                }
             }
         }
     }
