@@ -80,17 +80,11 @@ fp4_gemv_sm100_tc_optimized(
     __shared__ half A_smem[kTileM][kTileK + 8];
     __shared__ half B_smem[kTileK][16];  // Wider for better MMA utilization
 
-    // Fragment accumulators (16x8 output per MMA)
-    constexpr int kMmaM = 16;
-    constexpr int kMmaN = 8;
-    constexpr int kMmaK = 16;
-    constexpr int kNumMmaM = kTileM / kMmaM;
-    constexpr int kNumMmaK = kTileK / kMmaK;
-
-    // One accumulator per output row (simplified for GEMV)
-    float acc[kTileM];
+    // Per-warp accumulators (each thread only needs rows_per_warp elements)
+    constexpr int rows_per_warp = kTileM / (kThreads / 32);
+    float acc[rows_per_warp];
     #pragma unroll
-    for (int i = 0; i < kTileM; i++) {
+    for (int i = 0; i < rows_per_warp; i++) {
         acc[i] = 0.0f;
     }
 
@@ -153,7 +147,6 @@ fp4_gemv_sm100_tc_optimized(
         __syncthreads();
 
         // Compute: Each warp handles multiple rows, lanes process K dimension
-        const int rows_per_warp = kTileM / num_warps;
         #pragma unroll
         for (int r = 0; r < rows_per_warp; r++) {
             const int local_row = warp_id * rows_per_warp + r;
@@ -177,20 +170,19 @@ fp4_gemv_sm100_tc_optimized(
 
             // Lane 0 accumulates
             if (lane_id == 0) {
-                acc[local_row] += partial_sum;
+                acc[r] += partial_sum;
             }
         }
     }
 
     // Write output - each warp writes its own rows
     if (lane_id == 0) {
-        const int rows_per_warp = kTileM / num_warps;
         #pragma unroll
         for (int r = 0; r < rows_per_warp; r++) {
             const int local_row = warp_id * rows_per_warp + r;
             const int global_row = m_cta + local_row;
             if (global_row < M) {
-                D_batch[global_row] = __float2half(acc[local_row]);
+                D_batch[global_row] = __float2half(acc[r]);
             }
         }
     }
@@ -216,7 +208,6 @@ fp4_gemv_sm100_mma_kernel(
     const int tid = threadIdx.x;
     const int warp_id = tid / 32;
     const int lane_id = tid % 32;
-    const int num_warps = kThreads / 32;
 
     if (m_cta >= M) return;
 
@@ -233,8 +224,6 @@ fp4_gemv_sm100_mma_kernel(
 
     // Main K-dimension loop (tiled computation)
     for (int k_tile = 0; k_tile < K; k_tile += kTileK) {
-        const int k_end = min(k_tile + kTileK, K);
-        const int k_size = k_end - k_tile;
         const int k_packed_tile = k_tile / 2;
         const int k_scale_tile = k_tile / 16;
 
