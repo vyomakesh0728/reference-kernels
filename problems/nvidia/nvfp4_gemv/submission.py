@@ -20,14 +20,14 @@ cuda_source = r"""
 
 using namespace cute;
 
-// Kernel configuration tuned for B200 - fits within 48KB static shared memory
-constexpr int kTM = 64;       // M tile: 64 rows per block (fits in 48KB static smem)
-constexpr int kTK = 128;      // K tile: 128 elements
-constexpr int kThreads = 256; // 8 warps * 32 threads
-constexpr int kWarps = 8;
+// Kernel configuration tuned for B200 - balance parallelism and memory
+constexpr int kTM = 32;       // M tile: 32 rows (2x more blocks for parallelism)
+constexpr int kTK = 256;      // K tile: 256 elements (2x fewer K iterations)
+constexpr int kThreads = 128; // 4 warps * 32 threads (better occupancy)
+constexpr int kWarps = 4;
 constexpr int kVecSize = 16;  // FP4 block size
 
-// Warp tile configuration for MMA
+// Warp tile configuration
 constexpr int kWarpM = 8;     // Each warp processes 8 rows
 constexpr int kWarpK = 64;    // Process 64 K elements at a time
 
@@ -168,55 +168,75 @@ fused_fp4_gemv_mma_kernel(
         __syncthreads();
 
         // === Phase 2: Load and decode FP4 data ===
-        // Cooperative loading: each thread loads a portion of B
-        // Load every byte (2 FP4 values) cooperatively
+        // Vectorized loading: each thread loads 32 FP4 values (16 bytes) at a time
         const int k_elements = k_size;
-        const int k_bytes_in_tile = (k_elements + 1) / 2;
+        const int vec32_loads = (k_elements + 31) / 32;
 
-        for (int byte_idx = tid; byte_idx < k_bytes_in_tile; byte_idx += kThreads) {
-            int k_global_byte = (k_start / 2) + byte_idx;
-            uint8_t b_packed = B[batch_offset_B + k_global_byte];
-
-            float b0 = decode_fp4_fast(b_packed & 0xF);
-            float b1 = decode_fp4_fast((b_packed >> 4) & 0xF);
-
-            int k_local_0 = byte_idx * 2;
-            int k_local_1 = k_local_0 + 1;
-
-            if (k_local_0 < k_elements) {
-                int scale_idx = k_local_0 / kVecSize;
-                smem_b[k_local_0] = b0 * smem_sfb[scale_idx];
-            }
-            if (k_local_1 < k_elements) {
-                int scale_idx = k_local_1 / kVecSize;
-                smem_b[k_local_1] = b1 * smem_sfb[scale_idx];
-            }
-        }
-
-        // Load A tile: each thread loads portions of different rows
-        const int total_a_elements = m_rows * k_elements;
-        const int a_per_thread = (total_a_elements + kThreads - 1) / kThreads;
-
-        for (int i = 0; i < a_per_thread; i++) {
-            int idx = tid + i * kThreads;
-            if (idx < total_a_elements) {
-                int m_local = idx / k_elements;
-                int k_local = idx % k_elements;
-                int m_global = m_start + m_local;
+        // Load B vector with vectorized 32-element loads
+        for (int vec_idx = tid; vec_idx < vec32_loads; vec_idx += kThreads) {
+            int k_local = vec_idx * 32;
+            if (k_local < k_elements) {
                 int k_global = k_start + k_local;
                 int k_byte = k_global / 2;
 
+                float b_temp[32];
+                if (k_local + 32 <= k_elements) {
+                    load_fp4_vec32(b_temp, &B[batch_offset_B + k_byte]);
+
+                    // Apply scale factors and write to smem
+                    #pragma unroll
+                    for (int i = 0; i < 32; i++) {
+                        int scale_idx = (k_local + i) / kVecSize;
+                        smem_b[k_local + i] = b_temp[i] * smem_sfb[scale_idx];
+                    }
+                } else {
+                    // Handle remainder
+                    for (int i = 0; i < min(32, k_elements - k_local); i++) {
+                        int k_g = k_global + i;
+                        uint8_t packed = B[batch_offset_B + k_g / 2];
+                        float val = (k_g % 2 == 0) ? decode_fp4_fast(packed & 0xF) : decode_fp4_fast((packed >> 4) & 0xF);
+                        int scale_idx = (k_local + i) / kVecSize;
+                        smem_b[k_local + i] = val * smem_sfb[scale_idx];
+                    }
+                }
+            }
+        }
+
+        // Load A tile with vectorized loads (32 elements at a time per row)
+        const int total_vec_loads = m_rows * vec32_loads;
+
+        for (int idx = tid; idx < total_vec_loads; idx += kThreads) {
+            int m_local = idx / vec32_loads;
+            int vec_idx = idx % vec32_loads;
+            int k_local = vec_idx * 32;
+
+            if (m_local < m_rows && k_local < k_elements) {
+                int m_global = m_start + m_local;
+                int k_global = k_start + k_local;
+
                 if (m_global < M) {
-                    int64_t a_idx = (int64_t)m_global * K_bytes + k_byte;
-                    uint8_t a_packed = A[batch_offset_A + a_idx];
+                    int64_t a_byte_idx = (int64_t)m_global * K_bytes + k_global / 2;
 
-                    // Decode based on whether k_global is even or odd (not k_local!)
-                    float a_val = (k_global % 2 == 0) ?
-                        decode_fp4_fast(a_packed & 0xF) :
-                        decode_fp4_fast((a_packed >> 4) & 0xF);
+                    float a_temp[32];
+                    if (k_local + 32 <= k_elements) {
+                        load_fp4_vec32(a_temp, &A[batch_offset_A + a_byte_idx]);
 
-                    int scale_idx = k_local / kVecSize;
-                    smem_a[m_local][k_local] = a_val * smem_sfa[m_local][scale_idx];
+                        // Apply scale factors and write to smem
+                        #pragma unroll
+                        for (int i = 0; i < 32; i++) {
+                            int scale_idx = (k_local + i) / kVecSize;
+                            smem_a[m_local][k_local + i] = a_temp[i] * smem_sfa[m_local][scale_idx];
+                        }
+                    } else {
+                        // Handle remainder
+                        for (int i = 0; i < min(32, k_elements - k_local); i++) {
+                            int k_g = k_global + i;
+                            uint8_t packed = A[batch_offset_A + (int64_t)m_global * K_bytes + k_g / 2];
+                            float val = (k_g % 2 == 0) ? decode_fp4_fast(packed & 0xF) : decode_fp4_fast((packed >> 4) & 0xF);
+                            int scale_idx = (k_local + i) / kVecSize;
+                            smem_a[m_local][k_local + i] = val * smem_sfa[m_local][scale_idx];
+                        }
+                    }
                 }
             }
         }
@@ -281,13 +301,13 @@ void launch_ultimate_fp4_gemv(
     dim3 block(kThreads);
 
     // Calculate shared memory requirement
-    // With kTM=64, kTK=128: ~37 KB (fits within 48KB static shared memory limit)
+    // With kTM=32, kTK=256: ~42 KB (fits within 48KB static shared memory limit)
     size_t smem_size = sizeof(float) * (
-        kTM * (kTK + 8) +           // smem_a: 64 * 136 = 8,704
-        (kTK + 8) +                  // smem_b: 136
-        kTM * (kTK/kVecSize + 1) +  // smem_sfa: 64 * 9 = 576
-        (kTK/kVecSize + 1)          // smem_sfb: 9
-    );  // Total: 9,425 floats * 4 bytes = ~37 KB
+        kTM * (kTK + 8) +           // smem_a: 32 * 264 = 8,448
+        (kTK + 8) +                  // smem_b: 264
+        kTM * (kTK/kVecSize + 1) +  // smem_sfa: 32 * 17 = 544
+        (kTK/kVecSize + 1)          // smem_sfb: 17
+    );  // Total: 9,273 floats * 4 bytes = ~42 KB
 
     // Get raw pointers
     const uint8_t* A_ptr = A.view(torch::kUInt8).data_ptr<uint8_t>();
@@ -336,9 +356,9 @@ module = None
 def get_module():
     global module
     if module is None:
-        # Changed name to force recompilation with fixed shared memory usage
+        # Changed name to force recompilation - more parallelism approach
         module = load_inline(
-            name="nvfp4_gemv_v2_fixed",
+            name="nvfp4_gemv_v4_parallel",
             cpp_sources=cpp_source,
             cuda_sources=cuda_source,
             functions=["launch_ultimate_fp4_gemv"],
