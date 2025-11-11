@@ -434,80 +434,28 @@ void launch_fp4_gemv_optimized(
     const int64_t K_scales = K / 16;
 
     // ========================================================================
-    // Optimized paths for leaderboard shapes using tensor cores
+    // Use proven correct fallback kernel for all shapes (temporarily)
     // ========================================================================
 
-    dim3 grid, block;
-    bool use_optimized = false;
+    constexpr int kTileM = 64;
+    constexpr int kTileK = 128;
+    constexpr int kThreads = 256;
 
-    // Leaderboard Shape 1: M=7168, K=16384, L=1
-    if (M == 7168 && K == 16384 && L == 1) {
-        constexpr int kTileM = 64;   // Reduced to fit shared memory
-        constexpr int kTileK = 128;
-        constexpr int kThreads = 256;
+    int num_blocks = (M + kTileM - 1) / kTileM;
+    dim3 grid(num_blocks);
+    dim3 block(kThreads);
 
-        int num_blocks_m = (M + kTileM - 1) / kTileM;
-        grid = dim3(num_blocks_m, L);  // Parallelize batches
-        block = dim3(kThreads);
+    // Process all batches sequentially
+    for (int64_t batch = 0; batch < L; batch++) {
+        const uint8_t* A_batch = A_ptr + batch * M * K_packed;
+        const uint8_t* B_batch = B_ptr + batch * 128 * K_packed;
+        const uint8_t* SFA_batch = SFA_ptr + batch * M * K_scales;
+        const uint8_t* SFB_batch = SFB_ptr + batch * 128 * K_scales;
+        half* D_batch = D_ptr + batch * M;
 
-        fp4_gemv_sm100_tc_optimized<kTileM, kTileK, kThreads><<<grid, block>>>(
-            A_ptr, B_ptr, SFA_ptr, SFB_ptr, D_ptr, M, K, L
+        fp4_gemv_sm100_mma_kernel<kTileM, kTileK, kThreads><<<grid, block>>>(
+            A_batch, B_batch, SFA_batch, SFB_batch, D_batch, M, K
         );
-        use_optimized = true;
-    }
-    // Leaderboard Shape 2: M=4096, K=7168, L=8
-    else if (M == 4096 && K == 7168 && L == 8) {
-        constexpr int kTileM = 64;   // Reduced to fit shared memory
-        constexpr int kTileK = 128;
-        constexpr int kThreads = 256;
-
-        int num_blocks_m = (M + kTileM - 1) / kTileM;
-        grid = dim3(num_blocks_m, L);  // Parallelize 8 batches
-        block = dim3(kThreads);
-
-        fp4_gemv_sm100_tc_optimized<kTileM, kTileK, kThreads><<<grid, block>>>(
-            A_ptr, B_ptr, SFA_ptr, SFB_ptr, D_ptr, M, K, L
-        );
-        use_optimized = true;
-    }
-    // Leaderboard Shape 3: M=7168, K=2048, L=4
-    else if (M == 7168 && K == 2048 && L == 4) {
-        constexpr int kTileM = 64;   // Reduced to fit shared memory
-        constexpr int kTileK = 128;
-        constexpr int kThreads = 256;
-
-        int num_blocks_m = (M + kTileM - 1) / kTileM;
-        grid = dim3(num_blocks_m, L);  // Parallelize 4 batches
-        block = dim3(kThreads);
-
-        fp4_gemv_sm100_tc_optimized<kTileM, kTileK, kThreads><<<grid, block>>>(
-            A_ptr, B_ptr, SFA_ptr, SFB_ptr, D_ptr, M, K, L
-        );
-        use_optimized = true;
-    }
-
-    // Fallback for correctness on all other shapes
-    if (!use_optimized) {
-        constexpr int kTileM = 64;
-        constexpr int kTileK = 128;
-        constexpr int kThreads = 256;
-
-        int num_blocks = (M + kTileM - 1) / kTileM;
-        grid = dim3(num_blocks);
-        block = dim3(kThreads);
-
-        // Sequential batch processing for non-leaderboard shapes
-        for (int64_t batch = 0; batch < L; batch++) {
-            const uint8_t* A_batch = A_ptr + batch * M * K_packed;
-            const uint8_t* B_batch = B_ptr + batch * 128 * K_packed;
-            const uint8_t* SFA_batch = SFA_ptr + batch * M * K_scales;
-            const uint8_t* SFB_batch = SFB_ptr + batch * 128 * K_scales;
-            half* D_batch = D_ptr + batch * M;
-
-            fp4_gemv_sm100_mma_kernel<kTileM, kTileK, kThreads><<<grid, block>>>(
-                A_batch, B_batch, SFA_batch, SFB_batch, D_batch, M, K
-            );
-        }
     }
 
     cudaError_t err = cudaDeviceSynchronize();
