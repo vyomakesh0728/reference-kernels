@@ -247,7 +247,7 @@ fp4_gemv_sm100_mma_kernel(
 }
 
 // ============================================================================
-// Launcher with shape-specific optimization for leaderboard shapes
+// Launcher - using single safe configuration for all shapes
 // ============================================================================
 void launch_fp4_gemv_optimized(
     torch::Tensor A, torch::Tensor B,
@@ -264,104 +264,28 @@ void launch_fp4_gemv_optimized(
     const int64_t K_packed = K / 2;
     const int64_t K_scales = K / 16;
 
-    // ========================================================================
-    // Shape-specific optimization for leaderboard shapes
-    // ========================================================================
+    // Safe configuration that works for all shapes
+    // Shared memory: 64*(128+8)*2 + 128*8*2 = ~20KB (well under 48KB limit)
+    // Threads: 256 (8 warps) ensures good occupancy and correct warp mapping
+    constexpr int kTileM = 64;
+    constexpr int kTileK = 128;
+    constexpr int kThreads = 256;
 
-    dim3 grid, block;
+    const int num_blocks = (M + kTileM - 1) / kTileM;
+    dim3 grid(num_blocks);
+    dim3 block(kThreads);
 
-    if (M == 7168 && K == 16384 && L == 1) {
-        // Shape 1: M=7168, K=16384, L=1
-        // Large K: maximize K-tile size, high thread count for K parallelism
-        constexpr int kTileM = 128;   // Larger M tile for fewer blocks
-        constexpr int kTileK = 256;   // Maximize K tile for large K
-        constexpr int kThreads = 512; // Max threads for high parallelism
+    // Process all batches
+    for (int64_t batch = 0; batch < L; batch++) {
+        const uint8_t* A_batch = A_ptr + batch * M * K_packed;
+        const uint8_t* B_batch = B_ptr + batch * 128 * K_packed;
+        const uint8_t* SFA_batch = SFA_ptr + batch * M * K_scales;
+        const uint8_t* SFB_batch = SFB_ptr + batch * 128 * K_scales;
+        half* D_batch = D_ptr + batch * M;
 
-        const int num_blocks = (M + kTileM - 1) / kTileM;
-        grid = dim3(num_blocks);
-        block = dim3(kThreads);
-
-        for (int64_t batch = 0; batch < L; batch++) {
-            const uint8_t* A_batch = A_ptr + batch * M * K_packed;
-            const uint8_t* B_batch = B_ptr + batch * 128 * K_packed;
-            const uint8_t* SFA_batch = SFA_ptr + batch * M * K_scales;
-            const uint8_t* SFB_batch = SFB_ptr + batch * 128 * K_scales;
-            half* D_batch = D_ptr + batch * M;
-
-            fp4_gemv_sm100_mma_kernel<kTileM, kTileK, kThreads><<<grid, block>>>(
-                A_batch, B_batch, SFA_batch, SFB_batch, D_batch, M, K
-            );
-        }
-    }
-    else if (M == 4096 && K == 7168 && L == 8) {
-        // Shape 2: M=4096, K=7168, L=8
-        // Balanced: medium tiles, batch parallelism via streams
-        constexpr int kTileM = 64;
-        constexpr int kTileK = 128;
-        constexpr int kThreads = 256;
-
-        const int num_blocks = (M + kTileM - 1) / kTileM;
-        grid = dim3(num_blocks);
-        block = dim3(kThreads);
-
-        // Launch all batches in parallel for L=8
-        for (int64_t batch = 0; batch < L; batch++) {
-            const uint8_t* A_batch = A_ptr + batch * M * K_packed;
-            const uint8_t* B_batch = B_ptr + batch * 128 * K_packed;
-            const uint8_t* SFA_batch = SFA_ptr + batch * M * K_scales;
-            const uint8_t* SFB_batch = SFB_ptr + batch * 128 * K_scales;
-            half* D_batch = D_ptr + batch * M;
-
-            fp4_gemv_sm100_mma_kernel<kTileM, kTileK, kThreads><<<grid, block>>>(
-                A_batch, B_batch, SFA_batch, SFB_batch, D_batch, M, K
-            );
-        }
-    }
-    else if (M == 7168 && K == 2048 && L == 4) {
-        // Shape 3: M=7168, K=2048, L=4
-        // Small K: maximize M parallelism, smaller K tile
-        constexpr int kTileM = 128;   // Large M tile for M parallelism
-        constexpr int kTileK = 128;   // Moderate K tile (K is small)
-        constexpr int kThreads = 256;
-
-        const int num_blocks = (M + kTileM - 1) / kTileM;
-        grid = dim3(num_blocks);
-        block = dim3(kThreads);
-
-        // Launch all batches
-        for (int64_t batch = 0; batch < L; batch++) {
-            const uint8_t* A_batch = A_ptr + batch * M * K_packed;
-            const uint8_t* B_batch = B_ptr + batch * 128 * K_packed;
-            const uint8_t* SFA_batch = SFA_ptr + batch * M * K_scales;
-            const uint8_t* SFB_batch = SFB_ptr + batch * 128 * K_scales;
-            half* D_batch = D_ptr + batch * M;
-
-            fp4_gemv_sm100_mma_kernel<kTileM, kTileK, kThreads><<<grid, block>>>(
-                A_batch, B_batch, SFA_batch, SFB_batch, D_batch, M, K
-            );
-        }
-    }
-    else {
-        // Generic configuration for test shapes (correctness only)
-        constexpr int kTileM = 64;
-        constexpr int kTileK = 128;
-        constexpr int kThreads = 256;
-
-        const int num_blocks = (M + kTileM - 1) / kTileM;
-        grid = dim3(num_blocks);
-        block = dim3(kThreads);
-
-        for (int64_t batch = 0; batch < L; batch++) {
-            const uint8_t* A_batch = A_ptr + batch * M * K_packed;
-            const uint8_t* B_batch = B_ptr + batch * 128 * K_packed;
-            const uint8_t* SFA_batch = SFA_ptr + batch * M * K_scales;
-            const uint8_t* SFB_batch = SFB_ptr + batch * 128 * K_scales;
-            half* D_batch = D_ptr + batch * M;
-
-            fp4_gemv_sm100_mma_kernel<kTileM, kTileK, kThreads><<<grid, block>>>(
-                A_batch, B_batch, SFA_batch, SFB_batch, D_batch, M, K
-            );
-        }
+        fp4_gemv_sm100_mma_kernel<kTileM, kTileK, kThreads><<<grid, block>>>(
+            A_batch, B_batch, SFA_batch, SFB_batch, D_batch, M, K
+        );
     }
 
     cudaError_t err = cudaDeviceSynchronize();
