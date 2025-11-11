@@ -437,8 +437,8 @@ void launch_fp4_gemv_optimized(
 
     // Leaderboard Shape 1: M=7168, K=16384, L=1
     if (M == 7168 && K == 16384 && L == 1) {
-        constexpr int kTileM = 128;  // Larger tiles for better TC utilization
-        constexpr int kTileK = 256;
+        constexpr int kTileM = 64;   // Reduced to fit shared memory
+        constexpr int kTileK = 128;
         constexpr int kThreads = 256;
 
         int num_blocks_m = (M + kTileM - 1) / kTileM;
@@ -452,8 +452,8 @@ void launch_fp4_gemv_optimized(
     }
     // Leaderboard Shape 2: M=4096, K=7168, L=8
     else if (M == 4096 && K == 7168 && L == 8) {
-        constexpr int kTileM = 128;
-        constexpr int kTileK = 256;
+        constexpr int kTileM = 64;   // Reduced to fit shared memory
+        constexpr int kTileK = 128;
         constexpr int kThreads = 256;
 
         int num_blocks_m = (M + kTileM - 1) / kTileM;
@@ -467,8 +467,8 @@ void launch_fp4_gemv_optimized(
     }
     // Leaderboard Shape 3: M=7168, K=2048, L=4
     else if (M == 7168 && K == 2048 && L == 4) {
-        constexpr int kTileM = 128;
-        constexpr int kTileK = 128;  // Smaller K tile for shape
+        constexpr int kTileM = 64;   // Reduced to fit shared memory
+        constexpr int kTileK = 128;
         constexpr int kThreads = 256;
 
         int num_blocks_m = (M + kTileM - 1) / kTileM;
