@@ -13,77 +13,46 @@ cuda_source = r"""
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
-#include "cutlass/gemm/device/gemm_universal.h"
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/collective/collective_builder.hpp"
-#include "cutlass/epilogue/collective/collective_builder.hpp"
-#include "cutlass/epilogue/collective/default_epilogue.hpp"
+#include "cutlass/gemm/kernel/gemv_blockscaled.h"
 #include "cutlass/epilogue/thread/linear_combination.h"
 
-using namespace cute;
+// SM100 FP4 Block-Scaled GEMV configuration
+// Uses specialized GEMV kernel from CUTLASS example 91
 
-// CUTLASS 3.x SM100 FP4 GEMM configuration
-// Treating GEMV as GEMM with N=8 for tensor core efficiency
+using ElementA = cutlass::float_e2m1_t;      // FP4 E2M1 for matrix A
+using ElementB = cutlass::float_e2m1_t;      // FP4 E2M1 for vector B
+using ElementC = cutlass::half_t;            // FP16 for output
+using ElementAccumulator = float;            // FP32 accumulator
+using ElementSFA = cutlass::float_e4m3_t;    // FP8 E4M3 scale factors for A
+using ElementSFB = cutlass::float_e4m3_t;    // FP8 E4M3 scale factors for B
 
-using ElementA = cutlass::float_e2m1_t;
-using ElementB = cutlass::float_e2m1_t;
-using ElementC = cutlass::half_t;
-using ElementAccumulator = float;
-using ElementScaleFactor = cutlass::float_ue8m0_t;
+using LayoutA = cutlass::layout::RowMajor;   // A is row-major (M x K)
 
-using LayoutA = cutlass::layout::RowMajor;  // M x K
-using LayoutB = cutlass::layout::ColumnMajor;  // K x N (for TN layout)
-using LayoutC = cutlass::layout::RowMajor;  // M x N
-
-// SM100 architecture
-using ArchTag = cutlass::arch::Sm100;
-using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
-
-// Tile shape: use 128x8x256 for GEMV (small N)
-using TileShape = Shape<_128, _8, _256>;  // M, N, K
-using ClusterShape = Shape<_1, _1, _1>;   // No cluster for GEMV
-
-// Kernel schedule
-using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecialized1SmNvf4Sm100;
-using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecialized1SmNvf4;
-
-// Stage count for pipeline
-constexpr int Stages = 4;
-
-// For SM100 FP4, use explicit stage count instead of AutoCarveout
-using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-    ArchTag,
-    OperatorClass,
-    ElementA, LayoutA, 32,  // Alignment 32 for FP4
-    ElementB, LayoutB, 32,
-    ElementAccumulator,
-    TileShape, ClusterShape,
-    cutlass::gemm::collective::StageCount<Stages>,
-    KernelSchedule
->::CollectiveOp;
-
-// Epilogue: simple passthrough (D = alpha*acc + beta*C)
-using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-    ArchTag,
-    OperatorClass,
-    TileShape, ClusterShape,
-    cutlass::epilogue::collective::EpilogueTileAuto,
-    ElementAccumulator, ElementAccumulator,
-    ElementC, LayoutC, 16,  // Reduced alignment to 16
-    ElementC, LayoutC, 16,
-    EpilogueSchedule
->::CollectiveOp;
-
-// Define the GEMM kernel
-using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-    Shape<int, int, int, int>,  // Problem shape
-    CollectiveMainloop,
-    CollectiveEpilogue
+// Epilogue operation: D = alpha*accumulator + beta*C
+using EpilogueOutputOp = cutlass::epilogue::thread::LinearCombination<
+    ElementC,                // Output element type
+    1,                       // Elements per access
+    ElementAccumulator,      // Accumulator type
+    ElementAccumulator       // Compute type
 >;
 
-using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+// Define the specialized GEMV kernel for block-scaled FP4
+// Parameters: ElementsPerAccess=32 (for FP4), ThreadCount=128, ThreadsPerRow=16
+using GemvKernel = cutlass::gemm::kernel::GemvBlockScaled<
+    ElementA,                // Matrix A element type
+    LayoutA,                 // Matrix A layout (RowMajor)
+    ElementB,                // Vector B element type
+    ElementC,                // Output vector C element type
+    ElementAccumulator,      // Accumulator type
+    EpilogueOutputOp,        // Epilogue operation
+    32,                      // kElementsPerAccess (required for FP4)
+    128,                     // kThreadCount (threads per block)
+    16,                      // kThreadsPerRow (threads in K dimension)
+    ElementSFA,              // Scale factor A type (FP8 E4M3)
+    ElementSFB               // Scale factor B type (FP8 E4M3)
+>;
 
-// Host function to launch CUTLASS GEMM
+// Host function to launch CUTLASS FP4 GEMV
 void launch_cutlass_fp4_gemv(
     torch::Tensor A, torch::Tensor B,
     torch::Tensor SFA, torch::Tensor SFB,
@@ -93,80 +62,82 @@ void launch_cutlass_fp4_gemv(
     // Get pointers
     const ElementA* A_ptr = reinterpret_cast<const ElementA*>(A.data_ptr<uint8_t>());
     const ElementB* B_ptr = reinterpret_cast<const ElementB*>(B.data_ptr<uint8_t>());
-    const ElementScaleFactor* SFA_ptr = reinterpret_cast<const ElementScaleFactor*>(SFA.data_ptr<uint8_t>());
-    const ElementScaleFactor* SFB_ptr = reinterpret_cast<const ElementScaleFactor*>(SFB.data_ptr<uint8_t>());
+    const ElementSFA* SFA_ptr = reinterpret_cast<const ElementSFA*>(SFA.data_ptr<uint8_t>());
+    const ElementSFB* SFB_ptr = reinterpret_cast<const ElementSFB*>(SFB.data_ptr<uint8_t>());
     ElementC* D_ptr = reinterpret_cast<ElementC*>(D.data_ptr<at::Half>());
 
-    // For GEMV, treat as GEMM with N=8 then reduce
-    // This allows tensor cores to work efficiently
-    const int64_t N = 8;
+    // Dimensions
+    const int64_t K_packed = K / 2;      // FP4 is packed 2 per byte
+    const int64_t K_scales = K / 16;     // Scale factors every 16 elements
 
-    // Problem size for batch
-    typename Gemm::Arguments arguments;
+    // Setup epilogue params
+    typename EpilogueOutputOp::Params epilogue_params{
+        ElementAccumulator(1.0f),  // alpha
+        ElementAccumulator(0.0f)   // beta
+    };
 
-    // Run batched GEMM
+    // Run batched GEMV
     for (int64_t batch = 0; batch < L; batch++) {
         // Batch offsets
-        const int64_t K_packed = K / 2;  // FP4 is packed 2 per byte
-        const int64_t K_scales = K / 16;  // Scale factors every 16 elements
-
         const ElementA* A_batch = A_ptr + batch * M * K_packed;
-        const ElementB* B_batch = B_ptr + batch * 128 * K_packed;  // B padded to 128
-        const ElementScaleFactor* SFA_batch = SFA_ptr + batch * M * K_scales;
-        const ElementScaleFactor* SFB_batch = SFB_ptr + batch * 128 * K_scales;
+        const ElementB* B_batch = B_ptr + batch * 128 * K_packed;  // B padded to 128, use first row
+        const ElementSFA* SFA_batch = SFA_ptr + batch * M * K_scales;
+        const ElementSFB* SFB_batch = SFB_ptr + batch * 128 * K_scales;
         ElementC* D_batch = D_ptr + batch * M;
 
-        // Set up GEMM arguments
-        // Problem shape: M x N x K x batch (batch=1 for this iteration)
-        arguments.problem_shape = cutlass::gemm::GemmCoord(M, N, K);
-        arguments.mainloop.ptr_A = A_batch;
-        arguments.mainloop.ptr_B = B_batch;
-        arguments.mainloop.ptr_scale_A = SFA_batch;
-        arguments.mainloop.ptr_scale_B = SFB_batch;
-        arguments.epilogue.ptr_C = D_batch;
-        arguments.epilogue.ptr_D = D_batch;
+        // Create TensorRef for matrix A
+        cutlass::TensorRef<ElementA const, LayoutA> ref_A(A_batch, K_packed);
 
-        // Strides - use CuTe make_stride for CUTLASS 3.x
-        arguments.mainloop.dA = cute::make_stride(K, cute::Int<1>{}, cute::Int<0>{});  // Row-major: stride_M=K, stride_K=1
-        arguments.mainloop.dB = cute::make_stride(cute::Int<1>{}, K, cute::Int<0>{});  // Col-major: stride_N=1, stride_K=K
+        // GEMV kernel arguments
+        typename GemvKernel::Arguments arguments{
+            cutlass::MatrixCoord(M, K),     // problem_size (M rows, K columns)
+            1,                               // batch_count
+            epilogue_params,                 // epilogue params
+            ref_A,                           // ref_A
+            B_batch,                         // ptr_B
+            nullptr,                         // ptr_C (not used, beta=0)
+            D_batch,                         // ptr_D
+            K_packed,                        // stride_A (row stride in packed elements)
+            0,                               // batch_stride_A
+            0,                               // batch_stride_B
+            0,                               // batch_stride_C
+            0,                               // batch_stride_D
+            SFA_batch,                       // ptr_SFA
+            SFB_batch,                       // ptr_SFB
+            0,                               // batch_stride_SFA
+            0,                               // batch_stride_SFB
+            0                                // batch_stride_SFD
+        };
 
-        // Scale factor strides (block scaled with scale every 16 elements in K)
-        const int scale_k_stride = K_scales;
-        arguments.mainloop.dA_scale = cute::make_stride(scale_k_stride, cute::Int<1>{}, cute::Int<0>{});
-        arguments.mainloop.dB_scale = cute::make_stride(cute::Int<1>{}, scale_k_stride, cute::Int<0>{});
+        // Allocate shared memory (if needed)
+        size_t workspace_size = GemvKernel::get_workspace_size(arguments);
 
-        arguments.epilogue.dC = cute::make_stride(N, cute::Int<1>{}, cute::Int<0>{});  // Row-major: stride_M=N, stride_N=1
-        arguments.epilogue.dD = cute::make_stride(N, cute::Int<1>{}, cute::Int<0>{});  // Row-major: stride_M=N, stride_N=1
-
-        // Epilogue arguments (alpha=1, beta=0 for C=A*B)
-        arguments.epilogue.alpha = 1.0f;
-        arguments.epilogue.beta = 0.0f;
-
-        // Create GEMM operator
-        Gemm gemm_op;
-
-        // Check if arguments are valid
-        cutlass::Status status = gemm_op.can_implement(arguments);
+        // Check if kernel can be implemented
+        cutlass::Status status = GemvKernel::can_implement(arguments);
         if (status != cutlass::Status::kSuccess) {
-            throw std::runtime_error("CUTLASS GEMM cannot be implemented!");
+            throw std::runtime_error("CUTLASS GEMV cannot be implemented with these parameters!");
         }
 
-        // Initialize
-        status = gemm_op.initialize(arguments);
-        if (status != cutlass::Status::kSuccess) {
-            throw std::runtime_error("CUTLASS GEMM initialization failed!");
-        }
+        // Launch kernel
+        dim3 grid = GemvKernel::get_grid_shape(arguments);
+        dim3 block = GemvKernel::get_block_shape();
 
-        // Run
-        status = gemm_op();
-        if (status != cutlass::Status::kSuccess) {
-            throw std::runtime_error("CUTLASS GEMM execution failed!");
-        }
+        // Allocate shared memory
+        int smem_size = int(sizeof(typename GemvKernel::SharedStorage));
+
+        // Launch
+        cutlass::Kernel<GemvKernel><<<grid, block, smem_size>>>(arguments);
     }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err));
+    }
+
+    // Synchronize to catch any runtime errors
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA sync error: ") + cudaGetErrorString(err));
     }
 }
 """
@@ -187,7 +158,7 @@ def get_module():
     global module
     if module is None:
         module = load_inline(
-            name="nvfp4_gemv_cutlass_v7_fixed",
+            name="nvfp4_gemv_blockscaled",
             cpp_sources=cpp_source,
             cuda_sources=cuda_source,
             functions=["launch_cutlass_fp4_gemv"],
@@ -198,7 +169,7 @@ def get_module():
                 "-std=c++17",
                 "-arch=sm_100a",
                 "--expt-relaxed-constexpr",
-                "-Xcudafe", "--diag_suppress=20012",  # Suppress CuTe warnings
+                "-Xcudafe", "--diag_suppress=20012",
                 f"-I{cutlass_path}/include",
                 f"-I{cutlass_path}/tools/util/include",
             ],
@@ -209,28 +180,31 @@ def get_module():
 
 def custom_kernel(data: input_t) -> output_t:
     """
-    B200-optimized FP4 GEMV using CUTLASS CollectiveBuilder.
+    B200-optimized FP4 GEMV using CUTLASS GemvBlockScaled kernel.
 
-    Leverages SM100 tensor cores via CUTLASS 3.x API with block-scaled FP4.
+    Leverages SM100 tensor cores via specialized GEMV kernel with block-scaled FP4.
     Target: < 10 µs geom_mean
     """
-    a, b, sfa, sfb, _, _, c = data
+    a, b, sfa_ref_cpu, sfb_ref_cpu, _, _, c = data
 
     M, _, L = c.shape
     K = a.shape[1] * 2
 
-    # Permute to [L, M, K/2] layout
+    # Permute to [L, M, K/2] layout for matrix data
     a = a.permute(2, 0, 1).cuda().contiguous()
     b = b.permute(2, 0, 1).cuda().contiguous()
-    sfa = sfa.permute(2, 0, 1).cuda().contiguous()
-    sfb = sfb.permute(2, 0, 1).cuda().contiguous()
     c = c.permute(2, 0, 1).cuda().contiguous()
 
-    # Launch CUTLASS GEMM
+    # Use simple scale factor format [M, K_scales, L] -> [L, M, K_scales]
+    # CUTLASS GEMV kernel expects simple layout, not CuTe-permuted format
+    sfa = sfa_ref_cpu.permute(2, 0, 1).cuda().contiguous().to(dtype=torch.float8_e4m3fn)
+    sfb = sfb_ref_cpu.permute(2, 0, 1).cuda().contiguous().to(dtype=torch.float8_e4m3fn)
+
+    # Launch CUTLASS GEMV
     mod = get_module()
     mod.launch_cutlass_fp4_gemv(a, b, sfa, sfb, c, M, K, L)
 
-    # Permute output back
+    # Permute output back to [M, 1, L]
     c = c.permute(1, 2, 0).contiguous()
 
     return c
