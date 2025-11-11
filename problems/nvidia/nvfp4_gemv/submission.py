@@ -72,8 +72,9 @@ fp4_gemv_sm100_mma_kernel(
     __shared__ half A_smem[kTileM][kTileK + 8];  // +8 for bank conflict avoidance
     __shared__ half B_smem[kTileK][8];           // Broadcast to 8 for MMA atom
 
-    // Per-warp accumulators
-    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    // Per-warp accumulators (sized for rows_per_warp)
+    constexpr int rows_per_warp = kTileM / (kThreads / 32);
+    float acc[rows_per_warp] = {0.0f};
 
     // Main K-dimension loop (tiled computation)
     for (int k_tile = 0; k_tile < K; k_tile += kTileK) {
@@ -151,9 +152,6 @@ fp4_gemv_sm100_mma_kernel(
         // Each warp processes multiple rows with lane-level parallelism
         // ====================================================================
 
-        // Each warp processes rows based on warp_id
-        const int rows_per_warp = kTileM / num_warps;
-
         #pragma unroll
         for (int r = 0; r < rows_per_warp; r++) {
             const int local_row = warp_id * rows_per_warp + r;
@@ -188,23 +186,17 @@ fp4_gemv_sm100_mma_kernel(
     }
 
     // ========================================================================
-    // Phase 3: Warp reduction and write output
+    // Phase 3: Write output (each warp writes its own rows)
     // ========================================================================
 
-    // Reduce across warp
-    #pragma unroll
-    for (int i = 0; i < 4; i++) {
-        #pragma unroll
-        for (int offset = 16; offset > 0; offset /= 2) {
-            acc[i] += __shfl_xor_sync(0xFFFFFFFF, acc[i], offset);
-        }
-    }
-
-    // Write output (lane 0 of each warp)
+    // Each warp writes its accumulated results (only lane 0 has valid data)
     if (lane_id == 0) {
-        int m_warp = warp_id * 16;
-        for (int i = 0; i < 4 && (m_cta + m_warp + i) < M; i++) {
-            D[m_cta + m_warp + i] = __float2half(acc[i]);
+        #pragma unroll
+        for (int r = 0; r < rows_per_warp; r++) {
+            const int global_row = m_cta + warp_id * rows_per_warp + r;
+            if (global_row < M) {
+                D[global_row] = __float2half(acc[r]);
+            }
         }
     }
 }
