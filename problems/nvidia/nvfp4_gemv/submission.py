@@ -20,15 +20,15 @@ cuda_source = r"""
 
 using namespace cute;
 
-// Kernel configuration tuned for B200 with shared memory constraints
-constexpr int kTM = 128;      // M tile: 128 rows per block (reduced to fit smem)
-constexpr int kTK = 192;      // K tile: 192 elements (reduced to fit smem)
+// Kernel configuration tuned for B200 - fits within 48KB static shared memory
+constexpr int kTM = 64;       // M tile: 64 rows per block (fits in 48KB static smem)
+constexpr int kTK = 128;      // K tile: 128 elements
 constexpr int kThreads = 256; // 8 warps * 32 threads
 constexpr int kWarps = 8;
 constexpr int kVecSize = 16;  // FP4 block size
 
 // Warp tile configuration for MMA
-constexpr int kWarpM = 16;    // Each warp processes 16 rows (adjusted for kTM=128)
+constexpr int kWarpM = 8;     // Each warp processes 8 rows
 constexpr int kWarpK = 64;    // Process 64 K elements at a time
 
 // FP4 E2M1 lookup table for faster decoding
@@ -222,8 +222,8 @@ fused_fp4_gemv_mma_kernel(
         __syncthreads();
 
         // === Phase 3: Compute using warp-level primitives ===
-        // With kWarpM=16, each warp processes 16 rows, distributed across 32 threads
-        // Each thread handles rows at lane_id and potentially lane_id + 32 (but 16 < 32, so just lane_id)
+        // With kWarpM=8, each warp processes 8 rows, distributed across 32 threads
+        // Each thread handles its assigned row (lane_id < 8)
         if (warp_m_start < m_rows) {
             int m_local = warp_m_start + lane_id;
             if (m_local < warp_m_end && m_local < m_rows) {
@@ -279,13 +279,13 @@ void launch_ultimate_fp4_gemv(
     dim3 block(kThreads);
 
     // Calculate shared memory requirement
-    // With kTM=128, kTK=192: ~108 KB (well within B200's 228 KB limit)
+    // With kTM=64, kTK=128: ~37 KB (fits within 48KB static shared memory limit)
     size_t smem_size = sizeof(float) * (
-        kTM * (kTK + 8) +           // smem_a: 128 * 200 = 25,600
-        (kTK + 8) +                  // smem_b: 200
-        kTM * (kTK/kVecSize + 1) +  // smem_sfa: 128 * 13 = 1,664
-        (kTK/kVecSize + 1)          // smem_sfb: 13
-    );  // Total: 27,477 floats * 4 bytes = ~107 KB
+        kTM * (kTK + 8) +           // smem_a: 64 * 136 = 8,704
+        (kTK + 8) +                  // smem_b: 136
+        kTM * (kTK/kVecSize + 1) +  // smem_sfa: 64 * 9 = 576
+        (kTK/kVecSize + 1)          // smem_sfb: 9
+    );  // Total: 9,425 floats * 4 bytes = ~37 KB
 
     // Get raw pointers
     const uint8_t* A_ptr = A.view(torch::kUInt8).data_ptr<uint8_t>();
@@ -334,8 +334,9 @@ module = None
 def get_module():
     global module
     if module is None:
+        # Changed name to force recompilation with fixed shared memory usage
         module = load_inline(
-            name="ultimate_fp4_gemv_mma",
+            name="nvfp4_gemv_v2_fixed",
             cpp_sources=cpp_source,
             cuda_sources=cuda_source,
             functions=["launch_ultimate_fp4_gemv"],
