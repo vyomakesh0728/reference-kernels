@@ -36,6 +36,32 @@ constexpr int kWarpsPerBlock = kBlockSize / 32;
 // Vectorized loads: 16 bytes = 128 bits
 constexpr int kVecSize = 16;
 
+// FP4 E2M1 lookup table for decoding nibbles to float
+// E2M1: 1 sign bit, 2 exponent bits, 1 mantissa bit, bias=1
+// Positive values: 0, 0.5, 1, 1.5, 2, 3, 4, 6
+__device__ const float fp4_e2m1_lut[16] = {
+    0.0f,   // 0000: +0
+    0.5f,   // 0001: +0.5 (denormal)
+    1.0f,   // 0010: +1
+    1.5f,   // 0011: +1.5
+    2.0f,   // 0100: +2
+    3.0f,   // 0101: +3
+    4.0f,   // 0110: +4
+    6.0f,   // 0111: +6
+    -0.0f,  // 1000: -0
+    -0.5f,  // 1001: -0.5 (denormal)
+    -1.0f,  // 1010: -1
+    -1.5f,  // 1011: -1.5
+    -2.0f,  // 1100: -2
+    -3.0f,  // 1101: -3
+    -4.0f,  // 1110: -4
+    -6.0f   // 1111: -6
+};
+
+__forceinline__ __device__ float decode_fp4_e2m1(uint8_t nibble) {
+    return fp4_e2m1_lut[nibble & 0x0F];
+}
+
 __global__ void fp4_gemv_dynamic_smem_kernel(
     const uint8_t* __restrict__ A,        // [M, K/2] FP4 matrix (packed)
     const uint8_t* __restrict__ B,        // [128, K/2] FP4 vector (packed, padded to 128)
@@ -160,15 +186,15 @@ __global__ void fp4_gemv_dynamic_smem_kernel(
                             *reinterpret_cast<const cutlass::float_e4m3_t*>(&SFB_smem[scale_idx])
                         ));
 
-                        // Unpack and accumulate both nibbles
+                        // Decode FP4 E2M1 nibbles and apply scale factors
                         // Low nibble (bits 0-3)
-                        float a_low = float((a_packed & 0x0F)) * scale_a;
-                        float b_low = float((b_packed & 0x0F)) * scale_b;
+                        float a_low = decode_fp4_e2m1(a_packed & 0x0F) * scale_a;
+                        float b_low = decode_fp4_e2m1(b_packed & 0x0F) * scale_b;
                         local_sum += a_low * b_low;
 
                         // High nibble (bits 4-7)
-                        float a_high = float((a_packed >> 4) & 0x0F) * scale_a;
-                        float b_high = float((b_packed >> 4) & 0x0F) * scale_b;
+                        float a_high = decode_fp4_e2m1((a_packed >> 4) & 0x0F) * scale_a;
+                        float b_high = decode_fp4_e2m1((b_packed >> 4) & 0x0F) * scale_b;
                         local_sum += a_high * b_high;
                     }
                 }
