@@ -87,12 +87,13 @@ fp4_gemv_sm100_tc_optimized(
     constexpr int kNumMmaM = kTileM / kMmaM;  // Number of MMA tiles in M
     constexpr int kNumMmaK = kTileK / kMmaK;  // Number of MMA tiles in K
 
-    // Accumulators: each warp processes multiple M tiles
-    // For GEMV, we accumulate across N dimension (which is broadcast)
-    float acc[kNumMmaM];
+    // Accumulators: Each thread owns 2 rows per MMA tile (2x2 output fragment)
+    // For GEMV, we sum across the 2 columns to get one value per row
+    float acc[kNumMmaM][2];  // [MMA tile][2 rows owned by this thread]
     #pragma unroll
     for (int i = 0; i < kNumMmaM; i++) {
-        acc[i] = 0.0f;
+        acc[i][0] = 0.0f;
+        acc[i][1] = 0.0f;
     }
 
     // Main K loop
@@ -224,30 +225,31 @@ fp4_gemv_sm100_tc_optimized(
                 }
                 #endif
 
-                // Accumulate results (sum across N dimension for GEMV)
-                #pragma unroll
-                for (int i = 0; i < 4; i++) {
-                    acc[m_mma] += c_frag[i];
-                }
+                // Accumulate results: c_frag has 2x2 outputs for this thread
+                // c_frag[0,1] = row 2*(lane_id/4), cols [2*(lane_id%4), 2*(lane_id%4)+1]
+                // c_frag[2,3] = row 2*(lane_id/4)+1, cols [2*(lane_id%4), 2*(lane_id%4)+1]
+                // Since B is broadcast, sum across columns
+                acc[m_mma][0] += c_frag[0] + c_frag[1];  // First row
+                acc[m_mma][1] += c_frag[2] + c_frag[3];  // Second row
             }
         }
     }
 
     // ========================================================================
-    // Write output - each warp writes its MMA tile results
+    // Write output - each thread writes its 2 owned rows per MMA tile
     // ========================================================================
-    if (lane_id == 0) {
-        #pragma unroll
-        for (int m_mma = 0; m_mma < kNumMmaM; m_mma++) {
-            if (warp_id == (m_mma % num_warps)) {
-                #pragma unroll
-                for (int m_off = 0; m_off < kMmaM; m_off++) {
-                    const int global_row = m_cta + m_mma * kMmaM + m_off;
-                    if (global_row < M) {
-                        // Divide by kMmaN since we summed across 8 columns
-                        D_batch[global_row] = __float2half(acc[m_mma] / float(kMmaN));
-                    }
-                }
+    #pragma unroll
+    for (int m_mma = 0; m_mma < kNumMmaM; m_mma++) {
+        if (warp_id == (m_mma % num_warps)) {
+            // Each thread owns 2 rows in the MMA output
+            int row0 = m_cta + m_mma * kMmaM + 2 * (lane_id / 4);
+            int row1 = row0 + 1;
+
+            if (row0 < M) {
+                D_batch[row0] = __float2half(acc[m_mma][0]);
+            }
+            if (row1 < M) {
+                D_batch[row1] = __float2half(acc[m_mma][1]);
             }
         }
     }
