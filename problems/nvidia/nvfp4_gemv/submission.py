@@ -23,14 +23,14 @@ using ElementC = cutlass::half_t;            // FP16 for output
 using ElementSFA = cutlass::float_e4m3_t;    // FP8 E4M3 scale factors for A
 using ElementSFB = cutlass::float_e4m3_t;    // FP8 E4M3 scale factors for B
 
-// Tile sizes: Use large tiles with dynamic shared memory
-// TM=256, TK=512 (packed as 256 bytes)
-constexpr int kTileM = 256;
-constexpr int kTileK = 512;
+// Tile sizes: Optimized for occupancy (allows 6 blocks per SM)
+// TM=128, TK=256 reduces shared memory to ~35KB
+constexpr int kTileM = 128;
+constexpr int kTileK = 256;
 constexpr int kTileK_packed = kTileK / 2;  // FP4 packed 2 per byte
 
-// Thread block configuration
-constexpr int kBlockSize = 256;
+// Thread block configuration: Increased for better SM utilization
+constexpr int kBlockSize = 512;
 constexpr int kWarpsPerBlock = kBlockSize / 32;
 
 // Vectorized loads: 16 bytes = 128 bits
@@ -86,12 +86,14 @@ __global__ void fp4_gemv_dynamic_smem_kernel(
     const int tid = threadIdx.x;
     const int M_tile_idx = blockIdx.x;
     const int m_start = M_tile_idx * kTileM;
+    const int warp_id = tid / 32;
+    const int lane_id = tid % 32;
 
-    // Each thread accumulates results for multiple rows
-    constexpr int kRowsPerThread = kTileM / kBlockSize;
-    float acc[kRowsPerThread];
+    // Each warp handles multiple rows: 128 rows / 16 warps = 8 rows per warp
+    constexpr int kRowsPerWarp = kTileM / kWarpsPerBlock;
+    float acc[kRowsPerWarp];
     #pragma unroll
-    for (int i = 0; i < kRowsPerThread; i++) {
+    for (int i = 0; i < kRowsPerWarp; i++) {
         acc[i] = 0.0f;
     }
 
@@ -153,68 +155,75 @@ __global__ void fp4_gemv_dynamic_smem_kernel(
 
         __syncthreads();
 
-        // Compute: Each thread handles kRowsPerThread rows
+        // Compute: Warp-parallelized with reduction for better throughput
+        // Each warp processes kRowsPerWarp rows
         #pragma unroll
-        for (int r = 0; r < kRowsPerThread; r++) {
-            const int local_row = tid * kRowsPerThread + r;
+        for (int r = 0; r < kRowsPerWarp; r++) {
+            const int local_row = warp_id * kRowsPerWarp + r;
             if (local_row >= kTileM) continue;
 
             const int m_idx = m_start + local_row;
             if (m_idx >= M) continue;
 
-            // Accumulate dot product over K tile
             float local_sum = 0.0f;
 
-            // Process 32 FP4 elements (16 bytes packed) at a time
-            for (int k = 0; k < k_packed_size; k += 16) {
-                // Load 16 packed FP4 values from A (32 FP4 elements)
-                // Load 16 packed FP4 values from B (32 FP4 elements)
-                // Unpack, multiply with scale factors, accumulate
+            // Each lane processes a portion of K
+            #pragma unroll 4
+            for (int k_base = lane_id; k_base < k_packed_size; k_base += 32) {
+                if (k_base >= k_packed_size) break;
 
-                // Simple scalar implementation (can be optimized with tensor cores)
-                for (int kk = 0; kk < 16 && (k + kk) < k_packed_size; kk++) {
-                    uint8_t a_packed = A_smem[local_row * k_packed_size + k + kk];
-                    uint8_t b_packed = B_smem[k + kk];
+                // Load packed byte
+                uint8_t a_packed = A_smem[local_row * k_packed_size + k_base];
+                uint8_t b_packed = B_smem[k_base];
 
-                    // Get scale factors (one per 8 packed bytes = 16 FP4 elements)
-                    const int scale_idx = (k + kk) / 8;
-                    if (scale_idx < k_scale_size) {
-                        float scale_a = __half2float(__float2half_rn(
-                            *reinterpret_cast<const cutlass::float_e4m3_t*>(&SFA_smem[local_row * k_scale_size + scale_idx])
-                        ));
-                        float scale_b = __half2float(__float2half_rn(
-                            *reinterpret_cast<const cutlass::float_e4m3_t*>(&SFB_smem[scale_idx])
-                        ));
+                // Get scale factor index
+                const int scale_idx = k_base / 8;
+                if (scale_idx >= k_scale_size) continue;
 
-                        // Decode FP4 E2M1 nibbles and apply scale factors
-                        // Low nibble (bits 0-3)
-                        float a_low = decode_fp4_e2m1(a_packed & 0x0F) * scale_a;
-                        float b_low = decode_fp4_e2m1(b_packed & 0x0F) * scale_b;
-                        local_sum += a_low * b_low;
+                float scale_a = __half2float(__float2half_rn(
+                    *reinterpret_cast<const cutlass::float_e4m3_t*>(
+                        &SFA_smem[local_row * k_scale_size + scale_idx])
+                ));
+                float scale_b = __half2float(__float2half_rn(
+                    *reinterpret_cast<const cutlass::float_e4m3_t*>(&SFB_smem[scale_idx])
+                ));
 
-                        // High nibble (bits 4-7)
-                        float a_high = decode_fp4_e2m1((a_packed >> 4) & 0x0F) * scale_a;
-                        float b_high = decode_fp4_e2m1((b_packed >> 4) & 0x0F) * scale_b;
-                        local_sum += a_high * b_high;
-                    }
-                }
+                // Process both nibbles
+                float a_low = decode_fp4_e2m1(a_packed & 0x0F) * scale_a;
+                float b_low = decode_fp4_e2m1(b_packed & 0x0F) * scale_b;
+                local_sum += a_low * b_low;
+
+                float a_high = decode_fp4_e2m1((a_packed >> 4) & 0x0F) * scale_a;
+                float b_high = decode_fp4_e2m1((b_packed >> 4) & 0x0F) * scale_b;
+                local_sum += a_high * b_high;
             }
 
-            acc[r] += local_sum;
+            // Warp-level reduction using shuffle
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset /= 2) {
+                local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+            }
+
+            // Lane 0 accumulates result
+            if (lane_id == 0) {
+                acc[r] += local_sum;
+            }
         }
 
         __syncthreads();
     }
 
-    // Write outputs
-    #pragma unroll
-    for (int r = 0; r < kRowsPerThread; r++) {
-        const int local_row = tid * kRowsPerThread + r;
-        if (local_row >= kTileM) continue;
+    // Write outputs - only lane 0 of each warp writes
+    if (lane_id == 0) {
+        #pragma unroll
+        for (int r = 0; r < kRowsPerWarp; r++) {
+            const int local_row = warp_id * kRowsPerWarp + r;
+            if (local_row >= kTileM) continue;
 
-        const int m_idx = m_start + local_row;
-        if (m_idx < M) {
-            D[m_idx] = __float2half(acc[r]);
+            const int m_idx = m_start + local_row;
+            if (m_idx < M) {
+                D[m_idx] = __float2half(acc[r]);
+            }
         }
     }
 }
