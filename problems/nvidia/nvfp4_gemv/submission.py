@@ -147,79 +147,42 @@ fp4_gemv_sm100_mma_kernel(
         __syncthreads();
 
         // ====================================================================
-        // Phase 2: Compute using SM100 tensor cores (PTX mma.sync path)
+        // Phase 2: Compute dot product (simple correct implementation)
+        // Each warp processes multiple rows with lane-level parallelism
         // ====================================================================
 
-        // Process K dimension in MMA atom chunks (16 for FP16)
-        for (int k_chunk = 0; k_chunk < kTileK; k_chunk += 16) {
-            // Each warp processes multiple M tiles
-            const int m_warp = warp_id * 16;  // 16 rows per warp
-            if (m_warp >= kTileM) continue;
+        // Each warp processes rows based on warp_id
+        const int rows_per_warp = kTileM / num_warps;
 
-            // Load A fragment: 16x16 tile distributed across warp
-            half a_reg[8];
-            #pragma unroll
-            for (int i = 0; i < 8; i++) {
-                int row = m_warp + (lane_id / 4) + ((i / 4) * 8);
-                int col = k_chunk + (lane_id % 4) * 2 + ((i % 4) / 2);
-                if (row < kTileM && col < kTileK) {
-                    a_reg[i] = A_smem[row][col];
-                } else {
-                    a_reg[i] = __float2half(0.0f);
-                }
+        #pragma unroll
+        for (int r = 0; r < rows_per_warp; r++) {
+            const int local_row = warp_id * rows_per_warp + r;
+            if (local_row >= kTileM) continue;
+
+            const int global_row = m_cta + local_row;
+            if (global_row >= M) continue;
+
+            // Each lane processes strided elements across K
+            float local_sum = 0.0f;
+
+            #pragma unroll 4
+            for (int k = lane_id; k < kTileK; k += 32) {
+                // Compute A * B for this K element
+                // B is broadcast to all 8 columns, so we use column 0
+                half a_val = A_smem[local_row][k];
+                half b_val = B_smem[k][0];
+                local_sum += __half2float(a_val) * __half2float(b_val);
             }
 
-            // Load B fragment: 16x8 tile
-            half b_reg[4];
+            // Warp-level reduction
             #pragma unroll
-            for (int i = 0; i < 4; i++) {
-                int row = k_chunk + (lane_id / 4) + (i * 4);
-                int col = (lane_id % 4) * 2;
-                if (row < kTileK && col < 8) {
-                    b_reg[i] = B_smem[row][col];
-                } else {
-                    b_reg[i] = __float2half(0.0f);
-                }
+            for (int offset = 16; offset > 0; offset /= 2) {
+                local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
             }
 
-            // ================================================================
-            // PTX MMA.SYNC for SM100 Tensor Cores (Blackwell)
-            // Instruction: mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
-            // Fragment sizes: A=4 regs (16×16 FP16), B=2 regs (16×8 FP16), C=4 regs (16×8 FP32)
-            // ================================================================
-            float c_reg[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-
-            #if __CUDA_ARCH__ >= 1000
-            // SM100 Blackwell tensor core via PTX
-            // Cast fragments to uint32_t for register packing
-            uint32_t const *a_ptr = reinterpret_cast<uint32_t const*>(&a_reg[0]);
-            uint32_t const *b_ptr = reinterpret_cast<uint32_t const*>(&b_reg[0]);
-
-            // Correct operand counts: A=4, B=2, C/D=4 (per SM100 spec)
-            asm volatile(
-                "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                "{%0, %1, %2, %3}, "        // Output C: 4× f32
-                "{%4, %5, %6, %7}, "        // Input A: 4× r32 (16×16 FP16)
-                "{%8, %9}, "                // Input B: 2× r32 (16×8 FP16) - FIXED!
-                "{%10, %11, %12, %13};"     // Input D: 4× f32 (accumulator)
-                : "=f"(c_reg[0]), "=f"(c_reg[1]), "=f"(c_reg[2]), "=f"(c_reg[3])
-                : "r"(a_ptr[0]), "r"(a_ptr[1]), "r"(a_ptr[2]), "r"(a_ptr[3]),
-                  "r"(b_ptr[0]), "r"(b_ptr[1]),  // Only 2 registers for B matrix
-                  "f"(c_reg[0]), "f"(c_reg[1]), "f"(c_reg[2]), "f"(c_reg[3])
-            );
-            #else
-            // Fallback for non-SM100 (should not be used on B200)
-            for (int i = 0; i < 8; i++) {
-                for (int j = 0; j < 4; j++) {
-                    c_reg[0] += __half2float(a_reg[i]) * __half2float(b_reg[j]);
-                }
-            }
-            #endif
-
-            // Accumulate results
-            #pragma unroll
-            for (int i = 0; i < 4; i++) {
-                acc[i] += c_reg[i];
+            // Accumulate in first thread of warp
+            if (lane_id == 0) {
+                acc[r] += local_sum;
             }
         }
     }
