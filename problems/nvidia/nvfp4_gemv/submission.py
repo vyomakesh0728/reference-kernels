@@ -50,7 +50,7 @@ using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecialized1SmNvf4;
 // Stage count for pipeline
 constexpr int Stages = 4;
 
-// Use CUTLASS CollectiveBuilder for mainloop
+// For SM100 FP4, use explicit stage count instead of AutoCarveout
 using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
     ArchTag,
     OperatorClass,
@@ -58,23 +58,19 @@ using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder
     ElementB, LayoutB, 32,
     ElementAccumulator,
     TileShape, ClusterShape,
-    cutlass::gemm::collective::StageCountAutoCarveout<
-        static_cast<int>(sizeof(typename cutlass::epilogue::collective::detail::Sm90TmaWarpSpecialized1SmInternalParams<
-            ElementC, LayoutC
-        >::SmemLayoutAtom))
-    >,
+    cutlass::gemm::collective::StageCount<Stages>,
     KernelSchedule
 >::CollectiveOp;
 
-// Epilogue: simple passthrough (D = C)
+// Epilogue: simple passthrough (D = alpha*acc + beta*C)
 using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
     ArchTag,
     OperatorClass,
     TileShape, ClusterShape,
     cutlass::epilogue::collective::EpilogueTileAuto,
     ElementAccumulator, ElementAccumulator,
-    ElementC, LayoutC, 32,
-    ElementC, LayoutC, 32,
+    ElementC, LayoutC, 16,  // Reduced alignment to 16
+    ElementC, LayoutC, 16,
     EpilogueSchedule
 >::CollectiveOp;
 
@@ -130,19 +126,21 @@ void launch_cutlass_fp4_gemv(
         arguments.epilogue.ptr_C = D_batch;
         arguments.epilogue.ptr_D = D_batch;
 
-        // Strides
-        arguments.mainloop.dA = cutlass::make_cute_packed_stride(
-            typename GemmKernel::StrideA{}, {M, K, 1}
-        );
-        arguments.mainloop.dB = cutlass::make_cute_packed_stride(
-            typename GemmKernel::StrideB{}, {N, K, 1}
-        );
-        arguments.epilogue.dC = cutlass::make_cute_packed_stride(
-            typename GemmKernel::StrideC{}, {M, N, 1}
-        );
-        arguments.epilogue.dD = cutlass::make_cute_packed_stride(
-            typename GemmKernel::StrideD{}, {M, N, 1}
-        );
+        // Strides - use CuTe make_stride for CUTLASS 3.x
+        arguments.mainloop.dA = cute::make_stride(K, cute::Int<1>{}, cute::Int<0>{});  // Row-major: stride_M=K, stride_K=1
+        arguments.mainloop.dB = cute::make_stride(cute::Int<1>{}, K, cute::Int<0>{});  // Col-major: stride_N=1, stride_K=K
+
+        // Scale factor strides (block scaled with scale every 16 elements in K)
+        const int scale_k_stride = K_scales;
+        arguments.mainloop.dA_scale = cute::make_stride(scale_k_stride, cute::Int<1>{}, cute::Int<0>{});
+        arguments.mainloop.dB_scale = cute::make_stride(cute::Int<1>{}, scale_k_stride, cute::Int<0>{});
+
+        arguments.epilogue.dC = cute::make_stride(N, cute::Int<1>{}, cute::Int<0>{});  // Row-major: stride_M=N, stride_N=1
+        arguments.epilogue.dD = cute::make_stride(N, cute::Int<1>{}, cute::Int<0>{});  // Row-major: stride_M=N, stride_N=1
+
+        // Epilogue arguments (alpha=1, beta=0 for C=A*B)
+        arguments.epilogue.alpha = 1.0f;
+        arguments.epilogue.beta = 0.0f;
 
         // Create GEMM operator
         Gemm gemm_op;
@@ -189,7 +187,7 @@ def get_module():
     global module
     if module is None:
         module = load_inline(
-            name="nvfp4_gemv_cutlass_v6",
+            name="nvfp4_gemv_cutlass_v7_fixed",
             cpp_sources=cpp_source,
             cuda_sources=cuda_source,
             functions=["launch_cutlass_fp4_gemv"],
