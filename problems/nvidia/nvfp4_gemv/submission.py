@@ -228,9 +228,9 @@ fp4_gemv_sm100_tc_optimized(
                 // Accumulate results: c_frag has 2x2 outputs for this thread
                 // c_frag[0,1] = row 2*(lane_id/4), cols [2*(lane_id%4), 2*(lane_id%4)+1]
                 // c_frag[2,3] = row 2*(lane_id/4)+1, cols [2*(lane_id%4), 2*(lane_id%4)+1]
-                // Since B is broadcast, sum across columns
-                acc[m_mma][0] += c_frag[0] + c_frag[1];  // First row
-                acc[m_mma][1] += c_frag[2] + c_frag[3];  // Second row
+                // Since B is broadcast, all columns are identical - use first column only
+                acc[m_mma][0] += c_frag[0];  // First row, first column
+                acc[m_mma][1] += c_frag[2];  // Second row, first column
             }
         }
     }
