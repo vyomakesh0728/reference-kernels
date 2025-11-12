@@ -255,24 +255,20 @@ fp4_gemv_sm100_tc_optimized(
         // Using tcgen05.mma.f16 instructions via CuTe API
         // ====================================================================
 
-        // MMA configuration: SM100 FP16 tensor core with m16n8k16 atom
+        // MMA configuration: SM100 FP16 tensor core - M must be 64 or 128!
         // Template params: <a_type, b_type, c_type, M, N, a_major, b_major, a_neg, b_neg>
         using MMAOp = SM100_MMA_F16BF16_SS<
             cutlass::half_t,      // A type: FP16
             cutlass::half_t,      // B type: FP16
             float,                 // C type: FP32 accumulator
-            16, 8,                 // M=16, N=8 (m16n8k16 atom)
+            64, 8,                 // M=64 (kTileM!), N=8 (GEMV broadcast)
             UMMA::Major::K,        // A major: K-major (row-major)
             UMMA::Major::K,        // B major: K-major (row-major)
             UMMA::ScaleIn::One,    // A scale: no negation
             UMMA::ScaleIn::One     // B scale: no negation
         >;
         using MMAAtom = MMA_Atom<MMAOp>;
-        using TiledMMA = TiledMMA<MMAAtom, Layout<Shape<_16,_1,_1>>>;
-
-        constexpr int kMmaM = 16;
-        constexpr int kMmaK = 16;
-        constexpr int kNumMmaK = kTileK / kMmaK;  // 256/16 = 16
+        using TiledMMA = TiledMMA<MMAAtom, Layout<Shape<_1,_1,_1>>>;
 
         // Create CuTe tensors from shared memory
         auto gA = make_tensor(make_smem_ptr(&A_smem[0][0]),
@@ -284,43 +280,38 @@ fp4_gemv_sm100_tc_optimized(
 
         // Partition tensors for this thread
         TiledMMA tiled_mma;
-        auto tCrA = tiled_mma.partition_fragment_A(gA);
-        auto tCrB = tiled_mma.partition_fragment_B(gB);
-        auto tCrC = tiled_mma.make_fragment_C();
 
-        // Clear accumulator
+        // Create accumulator (persistent across K tiles)
+        auto tCrC = tiled_mma.make_fragment_C();
         clear(tCrC);
 
-        // Process K dimension with MMA operations
-        for (int k_mma = 0; k_mma < kNumMmaK; ++k_mma) {
-            // Slice K tiles for this MMA operation
-            auto tCrA_view = tCrA(_, _, k_mma);
-            auto tCrB_view = tCrB(_, _, k_mma);
+        // Process K dimension in tiles (MMA processes 16 elements of K at a time)
+        constexpr int kMmaK = 16;
+        constexpr int kNumMmaK = kTileK / kMmaK;  // 256/16 = 16
 
-            // Perform MMA: C = A * B
-            gemm(tiled_mma, tCrA_view, tCrB_view, tCrC);
+        for (int k_tile = 0; k_tile < kNumMmaK; ++k_tile) {
+            // Slice K dimension for this iteration
+            auto gA_slice = local_tile(gA, make_tile(Int<kTileM>{}, Int<kMmaK>{}), make_coord(0, k_tile));
+            auto gB_slice = local_tile(gB, make_tile(Int<kMmaK>{}, _8{}), make_coord(k_tile, 0));
+
+            auto tCrA = tiled_mma.partition_fragment_A(gA_slice);
+            auto tCrB = tiled_mma.partition_fragment_B(gB_slice);
+
+            // Perform MMA: C += A * B (accumulate across K tiles)
+            gemm(tiled_mma, tCrA, tCrB, tCrC);
         }
 
         // Accumulate MMA results to output
-        // Each thread has fragment of output - accumulate to acc[] array
-        auto tCgC_layout = tiled_mma.partition_C(gA.layout());
-
+        // Each thread has part of the 64×8 output
         #pragma unroll
         for (int r = 0; r < rows_per_warp; r++) {
             const int local_row = warp_id * rows_per_warp + r;
             if (local_row < kTileM && (m_cta + local_row) < M) {
-                // Accumulate from MMA fragment for this row
+                // Sum this thread's contribution across N=8 columns
                 float row_sum = 0.0f;
-
-                // Sum across N dimension (B columns 0-7)
-                #pragma unroll
-                for (int n = 0; n < 8; n++) {
-                    int frag_idx = tCgC_layout(local_row, n);
-                    if (frag_idx >= 0 && frag_idx < tCrC.size()) {
-                        row_sum += tCrC(frag_idx);
-                    }
+                for (int i = 0; i < size(tCrC); ++i) {
+                    row_sum += tCrC(i);
                 }
-
                 acc[r] += row_sum;
             }
         }
