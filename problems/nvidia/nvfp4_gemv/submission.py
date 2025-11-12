@@ -180,11 +180,12 @@ fp4_gemv_sm100_cute_mma(
         // ============================================================================
         // SM100 uses UMMA namespace (Unified MMA) not GMMA (which is SM90/Hopper)
         // Type: SM100_MMA_F16BF16_SS with full template parameters
+        // Using M=128 to match kTileM for optimal performance on leaderboard shapes
         using MMA_Atom_Arch = SM100_MMA_F16BF16_SS<
             cutlass::half_t,     // a_type: FP16 input for A
             cutlass::half_t,     // b_type: FP16 input for B
             float,               // c_type: F32 accumulator
-            64, 8,               // M, N: tile dimensions (M must be 64 or 128)
+            128, 8,              // M, N: tile dimensions (M must be 64 or 128)
             UMMA::Major::K,      // a_major: K-major (row-major)
             UMMA::Major::K,      // b_major: K-major (row-major)
             UMMA::ScaleIn::One,  // a_neg: no negation/scaling
