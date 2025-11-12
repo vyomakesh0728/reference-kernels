@@ -202,14 +202,16 @@ fp4_gemv_sm100_cute_mma(
         auto tAs = thr_mma.partition_A(smem_A_tensor);
         auto tBs = thr_mma.partition_B(smem_B_tensor);
 
-        // Create C tensor layout for make_fragment_C (required by CUTLASS 4.2.1 API)
-        // We don't need actual storage, just the layout to determine fragment shape
+        // Create register-based accumulator (not TMEM)
+        // For SM100, make_fragment_C creates TMEM fragments, but we need registers
+        // Get the C partition layout and create explicit register storage
         auto gC = make_tensor(make_smem_ptr((half*)nullptr),
                               make_layout(make_shape(Int<kTileM>{}, _8{}),
                                         make_stride(_8{}, _1{})));
         auto tCgC = thr_mma.partition_C(gC);
-        auto tCs = thr_mma.make_fragment_C(tCgC);
 
+        // Create register tensor with same layout as partitioned C
+        auto tCs = make_tensor<float>(tCgC.layout());
         clear(tCs);
 
         const int k_mma_iters = kTileK / 16;
