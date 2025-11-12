@@ -255,8 +255,18 @@ fp4_gemv_sm100_tc_optimized(
         // Using tcgen05.mma.f16 instructions via CuTe API
         // ====================================================================
 
-        // MMA configuration: m16n8k16 atom for SM100
-        using MMAOp = SM100_16x8x16_F32F16F16_SS<GMMA::Major::K, GMMA::Major::K>;
+        // MMA configuration: SM100 FP16 tensor core with m16n8k16 atom
+        // Template params: <a_type, b_type, c_type, M, N, a_major, b_major, a_neg, b_neg>
+        using MMAOp = SM100_MMA_F16BF16_SS<
+            cutlass::half_t,      // A type: FP16
+            cutlass::half_t,      // B type: FP16
+            float,                 // C type: FP32 accumulator
+            16, 8,                 // M=16, N=8 (m16n8k16 atom)
+            UMMA::Major::K,        // A major: K-major (row-major)
+            UMMA::Major::K,        // B major: K-major (row-major)
+            UMMA::ScaleIn::One,    // A scale: no negation
+            UMMA::ScaleIn::One     // B scale: no negation
+        >;
         using MMAAtom = MMA_Atom<MMAOp>;
         using TiledMMA = TiledMMA<MMAAtom, Layout<Shape<_16,_1,_1>>>;
 
