@@ -63,9 +63,9 @@ fp4_gemv_sm100_tc_optimized(
 
     // Batch offsets
     const uint8_t* A_batch = A_packed + batch * M * K_packed;
-    const uint8_t* B_batch = B_packed + batch * 128 * K_packed;
+    const uint8_t* B_batch = B_packed + batch * K_packed;  // B shape: [L, 1, K_packed]
     const uint8_t* SFA_batch = SFA_packed + batch * M * K_scales;
-    const uint8_t* SFB_batch = SFB_packed + batch * 128 * K_scales;
+    const uint8_t* SFB_batch = SFB_packed + batch * K_scales;  // SFB shape: [L, 1, K_scales]
     half* D_batch = D + batch * M;
 
     const int tid = threadIdx.x;
@@ -460,9 +460,9 @@ void launch_fp4_gemv_optimized(
         grid = dim3(num_blocks);
         for (int64_t batch = 0; batch < L; batch++) {
             const uint8_t* A_batch = A_ptr + batch * M * K_packed;
-            const uint8_t* B_batch = B_ptr + batch * 128 * K_packed;
+            const uint8_t* B_batch = B_ptr + batch * K_packed;  // B shape: [L, 1, K_packed]
             const uint8_t* SFA_batch = SFA_ptr + batch * M * K_scales;
-            const uint8_t* SFB_batch = SFB_ptr + batch * 128 * K_scales;
+            const uint8_t* SFB_batch = SFB_ptr + batch * K_scales;  // SFB shape: [L, 1, K_scales]
             half* D_batch = D_ptr + batch * M;
 
             fp4_gemv_sm100_mma_kernel<kTileM, kTileK, kThreads><<<grid, block>>>(
