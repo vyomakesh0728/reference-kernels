@@ -90,6 +90,7 @@ fp4_gemv_sm100_cute_mma(
 
     __shared__ half smem_A[kTileM * kTileK];
     __shared__ half smem_B[kTileK * 8];
+    __shared__ float smem_C[kTileM * 8];  // Output shared memory
 
     // Simple row-major layouts without swizzle to avoid stride divisibility issues
     auto smem_A_layout = make_layout(make_shape(Int<kTileM>{}, Int<kTileK>{}),
@@ -98,17 +99,59 @@ fp4_gemv_sm100_cute_mma(
     auto smem_B_layout = make_layout(make_shape(Int<kTileK>{}, _8{}),
                                      make_stride(_8{}, _1{}));
 
+    auto smem_C_layout = make_layout(make_shape(Int<kTileM>{}, _8{}),
+                                     make_stride(_8{}, _1{}));
+
     auto smem_A_tensor = make_tensor(make_smem_ptr(smem_A), smem_A_layout);
     auto smem_B_tensor = make_tensor(make_smem_ptr(smem_B), smem_B_layout);
+    auto smem_C_tensor = make_tensor(make_smem_ptr(smem_C), smem_C_layout);
 
     constexpr int rows_per_warp = kTileM / (kThreads >> 5);
     float acc[rows_per_warp] = {0.0f};
+
+    // ===================================================================
+    // SM100 Blockwise GEMM Setup (OUTSIDE K-tile loop for efficiency)
+    // ===================================================================
+
+    // Create SM100 MMA atom for FP16 inputs, FP32 accumulator
+    using MMA_Atom_Arch = SM100_MMA_F16BF16_SS<
+        cutlass::half_t,
+        cutlass::half_t,
+        float,
+        128, 8,
+        UMMA::Major::K,
+        UMMA::Major::K,
+        UMMA::ScaleIn::One,
+        UMMA::ScaleIn::One
+    >;
+
+    // Create TiledMMA with 1x1x1 atom tiling (single CTA)
+    using TiledMMA = TiledMMA<
+        MMA_Atom<MMA_Atom_Arch>,
+        Layout<Shape<_1,_1,_1>>
+    >;
+
+    TiledMMA tiled_mma;
+    auto thr_mma = tiled_mma.get_slice(tid);
+
+    // Partition shared memory tensors according to MMA layout
+    auto tCsA = thr_mma.partition_A(smem_A_tensor);  // (MMA, MMA_M, MMA_K)
+    auto tCsB = thr_mma.partition_B(smem_B_tensor);  // (MMA, MMA_N, MMA_K)
+    auto tCsC = thr_mma.partition_C(smem_C_tensor);  // (MMA, MMA_M, MMA_N)
+
+    // Create register fragments for A, B, and C
+    auto tCrA = tiled_mma.make_fragment_A(tCsA);
+    auto tCrB = tiled_mma.make_fragment_B(tCsB);
+    auto tCrC = tiled_mma.make_fragment_C(tCsC);
+
+    // Number of K-iterations for MMA (K=16 per MMA instruction)
+    const int k_mma_iters = kTileK / 16;
 
     for (int k_tile = 0; k_tile < K; k_tile += kTileK) {
         const int k_packed_tile = k_tile >> 1;
         const int k_scale_tile = k_tile >> 4;
 
-        // Load A and B tiles (same as before)
+        // Load A and B tiles
         const int num_vec_loads_A = (kTileM * (kTileK >> 1) + (kThreads * 8) - 1) / (kThreads * 8);
 
         #pragma unroll
@@ -181,78 +224,38 @@ fp4_gemv_sm100_cute_mma(
 
         __syncthreads();
 
-        // ===================================================================
-        // SM100 Blockwise GEMM with Tensor Cores (tcgen05.mma.f16)
-        // Following CUTLASS blockwise_gemm.py and fp4_gemv.cu patterns
-        // ===================================================================
-
-        // Create SM100 MMA atom for FP16 inputs, FP32 accumulator
-        // M=128, N=8, K=16 per MMA instruction
-        using MMA_Atom_Arch = SM100_MMA_F16BF16_SS<
-            cutlass::half_t,
-            cutlass::half_t,
-            float,
-            128, 8,
-            UMMA::Major::K,
-            UMMA::Major::K,
-            UMMA::ScaleIn::One,
-            UMMA::ScaleIn::One
-        >;
-
-        // Create TiledMMA with 1x1x1 atom tiling (single CTA)
-        using TiledMMA = TiledMMA<
-            MMA_Atom<MMA_Atom_Arch>,
-            Layout<Shape<_1,_1,_1>>
-        >;
-
-        TiledMMA tiled_mma;
-        auto thr_mma = tiled_mma.get_slice(tid);
-
-        // Partition shared memory tensors according to MMA layout
-        auto tCsA = thr_mma.partition_A(smem_A_tensor);  // (MMA, MMA_M, MMA_K)
-        auto tCsB = thr_mma.partition_B(smem_B_tensor);  // (MMA, MMA_N, MMA_K)
-
-        // Create register fragments for A and B with correct sizes
-        auto tCrA = tiled_mma.make_fragment_A(tCsA);
-        auto tCrB = tiled_mma.make_fragment_B(tCsB);
-
-        // Create accumulator fragment for C (M×N output)
-        auto gC_shape = make_shape(Int<kTileM>{}, _8{});
-        auto gC_layout = make_layout(gC_shape, make_stride(_8{}, _1{}));
-        auto gC = make_tensor(make_smem_ptr((half*)nullptr), gC_layout);
-        auto tCgC = thr_mma.partition_C(gC);
-        auto tCrC = tiled_mma.make_fragment_C(tCgC);
+        // Clear accumulator for this K-tile
         clear(tCrC);
 
-        // Number of K-iterations for MMA (K=16 per MMA instruction)
-        const int k_mma_iters = kTileK / 16;
-
-        // Main MMA compute loop
+        // Main MMA compute loop - accumulate across K-iterations for this K-tile
+        // CRITICAL: gemm must be INSIDE loop to accumulate all K-iterations
         #pragma unroll
         for (int k = 0; k < k_mma_iters; ++k) {
             // Copy K-slice from shared memory to register fragments
             copy(tCsA(_, _, k), tCrA(_, _, k));
             copy(tCsB(_, _, k), tCrB(_, _, k));
+
+            // Accumulate this K-slice into tCrC
+            // Uses SM100 tcgen05.mma.f16 tensor core instructions
+            gemm(tiled_mma, tCrC, tCrA(_, _, k), tCrB(_, _, k), tCrC);
         }
 
-        // Call gemm to accumulate all K-iterations
-        // This uses SM100 tcgen05.mma.f16 tensor core instructions
-        gemm(tiled_mma, tCrC, tCrA, tCrB, tCrC);
+        // Copy MMA results from registers to shared memory
+        copy(tCrC, tCsC);
+        __syncthreads();
 
-        // Accumulate MMA results to per-thread output
+        // Extract column 0 from shared memory (B was replicated 8 times)
+        // Each thread accumulates its assigned rows
         #pragma unroll
         for (int r = 0; r < rows_per_warp; ++r) {
             const int local_row = warp_id * rows_per_warp + r;
             if (local_row < kTileM && (m_cta + local_row) < M) {
-                float sum = 0.0f;
-                // Sum across all elements in this thread's fragment
-                #pragma unroll
-                for (int i = 0; i < size(tCrC); ++i) {
-                    sum += tCrC(i);
-                }
-                acc[r] += sum;
+                // Read from column 0 of the output
+                acc[r] += smem_C_tensor(local_row, 0);
             }
         }
+
+        __syncthreads();
     }
 
     if (lane_id == 0) {
