@@ -264,7 +264,8 @@ fp4_gemv_sm100_tc_optimized(
         }
 
         // Process K dimension with all rows computed in parallel
-        #pragma unroll 4
+        // Aggressive unroll for better ILP and instruction scheduling
+        #pragma unroll 8
         for (int k = lane_id; k < kTileK; k += 32) {
             half b_val = B_smem[k][0];
 
@@ -485,8 +486,8 @@ void launch_fp4_gemv_optimized(
     // ========================================================================
 
     constexpr int kTileM = 64;
-    constexpr int kTileK = 128;
-    constexpr int kThreads = 512;  // Increased from 256 for better SM utilization
+    constexpr int kTileK = 256;    // Increased from 128: cuts barriers by 50%
+    constexpr int kThreads = 1024;  // Increased from 512 for maximum SM utilization
 
     int num_blocks = (M + kTileM - 1) / kTileM;
     dim3 grid, block(kThreads);
