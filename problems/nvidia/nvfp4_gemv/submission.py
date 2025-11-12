@@ -88,17 +88,17 @@ fp4_gemv_sm100_cute_mma(
 
     if (m_cta >= M) return;
 
-    __shared__ half smem_A[kTileM * kTileK];
-    __shared__ half smem_B[kTileK * 8];
-    __shared__ float smem_C[kTileM * 8];  // Output shared memory
+    // Shared memory with proper alignment for SM100 UMMA
+    __shared__ alignas(128) half smem_A[kTileM * kTileK];
+    __shared__ alignas(128) half smem_B[kTileK * 8];
+    __shared__ alignas(16) float smem_C[kTileM * 8];  // MMA output buffer
+    __shared__ alignas(16) uint64_t mma_barrier;
 
-    // Simple row-major layouts without swizzle to avoid stride divisibility issues
+    // Row-major layouts for A, B, and C (K-major for UMMA::Major::K)
     auto smem_A_layout = make_layout(make_shape(Int<kTileM>{}, Int<kTileK>{}),
                                      make_stride(Int<kTileK>{}, _1{}));
-
     auto smem_B_layout = make_layout(make_shape(Int<kTileK>{}, _8{}),
                                      make_stride(_8{}, _1{}));
-
     auto smem_C_layout = make_layout(make_shape(Int<kTileM>{}, _8{}),
                                      make_stride(_8{}, _1{}));
 
@@ -132,17 +132,22 @@ fp4_gemv_sm100_cute_mma(
     >;
 
     TiledMMA tiled_mma;
-    auto thr_mma = tiled_mma.get_slice(tid);
 
-    // Partition shared memory tensors according to MMA layout
-    auto tCsA = thr_mma.partition_A(smem_A_tensor);  // (MMA, MMA_M, MMA_K)
-    auto tCsB = thr_mma.partition_B(smem_B_tensor);  // (MMA, MMA_N, MMA_K)
-    auto tCsC = thr_mma.partition_C(smem_C_tensor);  // (MMA, MMA_M, MMA_N)
+    // SM100 UMMA requires only ONE warp to execute the MMA instruction
+    const bool elect_one_warp = (warp_id == 0);
 
-    // Create register fragments for A, B, and C
-    auto tCrA = tiled_mma.make_fragment_A(tCsA);
-    auto tCrB = tiled_mma.make_fragment_B(tCsB);
-    auto tCrC = tiled_mma.make_fragment_C(tCsC);
+    // Use CTA-level partition (not per-thread)
+    auto cta_mma = tiled_mma.get_slice(_0{});
+
+    // Partition shared memory tensors for MMA
+    auto tCsA = cta_mma.partition_A(smem_A_tensor);
+    auto tCsB = cta_mma.partition_B(smem_B_tensor);
+    auto tCsC = cta_mma.partition_C(smem_C_tensor);
+
+    // Create fragments for the elected warp
+    auto tCrA = cta_mma.make_fragment_A(tCsA);
+    auto tCrB = cta_mma.make_fragment_B(tCsB);
+    auto tCrC = cta_mma.make_fragment_C(tCsC);
 
     // Number of K-iterations for MMA (K=16 per MMA instruction)
     const int k_mma_iters = kTileK / 16;
@@ -224,33 +229,41 @@ fp4_gemv_sm100_cute_mma(
 
         __syncthreads();
 
-        // Clear accumulator for this K-tile
-        clear(tCrC);
+        // SM100 UMMA execution - only ONE warp executes the MMA instruction
+        if (elect_one_warp) {
+            // Clear accumulator for this K-tile
+            clear(tCrC);
 
-        // Main MMA compute loop - accumulate across K-iterations for this K-tile
-        // CRITICAL: gemm must be INSIDE loop to accumulate all K-iterations
-        #pragma unroll
-        for (int k = 0; k < k_mma_iters; ++k) {
-            // Copy K-slice from shared memory to register fragments
-            copy(tCsA(_, _, k), tCrA(_, _, k));
-            copy(tCsB(_, _, k), tCrB(_, _, k));
+            // Set ScaleOut::Zero for first K-iteration
+            tiled_mma.accumulate_ = UMMA::ScaleOut::Zero;
 
-            // Accumulate this K-slice into tCrC
-            // Uses SM100 tcgen05.mma.f16 tensor core instructions
-            gemm(tiled_mma, tCrC, tCrA(_, _, k), tCrB(_, _, k), tCrC);
+            // Main MMA compute loop - accumulate across K-iterations for this K-tile
+            #pragma unroll
+            for (int k = 0; k < k_mma_iters; ++k) {
+                // Execute MMA: C = A @ B (accumulated into tCrC)
+                // SM100 uses 4-arg gemm: gemm(tiled_mma, A, B, C)
+                gemm(tiled_mma, tCrA(_, _, k), tCrB(_, _, k), tCrC);
+
+                // After first iteration, accumulate (don't zero)
+                tiled_mma.accumulate_ = UMMA::ScaleOut::One;
+            }
+
+            // Signal MMA completion
+            cutlass::arch::umma_arrive(&mma_barrier);
+
+            // Copy MMA results from fragment to shared memory
+            copy(tCrC, tCsC);
         }
 
-        // Copy MMA results from registers to shared memory
-        copy(tCrC, tCsC);
+        // All warps wait for MMA and copy completion
         __syncthreads();
 
-        // Extract column 0 from shared memory (B was replicated 8 times)
-        // Each thread accumulates its assigned rows
+        // All threads extract column 0 (B was replicated 8x, all columns identical)
         #pragma unroll
         for (int r = 0; r < rows_per_warp; ++r) {
             const int local_row = warp_id * rows_per_warp + r;
             if (local_row < kTileM && (m_cta + local_row) < M) {
-                // Read from column 0 of the output
+                // Read from column 0 of shared memory output
                 acc[r] += smem_C_tensor(local_row, 0);
             }
         }
