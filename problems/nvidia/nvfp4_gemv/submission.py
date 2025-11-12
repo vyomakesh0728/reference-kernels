@@ -206,7 +206,14 @@ fp4_gemv_sm100_cute_mma(
 
         auto tAs = thr_mma.partition_A(smem_A_tensor);
         auto tBs = thr_mma.partition_B(smem_B_tensor);
-        auto tCs = thr_mma.make_fragment_C();
+
+        // Create C tensor layout for make_fragment_C (required by CUTLASS 4.2.1 API)
+        // We don't need actual storage, just the layout to determine fragment shape
+        auto gC = make_tensor(make_smem_ptr((half*)nullptr),
+                              make_layout(make_shape(Int<kTileM>{}, _8{}),
+                                        make_stride(_8{}, _1{})));
+        auto tCgC = thr_mma.partition_C(gC);
+        auto tCs = thr_mma.make_fragment_C(tCgC);
 
         clear(tCs);
 
