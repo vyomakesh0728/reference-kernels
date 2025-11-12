@@ -192,6 +192,9 @@ fp4_gemv_sm100_cute_mma(
             UMMA::ScaleIn::One   // b_neg: no negation/scaling
         >;
 
+        // Create MMA_Atom instance for fragment creation and gemm calls
+        MMA_Atom<MMA_Atom_Arch> mma_atom;
+
         using TiledMMA = TiledMMA<
             MMA_Atom<MMA_Atom_Arch>,
             Layout<Shape<_1,_1,_1>>     // 1x1x1 tiling (single MMA per thread group)
@@ -200,32 +203,33 @@ fp4_gemv_sm100_cute_mma(
         TiledMMA tiled_mma;
         auto thr_mma = tiled_mma.get_slice(tid);
 
-        auto tAs = thr_mma.partition_A(smem_A_tensor);
-        auto tBs = thr_mma.partition_B(smem_B_tensor);
+        auto tAs = thr_mma.partition_A(smem_A_tensor);  // (MMA, MMA_M, MMA_K)
+        auto tBs = thr_mma.partition_B(smem_B_tensor);  // (MMA, MMA_N, MMA_K)
 
         // Create register-based accumulator (not TMEM)
         auto gC = make_tensor(make_smem_ptr((half*)nullptr),
                               make_layout(make_shape(Int<kTileM>{}, _8{}),
                                         make_stride(_8{}, _1{})));
-        auto tCgC = thr_mma.partition_C(gC);
+        auto tCgC = thr_mma.partition_C(gC);  // (MMA, MMA_M, MMA_N)
         auto tCs = make_tensor<float>(tCgC.layout());
         clear(tCs);
 
-        // Create register fragments for A and B slices
-        // CuTe gemm requires register tensors, not direct smem access
-        auto rA = make_tensor_like(tAs(_, _, 0));
-        auto rB = make_tensor_like(tBs(_, _, 0));
+        // Create register fragments using MMA_Atom's make_fragment methods
+        // These ensure correct register counts for SM100 MMA instructions
+        auto rA = mma_atom.make_fragment_A(tAs);
+        auto rB = mma_atom.make_fragment_B(tBs);
 
         const int k_mma_iters = kTileK / 16;
 
         #pragma unroll
         for (int k = 0; k < k_mma_iters; ++k) {
-            // Copy from shared memory to registers
-            copy(tAs(_, _, k), rA);
-            copy(tBs(_, _, k), rB);
+            // Copy K-slice from shared memory partitions to register fragments
+            copy(tAs(_, _, k), rA(_, _, k));
+            copy(tBs(_, _, k), rB(_, _, k));
 
-            // Call gemm on register tensors
-            gemm(rA, rB, tCs);
+            // Call gemm on this K-slice, accumulating into tCs
+            // gemm(MMA, D, A, B, C) computes D = A @ B + C
+            gemm(mma_atom, tCs, rA(_, _, k), rB(_, _, k), tCs);
         }
 
         #pragma unroll
