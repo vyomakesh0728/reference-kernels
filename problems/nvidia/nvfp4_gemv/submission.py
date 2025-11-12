@@ -136,11 +136,9 @@ __global__ void decode_fp4_to_fp16_kernel(
     uint8_t sf_byte = scale_factors[batch_offset_sf + sf_idx];
     float sf_decoded = decode_fp8_e4m3(sf_byte);
 
-    // CRITICAL FIX: Multiply by scale factor and divide by st!
-    // Epilogue quantizes as: D_fp4 = quantize(acc * st / qpvscale_up)
-    // So we decode as: acc = dequantize(D_fp4) * qpvscale_up / st
-    const float st = 2.0f;  // Must match epilogue_st in launcher
-    float result = decoded_val * sf_decoded / st;
+    // FIX: Scale factors from epilogue already incorporate st parameter
+    // Simply multiply dequantized FP4 value by the scale factor
+    float result = decoded_val * sf_decoded;
     const int output_idx = batch * M + idx;
     output_fp16[output_idx] = __float2half(result);
 }
