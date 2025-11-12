@@ -82,20 +82,15 @@ fp4_gemv_sm100_cute_mma(
 
     if (m_cta >= M) return;
 
-    __shared__ half smem_A[kTileM * (kTileK + 8)];
+    __shared__ half smem_A[kTileM * kTileK];
     __shared__ half smem_B[kTileK * 8];
 
-    auto smem_A_layout = composition(
-        Swizzle<3,4,3>{},
-        make_layout(make_shape(Int<kTileM>{}, Int<kTileK>{}),
-                   make_stride(Int<kTileK + 8>{}, _1{}))
-    );
+    // Simple row-major layouts without swizzle to avoid stride divisibility issues
+    auto smem_A_layout = make_layout(make_shape(Int<kTileM>{}, Int<kTileK>{}),
+                                     make_stride(Int<kTileK>{}, _1{}));
 
-    auto smem_B_layout = composition(
-        Swizzle<3,4,3>{},
-        make_layout(make_shape(Int<kTileK>{}, _8{}),
-                   make_stride(_8{}, _1{}))
-    );
+    auto smem_B_layout = make_layout(make_shape(Int<kTileK>{}, _8{}),
+                                     make_stride(_8{}, _1{}));
 
     auto smem_A_tensor = make_tensor(make_smem_ptr(smem_A), smem_A_layout);
     auto smem_B_tensor = make_tensor(make_smem_ptr(smem_B), smem_B_layout);
