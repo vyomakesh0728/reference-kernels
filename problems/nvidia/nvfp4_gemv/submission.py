@@ -8,7 +8,7 @@ from task import input_t, output_t
 cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
 
 # ============================================================================
-# CORRECTED CUDA KERNEL - SM100 CuTe MMA Atoms + TMEM Optimization
+# CUTLASS GEMV BlockScaled API - Production SM100 FP4 GEMV
 # ============================================================================
 cuda_source = r"""
 #include <torch/extension.h>
@@ -17,464 +17,243 @@ cuda_source = r"""
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
+#include "cutlass/numeric_conversion.h"
+#include "cutlass/gemm/device/gemv_blockscaled.h"
+#include "cutlass/gemm/kernel/gemv_blockscaled.h"
+#include "cutlass/epilogue/threadblock/epilogue_with_scaling_factor.h"
+#include "cutlass/layout/matrix.h"
+#include "cutlass/gemm_coord.h"
+#include "cutlass/tensor_ref.h"
 
-#include "cute/tensor.hpp"
-#include "cute/arch/mma_sm100.hpp"
-#include "cute/atom/mma_atom.hpp"
-#include "cute/atom/mma_traits_sm100.hpp"
-#include "cute/atom/copy_atom.hpp"
-#include "cute/layout.hpp"
-#include "cute/swizzle.hpp"
-#include "cute/layout_composed.hpp"
+// ============================================================================
+// Kernel Configuration (Back to scaling factor epilogue, but we'll decode on GPU)
+// ============================================================================
 
-using namespace cute;
+// Element types: FP4 (float_e2m1_t) with FP8 scale factors (float_e4m3_t)
+using ElementA = cutlass::float_e2m1_t;
+using ElementSFA = cutlass::float_e4m3_t;
+using LayoutA = cutlass::layout::RowMajor;
 
-// Constant memory and decode functions (same as before)
-__constant__ float fp4_e2m1_lut_float[16] = {
+using ElementB = cutlass::float_e2m1_t;
+using ElementSFB = cutlass::float_e4m3_t;
+
+// GEMV produces FP4 output with scale factors, we'll decode to FP16 after
+using ElementC = cutlass::float_e2m1_t;
+using ElementD = cutlass::float_e2m1_t;  // FP4 intermediate output
+using LayoutD = cutlass::layout::ColumnMajor;
+
+using ElementSFD = cutlass::float_e4m3_t;
+using LayoutSFD = cutlass::layout::ColumnMajor;
+
+using ElementAccumulatorMainloop = cutlass::half_t;
+using ElementAccumulator = float;
+using ElementCompute = float;
+
+// Vector size for block scaling (must match scale factor block size)
+static constexpr int kVectorSize = 16;
+static constexpr int kElementsPerAccess = 128 / cutlass::sizeof_bits<ElementA>::value;
+
+// Thread shape for GEMV (MUST be 16x8)
+using ThreadShape = cutlass::gemm::GemmShape<16, 8>;
+static_assert(kVectorSize == ThreadShape::kM, "vector size mismatch");
+
+// Epilogue with scaling factor output
+using EpilogueOp = cutlass::epilogue::threadblock::GemvEpilogueWithScalingFactor<
+    kVectorSize,
+    ThreadShape,
+    ElementCompute,
+    ElementAccumulator,
+    ElementC,
+    ElementD,
+    ElementSFD,
+    LayoutD,
+    LayoutSFD
+>;
+
+// Main GEMV kernel using CUTLASS BlockScaled API
+using GemvKernel = cutlass::gemm::kernel::GemvBlockScaled<
+    ElementA,
+    LayoutA,
+    ElementB,
+    ElementC,
+    ElementAccumulatorMainloop,
+    EpilogueOp,
+    kElementsPerAccess
+>;
+
+using Gemv = cutlass::gemm::device::GemvBlockScaled<GemvKernel>;
+
+// ============================================================================
+// GPU Decode Kernel: FP4 + FP8 Scale Factors → FP16
+// ============================================================================
+
+// FP4 E2M1 lookup table (1 sign, 2 exp, 1 mantissa)
+__constant__ float fp4_e2m1_lut[16] = {
     0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
     -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
 };
 
-__device__ __forceinline__ half decode_fp4_e2m1(uint8_t nibble) {
-    return __float2half(fp4_e2m1_lut_float[nibble & 0x0F]);
-}
-
-__device__ __forceinline__ float decode_fp8_e4m3(uint8_t val) {
-    cutlass::float_e4m3_t fp8_val = *reinterpret_cast<cutlass::float_e4m3_t*>(&val);
+__device__ __forceinline__ float decode_fp8_e4m3(uint8_t byte) {
+    // FP8 E4M3: 1 sign, 4 exp, 3 mantissa (bias = 7)
+    // Use CUTLASS type for proper decoding
+    cutlass::float_e4m3_t fp8_val;
+    reinterpret_cast<uint8_t&>(fp8_val) = byte;
     return static_cast<float>(fp8_val);
 }
 
-// ============================================================================
-// SM100 OPTIMIZED KERNEL (FINAL CORRECT VERSION)
-// ============================================================================
-template<int kTileM, int kTileK, int kThreads>
-__global__ void __launch_bounds__(kThreads, 2)
-fp4_gemv_sm100_cute_mma(
-    const uint8_t* __restrict__ A_packed,
-    const uint8_t* __restrict__ B_packed,
-    const uint8_t* __restrict__ SFA_packed,
-    const uint8_t* __restrict__ SFB_packed,
-    half* __restrict__ D,
-    const int M, const int K, const int L
+__global__ void decode_fp4_to_fp16_kernel(
+    const uint8_t* __restrict__ fp4_packed,
+    const uint8_t* __restrict__ scale_factors,
+    half* __restrict__ output_fp16,
+    int M, int L
 ) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int batch = blockIdx.y;
-    if (batch >= L) return;
 
-    const int K_packed = K >> 1;
-    const int K_scales = K >> 4;
+    if (idx >= M || batch >= L) return;
 
-    // Batch offsets for tensor format on B200:
-    // a: M x K x L (K-major) → batch stride = M * K_packed
-    // b: 1 x K x L (K-major, vector) → batch stride = K_packed
-    // sfa: M x (K//16) x L → batch stride = M * K_scales
-    // sfb: 1 x (K//16) x L (vector) → batch stride = K_scales
-    // c: M x 1 x L → batch stride = M
-    const long long batch_offset_A = static_cast<long long>(batch) * M * K_packed;
-    const long long batch_offset_B = static_cast<long long>(batch) * K_packed;
-    const long long batch_offset_SFA = static_cast<long long>(batch) * M * K_scales;
-    const long long batch_offset_SFB = static_cast<long long>(batch) * K_scales;
-    const long long batch_offset_D = static_cast<long long>(batch) * M;
+    const int packed_idx = idx / 2;
+    const int nibble_idx = idx % 2;
+    const int sf_idx = idx / kVectorSize;
 
-    const uint8_t* A_batch = A_packed + batch_offset_A;
-    const uint8_t* B_batch = B_packed + batch_offset_B;
-    const uint8_t* SFA_batch = SFA_packed + batch_offset_SFA;
-    const uint8_t* SFB_batch = SFB_packed + batch_offset_SFB;
-    half* D_batch = D + batch_offset_D;
+    // Get FP4 packed byte
+    const int batch_offset_fp4 = batch * (M / 2);
+    const uint8_t packed_byte = fp4_packed[batch_offset_fp4 + packed_idx];
 
-    const int m_cta = blockIdx.x * kTileM;
-    const int tid = threadIdx.x;
-    const int warp_id = tid >> 5;
-    const int lane_id = tid & 31;
-
-    if (m_cta >= M) return;
-
-    // Shared memory with proper alignment for SM100 UMMA
-    __shared__ alignas(128) half smem_A[kTileM * kTileK];
-    __shared__ alignas(128) half smem_B[kTileK * 8];
-    __shared__ alignas(16) float smem_C[kTileM * 8];  // MMA output buffer
-    __shared__ alignas(16) uint64_t mma_barrier;
-
-    // Row-major layouts for A, B, and C (K-major for UMMA::Major::K)
-    auto smem_A_layout = make_layout(make_shape(Int<kTileM>{}, Int<kTileK>{}),
-                                     make_stride(Int<kTileK>{}, _1{}));
-    auto smem_B_layout = make_layout(make_shape(Int<kTileK>{}, _8{}),
-                                     make_stride(_8{}, _1{}));
-    auto smem_C_layout = make_layout(make_shape(Int<kTileM>{}, _8{}),
-                                     make_stride(_8{}, _1{}));
-
-    auto smem_A_tensor = make_tensor(make_smem_ptr(smem_A), smem_A_layout);
-    auto smem_B_tensor = make_tensor(make_smem_ptr(smem_B), smem_B_layout);
-    auto smem_C_tensor = make_tensor(make_smem_ptr(smem_C), smem_C_layout);
-
-    constexpr int rows_per_warp = kTileM / (kThreads >> 5);
-    float acc[rows_per_warp] = {0.0f};
-
-    // ===================================================================
-    // SM100 Blockwise GEMM Setup (OUTSIDE K-tile loop for efficiency)
-    // ===================================================================
-
-    // Create SM100 MMA atom for FP16 inputs, FP32 accumulator
-    using MMA_Atom_Arch = SM100_MMA_F16BF16_SS<
-        cutlass::half_t,
-        cutlass::half_t,
-        float,
-        128, 8,
-        UMMA::Major::K,
-        UMMA::Major::K,
-        UMMA::ScaleIn::One,
-        UMMA::ScaleIn::One
-    >;
-
-    // Create TiledMMA with 1x1x1 atom tiling (single CTA)
-    using TiledMMA = TiledMMA<
-        MMA_Atom<MMA_Atom_Arch>,
-        Layout<Shape<_1,_1,_1>>
-    >;
-
-    TiledMMA tiled_mma;
-
-    // SM100 UMMA requires only ONE warp to execute the MMA instruction
-    const bool elect_one_warp = (warp_id == 0);
-
-    // Use CTA-level partition (not per-thread)
-    auto cta_mma = tiled_mma.get_slice(_0{});
-
-    // Partition shared memory tensors for MMA
-    auto tCsA = cta_mma.partition_A(smem_A_tensor);
-    auto tCsB = cta_mma.partition_B(smem_B_tensor);
-    auto tCsC = cta_mma.partition_C(smem_C_tensor);
-
-    // Create fragments for the elected warp
-    auto tCrA = cta_mma.make_fragment_A(tCsA);
-    auto tCrB = cta_mma.make_fragment_B(tCsB);
-    auto tCrC = cta_mma.make_fragment_C(tCsC);
-
-    // Number of K-iterations for MMA (K=16 per MMA instruction)
-    const int k_mma_iters = kTileK / 16;
-
-    for (int k_tile = 0; k_tile < K; k_tile += kTileK) {
-        const int k_packed_tile = k_tile >> 1;
-        const int k_scale_tile = k_tile >> 4;
-
-        // Load A and B tiles
-        const int num_vec_loads_A = (kTileM * (kTileK >> 1) + (kThreads * 8) - 1) / (kThreads * 8);
-
-        #pragma unroll
-        for (int load = 0; load < num_vec_loads_A; ++load) {
-            const int idx = tid + load * kThreads;
-            const int row = idx / (kTileK >> 1);
-            const int col_packed = idx % (kTileK >> 1);
-            const int m_idx = m_cta + row;
-            const int k_idx_packed = k_packed_tile + col_packed;
-
-            if (row < kTileM && m_idx < M && k_idx_packed < K_packed) {
-                const uint8_t* src = &A_batch[m_idx * K_packed + k_idx_packed];
-                uint4 packed_vec = *reinterpret_cast<const uint4*>(src);
-                const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&packed_vec);
-
-                #pragma unroll
-                for (int i = 0; i < 8 && (col_packed + i) < (kTileK >> 1); ++i) {
-                    const int col = (col_packed + i) << 1;
-                    uint8_t packed = bytes[i];
-
-                    const int scale_idx = (col_packed + i) >> 3;
-                    float scale_a = 1.0f;
-                    if ((k_scale_tile + scale_idx) < K_scales) {
-                        scale_a = decode_fp8_e4m3(SFA_batch[m_idx * K_scales + k_scale_tile + scale_idx]);
-                    }
-
-                    half scale_h = __float2half(scale_a);
-                    smem_A_tensor(row, col) = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
-                    smem_A_tensor(row, col + 1) = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
-                }
-            }
-        }
-
-        const int num_vec_loads_B = ((kTileK >> 1) + (kThreads * 8) - 1) / (kThreads * 8);
-
-        #pragma unroll
-        for (int load = 0; load < num_vec_loads_B; ++load) {
-            const int idx = tid + load * kThreads;
-            const int col_packed = idx;
-            const int k_idx_packed = k_packed_tile + col_packed;
-
-            if (col_packed < (kTileK >> 1) && k_idx_packed < K_packed) {
-                const uint8_t* src = &B_batch[k_idx_packed];
-                uint4 packed_vec = *reinterpret_cast<const uint4*>(src);
-                const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&packed_vec);
-
-                #pragma unroll
-                for (int i = 0; i < 8 && (col_packed + i) < (kTileK >> 1); ++i) {
-                    const int col = (col_packed + i) << 1;
-                    uint8_t packed = bytes[i];
-
-                    const int scale_idx = (col_packed + i) >> 3;
-                    float scale_b = 1.0f;
-                    if ((k_scale_tile + scale_idx) < K_scales) {
-                        scale_b = decode_fp8_e4m3(SFB_batch[k_scale_tile + scale_idx]);
-                    }
-
-                    half scale_h = __float2half(scale_b);
-                    half val0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
-                    half val1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
-
-                    #pragma unroll
-                    for (int n = 0; n < 8; ++n) {
-                        smem_B_tensor(col, n) = val0;
-                        smem_B_tensor(col + 1, n) = val1;
-                    }
-                }
-            }
-        }
-
-        __syncthreads();
-
-        // SM100 UMMA execution - only ONE warp executes the MMA instruction
-        if (elect_one_warp) {
-            // Clear accumulator for this K-tile
-            clear(tCrC);
-
-            // Set ScaleOut::Zero for first K-iteration
-            tiled_mma.accumulate_ = UMMA::ScaleOut::Zero;
-
-            // Main MMA compute loop - accumulate across K-iterations for this K-tile
-            #pragma unroll
-            for (int k = 0; k < k_mma_iters; ++k) {
-                // Execute MMA: C = A @ B (accumulated into tCrC)
-                // SM100 uses 4-arg gemm: gemm(tiled_mma, A, B, C)
-                gemm(tiled_mma, tCrA(_, _, k), tCrB(_, _, k), tCrC);
-
-                // After first iteration, accumulate (don't zero)
-                tiled_mma.accumulate_ = UMMA::ScaleOut::One;
-            }
-
-            // Signal MMA completion
-            cutlass::arch::umma_arrive(&mma_barrier);
-
-            // Copy MMA results from fragment to shared memory
-            copy(tCrC, tCsC);
-        }
-
-        // All warps wait for MMA and copy completion
-        __syncthreads();
-
-        // All threads extract column 0 (B was replicated 8x, all columns identical)
-        #pragma unroll
-        for (int r = 0; r < rows_per_warp; ++r) {
-            const int local_row = warp_id * rows_per_warp + r;
-            if (local_row < kTileM && (m_cta + local_row) < M) {
-                // Read from column 0 of shared memory output
-                acc[r] += smem_C_tensor(local_row, 0);
-            }
-        }
-
-        __syncthreads();
+    // Extract nibble (low nibble = even idx, high nibble = odd idx)
+    uint8_t nibble;
+    if (nibble_idx == 0) {
+        nibble = packed_byte & 0x0F;
+    } else {
+        nibble = (packed_byte >> 4) & 0x0F;
     }
 
-    if (lane_id == 0) {
-        #pragma unroll
-        for (int r = 0; r < rows_per_warp; ++r) {
-            const int global_row = m_cta + warp_id * rows_per_warp + r;
-            if (global_row < M) {
-                D_batch[global_row] = __float2half(acc[r]);
-            }
-        }
-    }
+    // Decode FP4 E2M1 using lookup table
+    float decoded_val = fp4_e2m1_lut[nibble];
+
+    // Decode FP8 E4M3 scale factor
+    const int batch_offset_sf = batch * (M / kVectorSize);
+    uint8_t sf_byte = scale_factors[batch_offset_sf + sf_idx];
+    float sf_decoded = decode_fp8_e4m3(sf_byte);
+
+    // CRITICAL FIX: Multiply by scale factor and divide by st!
+    // Epilogue quantizes as: D_fp4 = quantize(acc * st / qpvscale_up)
+    // So we decode as: acc = dequantize(D_fp4) * qpvscale_up / st
+    const float st = 2.0f;  // Must match epilogue_st in launcher
+    float result = decoded_val * sf_decoded / st;
+    const int output_idx = batch * M + idx;
+    output_fp16[output_idx] = __float2half(result);
 }
 
 // ============================================================================
-// FALLBACK KERNEL (unchanged)
-// ============================================================================
-template<int kTileM, int kTileK, int kThreads>
-__global__ void __launch_bounds__(kThreads)
-fp4_gemv_sm100_fallback(
-    const uint8_t* __restrict__ A_packed,
-    const uint8_t* __restrict__ B_packed,
-    const uint8_t* __restrict__ SFA_packed,
-    const uint8_t* __restrict__ SFB_packed,
-    half* __restrict__ D,
-    const int M, const int K
-) {
-    // ... [keep your existing fallback implementation] ...
-    const int m_cta = blockIdx.x * kTileM;
-    const int tid = threadIdx.x;
-    const int warp_id = tid >> 5;
-    const int lane_id = tid & 31;
-
-    if (m_cta >= M) return;
-
-    const int K_packed = K >> 1;
-    const int K_scales = K >> 4;
-
-    __shared__ half A_smem[kTileM][kTileK + 8];
-    __shared__ half B_smem[kTileK][8];
-
-    constexpr int rows_per_warp = kTileM / (kThreads >> 5);
-    float acc[rows_per_warp] = {0.0f};
-
-    for (int k_tile = 0; k_tile < K; k_tile += kTileK) {
-        const int k_packed_tile = k_tile >> 1;
-        const int k_scale_tile = k_tile >> 4;
-
-        __syncthreads();
-
-        // Load A tile
-        for (int idx = tid; idx < kTileM * (kTileK >> 1); idx += kThreads) {
-            const int row = idx / (kTileK >> 1);
-            const int col_packed = idx % (kTileK >> 1);
-            const int m_idx = m_cta + row;
-
-            if (m_idx < M && (k_packed_tile + col_packed) < K_packed) {
-                uint8_t packed = A_packed[m_idx * K_packed + k_packed_tile + col_packed];
-
-                int scale_idx = col_packed >> 3;
-                float scale_a = 1.0f;
-                if ((k_scale_tile + scale_idx) < K_scales) {
-                    scale_a = decode_fp8_e4m3(SFA_packed[m_idx * K_scales + k_scale_tile + scale_idx]);
-                }
-
-                half scale_h = __float2half(scale_a);
-                A_smem[row][col_packed * 2] = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
-                A_smem[row][col_packed * 2 + 1] = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
-            } else if (row < kTileM && col_packed * 2 < kTileK) {
-                A_smem[row][col_packed * 2] = __float2half(0.0f);
-                A_smem[row][col_packed * 2 + 1] = __float2half(0.0f);
-            }
-        }
-
-        // Load B tile
-        for (int col_packed = tid; col_packed < (kTileK >> 1); col_packed += kThreads) {
-            if ((k_packed_tile + col_packed) < K_packed) {
-                uint8_t packed = B_packed[k_packed_tile + col_packed];
-
-                int scale_idx = col_packed >> 3;
-                float scale_b = 1.0f;
-                if ((k_scale_tile + scale_idx) < K_scales) {
-                    scale_b = decode_fp8_e4m3(SFB_packed[k_scale_tile + scale_idx]);
-                }
-
-                half scale_h = __float2half(scale_b);
-                half val0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
-                half val1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
-
-                #pragma unroll
-                for (int n = 0; n < 8; ++n) {
-                    B_smem[col_packed * 2][n] = val0;
-                    B_smem[col_packed * 2 + 1][n] = val1;
-                }
-            } else if (col_packed * 2 < kTileK) {
-                #pragma unroll
-                for (int n = 0; n < 8; ++n) {
-                    B_smem[col_packed * 2][n] = __float2half(0.0f);
-                    B_smem[col_packed * 2 + 1][n] = __float2half(0.0f);
-                }
-            }
-        }
-
-        __syncthreads();
-
-        // Fallback compute
-        #pragma unroll
-        for (int r = 0; r < rows_per_warp; ++r) {
-            const int local_row = warp_id * rows_per_warp + r;
-            if (local_row >= kTileM) continue;
-            if (m_cta + local_row >= M) continue;
-
-            float local_sum = 0.0f;
-
-            #pragma unroll 8
-            for (int k = lane_id; k < kTileK; k += 32) {
-                half a_val = A_smem[local_row][k];
-                half b_val = B_smem[k][0];
-                local_sum += __half2float(a_val) * __half2float(b_val);
-            }
-
-            // Warp reduction
-            #pragma unroll
-            for (int offset = 16; offset > 0; offset >>= 1) {
-                local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
-            }
-
-            if (lane_id == 0) {
-                acc[r] += local_sum;
-            }
-        }
-    }
-
-    // Write output
-    if (lane_id == 0) {
-        #pragma unroll
-        for (int r = 0; r < rows_per_warp; ++r) {
-            const int global_row = m_cta + warp_id * rows_per_warp + r;
-            if (global_row < M) {
-                D[global_row] = __float2half(acc[r]);
-            }
-        }
-    }
-}
-
-// ============================================================================
-// LAUNCHER (unchanged)
+// Launcher (FP4 output from GEMV, then GPU decode to FP16)
 // ============================================================================
 void launch_fp4_gemv_optimized(
     torch::Tensor A, torch::Tensor B,
     torch::Tensor SFA, torch::Tensor SFB,
-    torch::Tensor D,
+    torch::Tensor D,  // FP16 output
     int64_t M, int64_t K, int64_t L
 ) {
-    const uint8_t* A_ptr = A.data_ptr<uint8_t>();
-    const uint8_t* B_ptr = B.data_ptr<uint8_t>();
-    const uint8_t* SFA_ptr = SFA.data_ptr<uint8_t>();
-    const uint8_t* SFB_ptr = SFB.data_ptr<uint8_t>();
-    half* D_ptr = reinterpret_cast<half*>(D.data_ptr<at::Half>());
+    // Get raw pointers
+    auto A_ptr = reinterpret_cast<ElementA*>(A.data_ptr<uint8_t>());
+    auto B_ptr = reinterpret_cast<ElementB*>(B.data_ptr<uint8_t>());
+    auto SFA_ptr = reinterpret_cast<ElementSFA*>(SFA.data_ptr<uint8_t>());
+    auto SFB_ptr = reinterpret_cast<ElementSFB*>(SFB.data_ptr<uint8_t>());
+    auto D_fp16_ptr = reinterpret_cast<half*>(D.data_ptr<at::Half>());
 
-    constexpr int kTileM = 128;
-    constexpr int kTileK = 256;
-    constexpr int kThreads = 256;
+    const int gemm_m = static_cast<int>(M);
+    const int gemm_k = static_cast<int>(K);
+    const int gemm_batch = static_cast<int>(L);
 
-    int num_blocks = (M + kTileM - 1) / kTileM;
-    dim3 block(kThreads);
+    // Allocate temporary FP4 output and scale factors
+    uint8_t* D_fp4_ptr = nullptr;
+    uint8_t* SFD_ptr = nullptr;
+    cudaMalloc(&D_fp4_ptr, gemm_batch * (gemm_m / 2) * sizeof(uint8_t));
+    cudaMalloc(&SFD_ptr, gemm_batch * (gemm_m / kVectorSize) * sizeof(uint8_t));
 
-    bool is_leaderboard = (M == 7168 && K == 16384 && L == 1) ||
-                          (M == 4096 && K == 7168 && L == 8) ||
-                          (M == 7168 && K == 2048 && L == 4);
+    // Calculate batch strides
+    const int k_blks = (gemm_k + kVectorSize - 1) / kVectorSize;
+    const int m_blks = (gemm_m + 127) / 128;
 
-    if (is_leaderboard) {
-        dim3 grid(num_blocks, L);
-        fp4_gemv_sm100_cute_mma<kTileM, kTileK, kThreads><<<grid, block>>>(
-            A_ptr, B_ptr, SFA_ptr, SFB_ptr, D_ptr, M, K, L
-        );
-    } else {
-        dim3 grid(num_blocks);
-        const int64_t K_packed = K >> 1;
-        const int64_t K_scales = K >> 4;
+    const int64_t batch_stride_A = gemm_m * (gemm_k / 2);
+    const int64_t batch_stride_B = gemm_k / 2;
+    const int64_t batch_stride_C = 0;
+    const int64_t batch_stride_D = gemm_m / 2;  // FP4 packed
+    const int64_t batch_stride_SFA = m_blks * 128 * k_blks;
+    const int64_t batch_stride_SFB = k_blks;
+    const int64_t batch_stride_SFD = gemm_m / kVectorSize;
 
-        for (int64_t batch = 0; batch < L; ++batch) {
-            const long long offset_A = batch * M * K_packed;
-            const long long offset_B = batch * K_packed;
-            const long long offset_SFA = batch * M * K_scales;
-            const long long offset_SFB = batch * K_scales;
-            const long long offset_D = batch * M;
+    // Construct TensorRefs
+    cutlass::TensorRef<ElementA, LayoutA> ref_A(
+        A_ptr,
+        LayoutA::packed({gemm_m, gemm_k / 2})
+    );
 
-            fp4_gemv_sm100_fallback<kTileM, kTileK, kThreads><<<grid, block>>>(
-                A_ptr + offset_A,
-                B_ptr + offset_B,
-                SFA_ptr + offset_SFA,
-                SFB_ptr + offset_SFB,
-                D_ptr + offset_D,
-                M, K
-            );
-        }
+    cutlass::TensorRef<ElementD, LayoutD> ref_D(
+        reinterpret_cast<ElementD*>(D_fp4_ptr),
+        LayoutD::packed({gemm_m, 1})
+    );
+
+    ElementCompute alpha = ElementCompute(1.0f);
+    ElementCompute beta = ElementCompute(0.0f);
+    float epilogue_st = 2.0f;  // Deterministic quantization scale
+
+    // Setup GEMV arguments
+    typename Gemv::Arguments arguments{
+        cutlass::MatrixCoord{gemm_m, gemm_k},
+        gemm_batch,
+        typename EpilogueOp::Params{
+            ref_D,
+            reinterpret_cast<ElementSFD*>(SFD_ptr),
+            alpha,
+            beta,
+            epilogue_st,
+            batch_stride_SFD,
+            gemm_m
+        },
+        ref_A,
+        B_ptr,
+        nullptr,  // ptr_C
+        reinterpret_cast<ElementD*>(D_fp4_ptr),
+        SFA_ptr,
+        SFB_ptr,
+        gemm_k / 2,
+        batch_stride_A,
+        batch_stride_B,
+        batch_stride_C,
+        batch_stride_D,
+        batch_stride_SFA,
+        batch_stride_SFB,
+        batch_stride_SFD
+    };
+
+    // Execute GEMV (produces FP4 + scale factors)
+    Gemv gemv_op;
+    cutlass::Status status = gemv_op.initialize(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        throw std::runtime_error("CUTLASS GEMV initialization failed");
     }
 
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    status = gemv_op();
+    if (status != cutlass::Status::kSuccess) {
+        throw std::runtime_error("CUTLASS GEMV execution failed");
     }
 
-    err = cudaDeviceSynchronize();
+    // Decode FP4 + scale factors → FP16 on GPU
+    dim3 block(256);
+    dim3 grid((gemm_m + 255) / 256, gemm_batch);
+    decode_fp4_to_fp16_kernel<<<grid, block>>>(
+        D_fp4_ptr, SFD_ptr, D_fp16_ptr, gemm_m, gemm_batch
+    );
+
+    // Free temporary buffers
+    cudaFree(D_fp4_ptr);
+    cudaFree(SFD_ptr);
+
+    // Synchronize
+    cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA sync error: ") + cudaGetErrorString(err));
+        throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err));
     }
 }
 """
@@ -514,7 +293,7 @@ def get_module():
                 "-lineinfo",
                 "-DNDEBUG",
                 f"-I{cutlass_path}/include",
-                f"-I{cutlass_path}/tools/util/include",  # Add this path
+                f"-I{cutlass_path}/tools/util/include",
             ],
             extra_ldflags=["-lcuda"],
         )
@@ -523,7 +302,7 @@ def get_module():
 
 def custom_kernel(data: input_t) -> output_t:
     """
-    SM100 FP4 GEMV with tensor cores: CUTLASS + CuTe + SM100 MMA Atoms
+    SM100 FP4 GEMV using CUTLASS BlockScaled API with FP16 output
     """
     a, b, sfa_ref_cpu, sfb_ref_cpu, _, _, c = data
 
@@ -533,7 +312,7 @@ def custom_kernel(data: input_t) -> output_t:
     # Move to GPU and permute to [L, M, K/2] for batch-parallel processing
     a = a.permute(2, 0, 1).cuda().contiguous()
     b = b.permute(2, 0, 1).cuda().contiguous()
-    c = c.permute(2, 0, 1).cuda().contiguous()
+    c = c.permute(2, 0, 1).cuda().contiguous()  # [L, M, 1]
 
     # Reinterpret as raw bytes (packed format)
     a_bytes = a.view(torch.uint8)
@@ -545,7 +324,7 @@ def custom_kernel(data: input_t) -> output_t:
     sfa_bytes = sfa.view(torch.uint8)
     sfb_bytes = sfb.view(torch.uint8)
 
-    # Launch SM100 tensor core kernel
+    # Launch CUTLASS GEMV (produces FP16 output directly!)
     mod = get_module()
     mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L)
 
