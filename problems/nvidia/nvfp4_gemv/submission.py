@@ -181,21 +181,24 @@ fp4_gemv_sm100_cute_mma(
         __syncthreads();
 
         // ============================================================================
-        // FINAL CORRECT SM100 MMA ATOM FOR CUTLASS HEAD (bd96096d)
+        // CORRECT SM100 MMA ATOM FOR CUTLASS 4.2.1
         // ============================================================================
-        // SM100 uses cute::GMMA namespace with Major and ScaleIn enums
-        // The atom is directly available without SM100:: prefix
-        using MMA_Atom_Arch = MMA_64x8x16_F16F16F32_SS<
-            GMMA::Major::K,      // A matrix major: K-major (row-major)
-            GMMA::Major::K,      // B matrix major: K-major (row-major)
-            GMMA::ScaleIn::One,  // A scaling: One = no scaling
-            GMMA::ScaleIn::One   // B scaling: One = no scaling
+        // SM100 uses UMMA namespace (Unified MMA) not GMMA (which is SM90/Hopper)
+        // Type: SM100_MMA_F16BF16_SS with full template parameters
+        using MMA_Atom_Arch = SM100_MMA_F16BF16_SS<
+            cutlass::half_t,     // a_type: FP16 input for A
+            cutlass::half_t,     // b_type: FP16 input for B
+            float,               // c_type: F32 accumulator
+            64, 8,               // M, N: tile dimensions (M must be 64 or 128)
+            UMMA::Major::K,      // a_major: K-major (row-major)
+            UMMA::Major::K,      // b_major: K-major (row-major)
+            UMMA::ScaleIn::One,  // a_neg: no negation/scaling
+            UMMA::ScaleIn::One   // b_neg: no negation/scaling
         >;
 
         using TiledMMA = TiledMMA<
             MMA_Atom<MMA_Atom_Arch>,
-            Layout<Shape<_2,_1,_1>>,    // 2x1x1 tiling across M,N,K
-            Tile<Shape<_64,_8,_16>>     // 64x8x16 MMA instruction shape
+            Layout<Shape<_1,_1,_1>>     // 1x1x1 tiling (single MMA per thread group)
         >;
 
         TiledMMA tiled_mma;
