@@ -90,51 +90,160 @@ fp4_gemv_sm100_tc_optimized(
 
         __syncthreads();
 
-        // Load A tile
-        for (int idx = tid; idx < kTileM * (kTileK / 2); idx += kThreads) {
-            const int row = idx / (kTileK / 2);
-            const int col_packed = idx % (kTileK / 2);
+        // ====================================================================
+        // Vectorized Load A tile: uint4 (16-byte) coalesced loads
+        // ====================================================================
+        constexpr int kVecSize = 16;  // uint4 = 16 bytes
+        const int num_vec_loads_A = (kTileM * (kTileK / 2) + kVecSize - 1) / kVecSize;
+
+        for (int vec_idx = tid; vec_idx < num_vec_loads_A; vec_idx += kThreads) {
+            const int base_idx = vec_idx * kVecSize;
+            const int row = base_idx / (kTileK / 2);
+            const int col_packed_base = base_idx % (kTileK / 2);
             const int m_idx = m_cta + row;
 
-            if (m_idx < M && (k_packed_tile + col_packed) < K_packed) {
-                uint8_t packed = A_batch[m_idx * K_packed + k_packed_tile + col_packed];
-                int scale_idx = col_packed / 8;
-                float scale_a = 1.0f;
-                if ((k_scale_tile + scale_idx) < K_scales) {
-                    scale_a = decode_fp8_e4m3(SFA_batch[m_idx * K_scales + k_scale_tile + scale_idx]);
+            if (row < kTileM && m_idx < M && (k_packed_tile + col_packed_base) < K_packed) {
+                // Check if we can do aligned uint4 load
+                const uint8_t* src_ptr = &A_batch[m_idx * K_packed + k_packed_tile + col_packed_base];
+                const bool is_aligned = (reinterpret_cast<uintptr_t>(src_ptr) % 16 == 0);
+                const bool full_vec = ((k_packed_tile + col_packed_base + kVecSize) <= K_packed);
+
+                if (is_aligned && full_vec) {
+                    // Vectorized 16-byte load
+                    uint4 vec_data = *reinterpret_cast<const uint4*>(src_ptr);
+                    const uint8_t* vec_bytes = reinterpret_cast<const uint8_t*>(&vec_data);
+
+                    // Process all 16 bytes
+                    #pragma unroll
+                    for (int i = 0; i < kVecSize; i++) {
+                        const int col_packed = col_packed_base + i;
+                        if (col_packed * 2 < kTileK) {
+                            uint8_t packed = vec_bytes[i];
+                            int scale_idx = col_packed / 8;
+                            float scale_a = 1.0f;
+                            if ((k_scale_tile + scale_idx) < K_scales) {
+                                scale_a = decode_fp8_e4m3(SFA_batch[m_idx * K_scales + k_scale_tile + scale_idx]);
+                            }
+                            half scale_h = __float2half(scale_a);
+                            A_smem[row][col_packed * 2] = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+                            A_smem[row][col_packed * 2 + 1] = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+                        }
+                    }
+                } else {
+                    // Fallback: scalar loads for unaligned or partial
+                    #pragma unroll
+                    for (int i = 0; i < kVecSize; i++) {
+                        const int col_packed = col_packed_base + i;
+                        if (col_packed < (kTileK / 2) && (k_packed_tile + col_packed) < K_packed) {
+                            uint8_t packed = A_batch[m_idx * K_packed + k_packed_tile + col_packed];
+                            int scale_idx = col_packed / 8;
+                            float scale_a = 1.0f;
+                            if ((k_scale_tile + scale_idx) < K_scales) {
+                                scale_a = decode_fp8_e4m3(SFA_batch[m_idx * K_scales + k_scale_tile + scale_idx]);
+                            }
+                            half scale_h = __float2half(scale_a);
+                            A_smem[row][col_packed * 2] = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+                            A_smem[row][col_packed * 2 + 1] = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+                        } else if (col_packed * 2 < kTileK) {
+                            A_smem[row][col_packed * 2] = __float2half(0.0f);
+                            A_smem[row][col_packed * 2 + 1] = __float2half(0.0f);
+                        }
+                    }
                 }
-                half scale_h = __float2half(scale_a);
-                A_smem[row][col_packed * 2] = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
-                A_smem[row][col_packed * 2 + 1] = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
-            } else if (row < kTileM && col_packed * 2 < kTileK) {
-                A_smem[row][col_packed * 2] = __float2half(0.0f);
-                A_smem[row][col_packed * 2 + 1] = __float2half(0.0f);
+            } else {
+                // Zero padding
+                #pragma unroll
+                for (int i = 0; i < kVecSize; i++) {
+                    const int col_packed = col_packed_base + i;
+                    if (row < kTileM && col_packed * 2 < kTileK) {
+                        A_smem[row][col_packed * 2] = __float2half(0.0f);
+                        A_smem[row][col_packed * 2 + 1] = __float2half(0.0f);
+                    }
+                }
             }
         }
 
-        // Load B tile
-        for (int col_packed = tid; col_packed < kTileK / 2; col_packed += kThreads) {
-            if ((k_packed_tile + col_packed) < K_packed) {
-                uint8_t packed = B_batch[k_packed_tile + col_packed];
-                int scale_idx = col_packed / 8;
-                float scale_b = 1.0f;
-                if ((k_scale_tile + scale_idx) < K_scales) {
-                    scale_b = decode_fp8_e4m3(SFB_batch[k_scale_tile + scale_idx]);
-                }
-                half scale_h = __float2half(scale_b);
-                half val0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
-                half val1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+        // ====================================================================
+        // Vectorized Load B tile: uint4 (16-byte) coalesced loads
+        // ====================================================================
+        const int num_vec_loads_B = ((kTileK / 2) + kVecSize - 1) / kVecSize;
 
-                #pragma unroll
-                for (int n = 0; n < 8; n++) {
-                    B_smem[col_packed * 2][n] = val0;
-                    B_smem[col_packed * 2 + 1][n] = val1;
+        for (int vec_idx = tid; vec_idx < num_vec_loads_B; vec_idx += kThreads) {
+            const int col_packed_base = vec_idx * kVecSize;
+
+            if ((k_packed_tile + col_packed_base) < K_packed) {
+                const uint8_t* src_ptr = &B_batch[k_packed_tile + col_packed_base];
+                const bool is_aligned = (reinterpret_cast<uintptr_t>(src_ptr) % 16 == 0);
+                const bool full_vec = ((k_packed_tile + col_packed_base + kVecSize) <= K_packed);
+
+                if (is_aligned && full_vec) {
+                    // Vectorized 16-byte load
+                    uint4 vec_data = *reinterpret_cast<const uint4*>(src_ptr);
+                    const uint8_t* vec_bytes = reinterpret_cast<const uint8_t*>(&vec_data);
+
+                    #pragma unroll
+                    for (int i = 0; i < kVecSize; i++) {
+                        const int col_packed = col_packed_base + i;
+                        if (col_packed * 2 < kTileK) {
+                            uint8_t packed = vec_bytes[i];
+                            int scale_idx = col_packed / 8;
+                            float scale_b = 1.0f;
+                            if ((k_scale_tile + scale_idx) < K_scales) {
+                                scale_b = decode_fp8_e4m3(SFB_batch[k_scale_tile + scale_idx]);
+                            }
+                            half scale_h = __float2half(scale_b);
+                            half val0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+                            half val1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+
+                            #pragma unroll
+                            for (int n = 0; n < 8; n++) {
+                                B_smem[col_packed * 2][n] = val0;
+                                B_smem[col_packed * 2 + 1][n] = val1;
+                            }
+                        }
+                    }
+                } else {
+                    // Fallback: scalar loads
+                    #pragma unroll
+                    for (int i = 0; i < kVecSize; i++) {
+                        const int col_packed = col_packed_base + i;
+                        if (col_packed < (kTileK / 2) && (k_packed_tile + col_packed) < K_packed) {
+                            uint8_t packed = B_batch[k_packed_tile + col_packed];
+                            int scale_idx = col_packed / 8;
+                            float scale_b = 1.0f;
+                            if ((k_scale_tile + scale_idx) < K_scales) {
+                                scale_b = decode_fp8_e4m3(SFB_batch[k_scale_tile + scale_idx]);
+                            }
+                            half scale_h = __float2half(scale_b);
+                            half val0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+                            half val1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+
+                            #pragma unroll
+                            for (int n = 0; n < 8; n++) {
+                                B_smem[col_packed * 2][n] = val0;
+                                B_smem[col_packed * 2 + 1][n] = val1;
+                            }
+                        } else if (col_packed * 2 < kTileK) {
+                            #pragma unroll
+                            for (int n = 0; n < 8; n++) {
+                                B_smem[col_packed * 2][n] = __float2half(0.0f);
+                                B_smem[col_packed * 2 + 1][n] = __float2half(0.0f);
+                            }
+                        }
+                    }
                 }
-            } else if (col_packed * 2 < kTileK) {
+            } else {
+                // Zero padding
                 #pragma unroll
-                for (int n = 0; n < 8; n++) {
-                    B_smem[col_packed * 2][n] = __float2half(0.0f);
-                    B_smem[col_packed * 2 + 1][n] = __float2half(0.0f);
+                for (int i = 0; i < kVecSize; i++) {
+                    const int col_packed = col_packed_base + i;
+                    if (col_packed * 2 < kTileK) {
+                        #pragma unroll
+                        for (int n = 0; n < 8; n++) {
+                            B_smem[col_packed * 2][n] = __float2half(0.0f);
+                            B_smem[col_packed * 2 + 1][n] = __float2half(0.0f);
+                        }
+                    }
                 }
             }
         }
