@@ -250,29 +250,45 @@ fp4_gemv_sm100_tc_optimized(
 
         __syncthreads();
 
-        // Compute - same logic as fallback kernel
+        // ====================================================================
+        // Compute with Multiple Rows Per Thread for Better ILP
+        // Each thread processes ALL rows_per_warp rows simultaneously
+        // This increases FMA utilization and reduces Short Scoreboard stalls
+        // ====================================================================
+
+        // Per-thread accumulators for all rows this warp handles
+        float local_acc[rows_per_warp];
         #pragma unroll
         for (int r = 0; r < rows_per_warp; r++) {
-            const int local_row = warp_id * rows_per_warp + r;
-            if (local_row >= kTileM) continue;
-            if (m_cta + local_row >= M) continue;
+            local_acc[r] = 0.0f;
+        }
 
-            float local_sum = 0.0f;
-            #pragma unroll 4
-            for (int k = lane_id; k < kTileK; k += 32) {
-                half a_val = A_smem[local_row][k];
-                half b_val = B_smem[k][0];
-                local_sum += __half2float(a_val) * __half2float(b_val);
+        // Process K dimension with all rows computed in parallel
+        #pragma unroll 4
+        for (int k = lane_id; k < kTileK; k += 32) {
+            half b_val = B_smem[k][0];
+
+            // Process all rows for this warp in parallel (8x FMA ops per iteration)
+            #pragma unroll
+            for (int r = 0; r < rows_per_warp; r++) {
+                const int local_row = warp_id * rows_per_warp + r;
+                if (local_row < kTileM && (m_cta + local_row) < M) {
+                    half a_val = A_smem[local_row][k];
+                    local_acc[r] += __half2float(a_val) * __half2float(b_val);
+                }
             }
+        }
 
-            // Warp reduction
+        // Warp reduction for each row
+        #pragma unroll
+        for (int r = 0; r < rows_per_warp; r++) {
             #pragma unroll
             for (int offset = 16; offset > 0; offset /= 2) {
-                local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
+                local_acc[r] += __shfl_xor_sync(0xFFFFFFFF, local_acc[r], offset);
             }
 
             if (lane_id == 0) {
-                acc[r] += local_sum;
+                acc[r] += local_acc[r];
             }
         }
     }
