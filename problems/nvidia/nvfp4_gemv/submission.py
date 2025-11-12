@@ -278,36 +278,35 @@ fp4_gemv_sm100_tc_optimized(
                               make_layout(make_shape(Int<kTileK>{}, _8{}),
                                         make_stride(_8{}, _1{})));
 
-        // Partition tensors for this thread
+        // Partition tensors for this thread using TiledMMA
         TiledMMA tiled_mma;
+        auto thread_mma = tiled_mma.get_slice(tid);
 
-        // Create accumulator (persistent across K tiles)
-        auto tCrC = tiled_mma.make_fragment_C();
+        // Partition shared memory tensors for MMA
+        auto tCsA = thread_mma.partition_A(gA);  // [MMA, MMA_M, MMA_K]
+        auto tCsB = thread_mma.partition_B(gB);  // [MMA, MMA_N, MMA_K]
+
+        // Create register accumulator
+        auto tCrC = thread_mma.make_fragment_C();
         clear(tCrC);
 
-        // Process K dimension in tiles (MMA processes 16 elements of K at a time)
-        constexpr int kMmaK = 16;
-        constexpr int kNumMmaK = kTileK / kMmaK;  // 256/16 = 16
+        // Get K_TILE_MAX from partitioned tensor
+        int K_TILE_MAX = size<2>(tCsA);  // Number of K tiles
 
-        for (int k_tile = 0; k_tile < kNumMmaK; ++k_tile) {
-            // Slice K dimension for this iteration
-            auto gA_slice = local_tile(gA, make_tile(Int<kTileM>{}, Int<kMmaK>{}), make_coord(0, k_tile));
-            auto gB_slice = local_tile(gB, make_tile(Int<kMmaK>{}, _8{}), make_coord(k_tile, 0));
-
-            auto tCrA = tiled_mma.partition_fragment_A(gA_slice);
-            auto tCrB = tiled_mma.partition_fragment_B(gB_slice);
-
-            // Perform MMA: C += A * B (accumulate across K tiles)
-            gemm(tiled_mma, tCrA, tCrB, tCrC);
+        // Process K dimension with GEMM accumulation
+        for (int k_tile = 0; k_tile < K_TILE_MAX; ++k_tile) {
+            // Get K-tile slices: tCsA(_, _, k_tile) and tCsB(_, _, k_tile)
+            // gemm() accumulates into tCrC
+            gemm(tCsA(_, _, k_tile), tCsB(_, _, k_tile), tCrC);
         }
 
         // Accumulate MMA results to output
-        // Each thread has part of the 64×8 output
+        // tCrC contains this thread's portion of 64×8 output
         #pragma unroll
         for (int r = 0; r < rows_per_warp; r++) {
             const int local_row = warp_id * rows_per_warp + r;
             if (local_row < kTileM && (m_cta + local_row) < M) {
-                // Sum this thread's contribution across N=8 columns
+                // Sum all elements in this thread's fragment
                 float row_sum = 0.0f;
                 for (int i = 0; i < size(tCrC); ++i) {
                     row_sum += tCrC(i);
