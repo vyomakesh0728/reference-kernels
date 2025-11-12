@@ -448,31 +448,20 @@ void launch_fp4_gemv_optimized(
     dim3 grid, block(kThreads);
 
     // ========================================================================
-    // Use tensor cores for leaderboard shapes, fallback for others
+    // Use fallback kernel for all shapes (tensor core kernel has issues)
     // ========================================================================
 
-    // Tensor cores with batch parallelization for leaderboard shapes
-    if ((M == 7168 && K == 16384 && L == 1) ||
-        (M == 4096 && K == 7168 && L == 8) ||
-        (M == 7168 && K == 2048 && L == 4)) {
-        grid = dim3(num_blocks, L);
-        fp4_gemv_sm100_tc_optimized<kTileM, kTileK, kThreads><<<grid, block>>>(
-            A_ptr, B_ptr, SFA_ptr, SFB_ptr, D_ptr, M, K, L
-        );
-    } else {
-        // Fallback for other test shapes
-        grid = dim3(num_blocks);
-        for (int64_t batch = 0; batch < L; batch++) {
-            const uint8_t* A_batch = A_ptr + batch * M * K_packed;
-            const uint8_t* B_batch = B_ptr + batch * 128 * K_packed;
-            const uint8_t* SFA_batch = SFA_ptr + batch * M * K_scales;
-            const uint8_t* SFB_batch = SFB_ptr + batch * 128 * K_scales;
-            half* D_batch = D_ptr + batch * M;
+    grid = dim3(num_blocks);
+    for (int64_t batch = 0; batch < L; batch++) {
+        const uint8_t* A_batch = A_ptr + batch * M * K_packed;
+        const uint8_t* B_batch = B_ptr + batch * 128 * K_packed;
+        const uint8_t* SFA_batch = SFA_ptr + batch * M * K_scales;
+        const uint8_t* SFB_batch = SFB_ptr + batch * 128 * K_scales;
+        half* D_batch = D_ptr + batch * M;
 
-            fp4_gemv_sm100_mma_kernel<kTileM, kTileK, kThreads><<<grid, block>>>(
-                A_batch, B_batch, SFA_batch, SFB_batch, D_batch, M, K
-            );
-        }
+        fp4_gemv_sm100_mma_kernel<kTileM, kTileK, kThreads><<<grid, block>>>(
+            A_batch, B_batch, SFA_batch, SFB_batch, D_batch, M, K
+        );
     }
 
     cudaError_t err = cudaDeviceSynchronize();
