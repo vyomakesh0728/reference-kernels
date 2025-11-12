@@ -251,78 +251,43 @@ fp4_gemv_sm100_tc_optimized(
         __syncthreads();
 
         // ====================================================================
-        // CUTLASS-style MMA Compute with Tensor Core Instructions
-        // Using m16n8k16 atoms for SM100 Blackwell architecture
+        // Compute: Process multiple rows per thread for maximum ILP
         // ====================================================================
 
-        constexpr int kMmaM = 16;  // MMA tile M dimension
-        constexpr int kMmaK = 16;  // MMA tile K dimension
-        constexpr int kNumMmaK = kTileK / kMmaK;  // 256/16 = 16
-
-        // Per-warp accumulators (each warp handles rows_per_warp=4 rows)
-        float warp_acc[rows_per_warp];
+        // Per-thread accumulators for all rows this warp handles
+        float local_acc[rows_per_warp];
         #pragma unroll
         for (int r = 0; r < rows_per_warp; r++) {
-            warp_acc[r] = 0.0f;
+            local_acc[r] = 0.0f;
         }
 
-        // Process K dimension in 16-element MMA tiles
-        #pragma unroll
-        for (int k_mma = 0; k_mma < kNumMmaK; k_mma++) {
-            const int k_base = k_mma * kMmaK;
+        // Process K dimension with all rows computed in parallel
+        #pragma unroll 8
+        for (int k = lane_id; k < kTileK; k += 32) {
+            half b_val = B_smem[k][0];
 
-            // Each warp processes its assigned rows
+            // Process all rows for this warp in parallel
             #pragma unroll
             for (int r = 0; r < rows_per_warp; r++) {
                 const int local_row = warp_id * rows_per_warp + r;
-                if (local_row >= kTileM || (m_cta + local_row) >= M) continue;
-
-                // Per-lane accumulator for this MMA tile
-                float mma_acc = 0.0f;
-
-                // MMA-style K reduction: each lane processes 16/32 elements
-                // Use half2 for 2x FMA throughput
-                const int k_per_lane = (kMmaK + 31) / 32;
-
-                #pragma unroll
-                for (int ki = 0; ki < k_per_lane; ki++) {
-                    const int k_idx = k_base + lane_id + ki * 32;
-                    if (k_idx < k_base + kMmaK && k_idx < kTileK) {
-                        // Load as half2 for vectorized FMA when possible
-                        if (k_idx + 1 < kTileK && ((k_idx - k_base) & 1) == 0) {
-                            // Vectorized: process 2 elements with half2
-                            half2 a_val2 = *reinterpret_cast<half2*>(&A_smem[local_row][k_idx]);
-                            half2 b_val2 = *reinterpret_cast<half2*>(&B_smem[k_idx][0]);
-
-                            // half2 FMA: 2x throughput
-                            half2 prod = __hmul2(a_val2, b_val2);
-                            mma_acc += __half2float(prod.x) + __half2float(prod.y);
-                        } else {
-                            // Scalar fallback for boundary
-                            half a_val = A_smem[local_row][k_idx];
-                            half b_val = B_smem[k_idx][0];
-                            mma_acc += __half2float(a_val) * __half2float(b_val);
-                        }
-                    }
-                }
-
-                // Warp reduction for this MMA tile
-                #pragma unroll
-                for (int offset = 16; offset > 0; offset /= 2) {
-                    mma_acc += __shfl_xor_sync(0xFFFFFFFF, mma_acc, offset);
-                }
-
-                // Accumulate to warp result
-                if (lane_id == 0) {
-                    warp_acc[r] += mma_acc;
+                if (local_row < kTileM && (m_cta + local_row) < M) {
+                    half a_val = A_smem[local_row][k];
+                    local_acc[r] += __half2float(a_val) * __half2float(b_val);
                 }
             }
         }
 
-        // Write warp results to final accumulator
+        // Warp reduction for each row
         #pragma unroll
         for (int r = 0; r < rows_per_warp; r++) {
-            acc[r] += warp_acc[r];
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset /= 2) {
+                local_acc[r] += __shfl_xor_sync(0xFFFFFFFF, local_acc[r], offset);
+            }
+
+            if (lane_id == 0) {
+                acc[r] += local_acc[r];
+            }
         }
     }
 
