@@ -486,7 +486,7 @@ void launch_fp4_gemv_optimized(
 
     constexpr int kTileM = 64;
     constexpr int kTileK = 128;
-    constexpr int kThreads = 256;
+    constexpr int kThreads = 512;  // Increased from 256 for better SM utilization
 
     int num_blocks = (M + kTileM - 1) / kTileM;
     dim3 grid, block(kThreads);
