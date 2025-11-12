@@ -204,24 +204,28 @@ fp4_gemv_sm100_cute_mma(
         auto tBs = thr_mma.partition_B(smem_B_tensor);
 
         // Create register-based accumulator (not TMEM)
-        // For SM100, make_fragment_C creates TMEM fragments, but we need registers
-        // Get the C partition layout and create explicit register storage
         auto gC = make_tensor(make_smem_ptr((half*)nullptr),
                               make_layout(make_shape(Int<kTileM>{}, _8{}),
                                         make_stride(_8{}, _1{})));
         auto tCgC = thr_mma.partition_C(gC);
-
-        // Create register tensor with same layout as partitioned C
         auto tCs = make_tensor<float>(tCgC.layout());
         clear(tCs);
+
+        // Create register fragments for A and B slices
+        // CuTe gemm requires register tensors, not direct smem access
+        auto rA = make_tensor_like(tAs(_, _, 0));
+        auto rB = make_tensor_like(tBs(_, _, 0));
 
         const int k_mma_iters = kTileK / 16;
 
         #pragma unroll
         for (int k = 0; k < k_mma_iters; ++k) {
-            // Use 3-argument gemm form - partitioned tensors encode MMA layout
-            // gemm(A, B, C) computes C = A * B + C (in-place accumulation)
-            gemm(tAs(_, _, k), tBs(_, _, k), tCs);
+            // Copy from shared memory to registers
+            copy(tAs(_, _, k), rA);
+            copy(tBs(_, _, k), rB);
+
+            // Call gemm on register tensors
+            gemm(rA, rB, tCs);
         }
 
         #pragma unroll
