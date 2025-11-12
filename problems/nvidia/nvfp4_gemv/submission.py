@@ -251,42 +251,67 @@ fp4_gemv_sm100_tc_optimized(
         __syncthreads();
 
         // ====================================================================
-        // Compute: Process multiple rows per thread for maximum ILP
+        // CUTLASS CuTe MMA Tensor Core Compute for SM100 Blackwell
+        // Using tcgen05.mma.f16 instructions via CuTe API
         // ====================================================================
 
-        // Per-thread accumulators for all rows this warp handles
-        float local_acc[rows_per_warp];
-        #pragma unroll
-        for (int r = 0; r < rows_per_warp; r++) {
-            local_acc[r] = 0.0f;
+        // MMA configuration: m16n8k16 atom for SM100
+        using MMAOp = SM100_16x8x16_F32F16F16_SS<GMMA::Major::K, GMMA::Major::K>;
+        using MMAAtom = MMA_Atom<MMAOp>;
+        using TiledMMA = TiledMMA<MMAAtom, Layout<Shape<_16,_1,_1>>>;
+
+        constexpr int kMmaM = 16;
+        constexpr int kMmaK = 16;
+        constexpr int kNumMmaK = kTileK / kMmaK;  // 256/16 = 16
+
+        // Create CuTe tensors from shared memory
+        auto gA = make_tensor(make_smem_ptr(&A_smem[0][0]),
+                              make_layout(make_shape(Int<kTileM>{}, Int<kTileK>{}),
+                                        make_stride(Int<kTileK + 8>{}, _1{})));
+        auto gB = make_tensor(make_smem_ptr(&B_smem[0][0]),
+                              make_layout(make_shape(Int<kTileK>{}, _8{}),
+                                        make_stride(_8{}, _1{})));
+
+        // Partition tensors for this thread
+        TiledMMA tiled_mma;
+        auto tCrA = tiled_mma.partition_fragment_A(gA);
+        auto tCrB = tiled_mma.partition_fragment_B(gB);
+        auto tCrC = tiled_mma.make_fragment_C();
+
+        // Clear accumulator
+        clear(tCrC);
+
+        // Process K dimension with MMA operations
+        for (int k_mma = 0; k_mma < kNumMmaK; ++k_mma) {
+            // Slice K tiles for this MMA operation
+            auto tCrA_view = tCrA(_, _, k_mma);
+            auto tCrB_view = tCrB(_, _, k_mma);
+
+            // Perform MMA: C = A * B
+            gemm(tiled_mma, tCrA_view, tCrB_view, tCrC);
         }
 
-        // Process K dimension with all rows computed in parallel
-        #pragma unroll 8
-        for (int k = lane_id; k < kTileK; k += 32) {
-            half b_val = B_smem[k][0];
+        // Accumulate MMA results to output
+        // Each thread has fragment of output - accumulate to acc[] array
+        auto tCgC_layout = tiled_mma.partition_C(gA.layout());
 
-            // Process all rows for this warp in parallel
-            #pragma unroll
-            for (int r = 0; r < rows_per_warp; r++) {
-                const int local_row = warp_id * rows_per_warp + r;
-                if (local_row < kTileM && (m_cta + local_row) < M) {
-                    half a_val = A_smem[local_row][k];
-                    local_acc[r] += __half2float(a_val) * __half2float(b_val);
+        #pragma unroll
+        for (int r = 0; r < rows_per_warp; r++) {
+            const int local_row = warp_id * rows_per_warp + r;
+            if (local_row < kTileM && (m_cta + local_row) < M) {
+                // Accumulate from MMA fragment for this row
+                float row_sum = 0.0f;
+
+                // Sum across N dimension (B columns 0-7)
+                #pragma unroll
+                for (int n = 0; n < 8; n++) {
+                    int frag_idx = tCgC_layout(local_row, n);
+                    if (frag_idx >= 0 && frag_idx < tCrC.size()) {
+                        row_sum += tCrC(frag_idx);
+                    }
                 }
-            }
-        }
 
-        // Warp reduction for each row
-        #pragma unroll
-        for (int r = 0; r < rows_per_warp; r++) {
-            #pragma unroll
-            for (int offset = 16; offset > 0; offset /= 2) {
-                local_acc[r] += __shfl_xor_sync(0xFFFFFFFF, local_acc[r], offset);
-            }
-
-            if (lane_id == 0) {
-                acc[r] += local_acc[r];
+                acc[r] += row_sum;
             }
         }
     }
