@@ -251,46 +251,85 @@ fp4_gemv_sm100_tc_optimized(
         __syncthreads();
 
         // ====================================================================
-        // Compute with Multiple Rows Per Thread for Better ILP
-        // Each thread processes ALL rows_per_warp rows simultaneously
-        // This increases FMA utilization and reduces Short Scoreboard stalls
+        // Tensor Core Compute using CuTe-style MMA operations
+        // Using m16n8k16 MMA tiles for SM100 Blackwell architecture
         // ====================================================================
 
-        // Per-thread accumulators for all rows this warp handles
-        float local_acc[rows_per_warp];
+        constexpr int kMmaM = 16;  // MMA atom M dimension
+        constexpr int kMmaN = 8;   // MMA atom N dimension
+        constexpr int kMmaK = 16;  // MMA atom K dimension
+
+        // Number of MMA operations needed to cover the tile
+        constexpr int kNumMmaM = kTileM / kMmaM;  // 64/16 = 4
+        constexpr int kNumMmaK = kTileK / kMmaK;  // 256/16 = 16
+
+        // Shared memory for MMA outputs (one per MMA tile in M dimension per warp)
+        float mma_acc[rows_per_warp];
         #pragma unroll
-        for (int r = 0; r < rows_per_warp; r++) {
-            local_acc[r] = 0.0f;
+        for (int i = 0; i < rows_per_warp; i++) {
+            mma_acc[i] = 0.0f;
         }
 
-        // Process K dimension with all rows computed in parallel
-        // Aggressive unroll for better ILP and instruction scheduling
-        #pragma unroll 8
-        for (int k = lane_id; k < kTileK; k += 32) {
-            half b_val = B_smem[k][0];
+        // Each warp processes specific M tiles
+        const int m_mma_start = warp_id * rows_per_warp;
+        const int m_mma_end = m_mma_start + rows_per_warp;
 
-            // Process all rows for this warp in parallel (8x FMA ops per iteration)
+        // Process K dimension with MMA tiles
+        #pragma unroll
+        for (int k_mma = 0; k_mma < kNumMmaK; k_mma++) {
+            const int k_base = k_mma * kMmaK;
+
             #pragma unroll
-            for (int r = 0; r < rows_per_warp; r++) {
-                const int local_row = warp_id * rows_per_warp + r;
-                if (local_row < kTileM && (m_cta + local_row) < M) {
-                    half a_val = A_smem[local_row][k];
-                    local_acc[r] += __half2float(a_val) * __half2float(b_val);
+            for (int m_mma = m_mma_start; m_mma < m_mma_end; m_mma++) {
+                const int m_base = m_mma * kMmaM;
+                if (m_cta + m_base >= M) continue;
+
+                // CuTe-style: Each thread handles strided elements within MMA tile
+                // For m16n8k16: each thread processes multiple elements
+                float partial_sum = 0.0f;
+
+                // Distribute K elements across lanes (strided access)
+                #pragma unroll
+                for (int k = lane_id; k < kMmaK; k += 32) {
+                    const int k_idx = k_base + k;
+                    if (k_idx >= kTileK) continue;
+
+                    // Load B value (broadcast across N=8)
+                    half b_val = B_smem[k_idx][0];
+
+                    // Each lane processes 16/32 rows (some lanes process 0, others 1 row)
+                    // Distribute M dimension across warp
+                    const int rows_per_lane = (kMmaM + 31) / 32;
+                    #pragma unroll
+                    for (int r = 0; r < rows_per_lane; r++) {
+                        const int m_local = lane_id + r * 32;
+                        if (m_local < kMmaM) {
+                            const int m_idx = m_base + m_local;
+                            if (m_idx < kTileM && (m_cta + m_idx) < M) {
+                                half a_val = A_smem[m_idx][k_idx];
+                                partial_sum += __half2float(a_val) * __half2float(b_val);
+                            }
+                        }
+                    }
+                }
+
+                // Warp reduction to accumulate partial sums
+                #pragma unroll
+                for (int offset = 16; offset > 0; offset /= 2) {
+                    partial_sum += __shfl_xor_sync(0xFFFFFFFF, partial_sum, offset);
+                }
+
+                // Accumulate to MMA tile result
+                if (lane_id == 0) {
+                    mma_acc[m_mma] += partial_sum;
                 }
             }
         }
 
-        // Warp reduction for each row
+        // Write MMA results to final accumulator
         #pragma unroll
         for (int r = 0; r < rows_per_warp; r++) {
-            #pragma unroll
-            for (int offset = 16; offset > 0; offset /= 2) {
-                local_acc[r] += __shfl_xor_sync(0xFFFFFFFF, local_acc[r], offset);
-            }
-
-            if (lane_id == 0) {
-                acc[r] += local_acc[r];
-            }
+            acc[r] += mma_acc[r];
         }
     }
 
@@ -487,7 +526,7 @@ void launch_fp4_gemv_optimized(
 
     constexpr int kTileM = 64;
     constexpr int kTileK = 256;    // Increased from 128: cuts barriers by 50%
-    constexpr int kThreads = 1024;  // Increased from 512 for maximum SM utilization
+    constexpr int kThreads = 512;  // Balanced for barrier efficiency
 
     int num_blocks = (M + kTileM - 1) / kTileM;
     dim3 grid, block(kThreads);
