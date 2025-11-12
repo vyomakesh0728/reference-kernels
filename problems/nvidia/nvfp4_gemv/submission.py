@@ -192,6 +192,9 @@ fp4_gemv_sm100_cute_mma(
             UMMA::ScaleIn::One   // b_neg: no negation/scaling
         >;
 
+        // Create MMA_Atom for gemm calls (required by CuTe gemm API)
+        MMA_Atom<MMA_Atom_Arch> mma_atom;
+
         using TiledMMA = TiledMMA<
             MMA_Atom<MMA_Atom_Arch>,
             Layout<Shape<_1,_1,_1>>     // 1x1x1 tiling (single MMA per thread group)
@@ -219,8 +222,8 @@ fp4_gemv_sm100_cute_mma(
 
         #pragma unroll
         for (int k = 0; k < k_mma_iters; ++k) {
-            // Use 5-argument gemm: gemm(MMA, D, A, B, C) = D = A * B + C
-            gemm(tiled_mma, tCs, tAs(_, _, k), tBs(_, _, k), tCs);
+            // gemm signature: gemm(MMA_Atom, D, A, B, C) = D = A * B + C
+            gemm(mma_atom, tCs, tAs(_, _, k), tBs(_, _, k), tCs);
         }
 
         #pragma unroll
