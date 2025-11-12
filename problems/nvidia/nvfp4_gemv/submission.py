@@ -170,15 +170,19 @@ void launch_fp4_gemv_optimized(
     cudaMalloc(&SFD_ptr, gemm_batch * (gemm_m / kVectorSize) * sizeof(uint8_t));
 
     // Calculate batch strides
-    const int k_blks = (gemm_k + kVectorSize - 1) / kVectorSize;
-    const int m_blks = (gemm_m + 127) / 128;
+    const int k_blks = (gemm_k + kVectorSize - 1) / kVectorSize;  // ceil(K/16)
+    const int m_blks = (gemm_m + 127) / 128;                       // ceil(M/128)
+
+    // For permuted scale factors with shape [L, 32, 4, ceil(M/128), 4, ceil(K/64)]
+    const int k_blks_sf = (gemm_k + 63) / 64;  // ceil(K/64) for atom_k=4 blocking
+    const int64_t sf_elements_per_batch = 32 * 4 * m_blks * 4 * k_blks_sf;
 
     const int64_t batch_stride_A = gemm_m * (gemm_k / 2);
     const int64_t batch_stride_B = gemm_k / 2;
     const int64_t batch_stride_C = 0;
     const int64_t batch_stride_D = gemm_m / 2;  // FP4 packed
-    const int64_t batch_stride_SFA = m_blks * 128 * k_blks;
-    const int64_t batch_stride_SFB = k_blks;
+    const int64_t batch_stride_SFA = sf_elements_per_batch;
+    const int64_t batch_stride_SFB = 32 * 4 * 1 * 4 * k_blks_sf;  // For B: M=1 (padded to 128)
     const int64_t batch_stride_SFD = gemm_m / kVectorSize;
 
     // Construct TensorRefs
@@ -317,10 +321,13 @@ def custom_kernel(data: input_t) -> output_t:
     a_bytes = a.view(torch.uint8)
     b_bytes = b.view(torch.uint8)
 
-    # Scale factors - already in CUTLASS blocked format, just move to GPU
-    # Shape: sfa_permuted is [32, 4, ceil(M/128), 4, ceil(K/16/4), L]
-    sfa_bytes = sfa_permuted.cuda().contiguous().view(torch.uint8)
-    sfb_bytes = sfb_permuted.cuda().contiguous().view(torch.uint8)
+    # Scale factors - need to move batch dimension from innermost to outermost
+    # Current shape: [32, 4, ceil(M/128), 4, ceil(K/64), L]
+    # CUTLASS expects: [L, 32, 4, ceil(M/128), 4, ceil(K/64)]
+    sfa_reordered = sfa_permuted.permute(5, 0, 1, 2, 3, 4).cuda().contiguous()
+    sfb_reordered = sfb_permuted.permute(5, 0, 1, 2, 3, 4).cuda().contiguous()
+    sfa_bytes = sfa_reordered.view(torch.uint8)
+    sfb_bytes = sfb_reordered.view(torch.uint8)
 
     # Launch CUTLASS GEMV (produces FP16 output directly!)
     mod = get_module()
