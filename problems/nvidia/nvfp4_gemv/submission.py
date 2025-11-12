@@ -175,24 +175,75 @@ fp4_gemv_sm100_cute_mma(
 
         __syncthreads();
 
-        // Compute GEMV using scalar FMA operations
-        // Each thread processes specific rows, accumulating over K dimension
+        // ===================================================================
+        // SM100 Blockwise GEMM with Tensor Cores (tcgen05.mma.f16)
+        // Following CUTLASS blockwise_gemm.py and fp4_gemv.cu patterns
+        // ===================================================================
+
+        // Create SM100 MMA atom for FP16 inputs, FP32 accumulator
+        // M=128, N=8, K=16 per MMA instruction
+        using MMA_Atom_Arch = SM100_MMA_F16BF16_SS<
+            cutlass::half_t,
+            cutlass::half_t,
+            float,
+            128, 8,
+            UMMA::Major::K,
+            UMMA::Major::K,
+            UMMA::ScaleIn::One,
+            UMMA::ScaleIn::One
+        >;
+
+        // Create TiledMMA with 1x1x1 atom tiling (single CTA)
+        using TiledMMA = TiledMMA<
+            MMA_Atom<MMA_Atom_Arch>,
+            Layout<Shape<_1,_1,_1>>
+        >;
+
+        TiledMMA tiled_mma;
+        auto thr_mma = tiled_mma.get_slice(tid);
+
+        // Partition shared memory tensors according to MMA layout
+        auto tCsA = thr_mma.partition_A(smem_A_tensor);  // (MMA, MMA_M, MMA_K)
+        auto tCsB = thr_mma.partition_B(smem_B_tensor);  // (MMA, MMA_N, MMA_K)
+
+        // Create register fragments for A and B with correct sizes
+        auto tCrA = tiled_mma.make_fragment_A(tCsA);
+        auto tCrB = tiled_mma.make_fragment_B(tCsB);
+
+        // Create accumulator fragment for C (M×N output)
+        auto gC_shape = make_shape(Int<kTileM>{}, _8{});
+        auto gC_layout = make_layout(gC_shape, make_stride(_8{}, _1{}));
+        auto gC = make_tensor(make_smem_ptr((half*)nullptr), gC_layout);
+        auto tCgC = thr_mma.partition_C(gC);
+        auto tCrC = tiled_mma.make_fragment_C(tCgC);
+        clear(tCrC);
+
+        // Number of K-iterations for MMA (K=16 per MMA instruction)
+        const int k_mma_iters = kTileK / 16;
+
+        // Main MMA compute loop
+        #pragma unroll
+        for (int k = 0; k < k_mma_iters; ++k) {
+            // Copy K-slice from shared memory to register fragments
+            copy(tCsA(_, _, k), tCrA(_, _, k));
+            copy(tCsB(_, _, k), tCrB(_, _, k));
+        }
+
+        // Call gemm to accumulate all K-iterations
+        // This uses SM100 tcgen05.mma.f16 tensor core instructions
+        gemm(tiled_mma, tCrC, tCrA, tCrB, tCrC);
+
+        // Accumulate MMA results to per-thread output
         #pragma unroll
         for (int r = 0; r < rows_per_warp; ++r) {
             const int local_row = warp_id * rows_per_warp + r;
             if (local_row < kTileM && (m_cta + local_row) < M) {
                 float sum = 0.0f;
-
-                // Inner product: row of A with broadcasted B vector
+                // Sum across all elements in this thread's fragment
                 #pragma unroll
-                for (int k = 0; k < kTileK; ++k) {
-                    half a_val = smem_A_tensor(local_row, k);
-                    // B is broadcasted across all 8 columns, just use column 0
-                    half b_val = smem_B_tensor(k, 0);
-
-                    sum += __half2float(a_val) * __half2float(b_val);
+                for (int i = 0; i < size(tCrC); ++i) {
+                    sum += tCrC(i);
                 }
-
                 acc[r] += sum;
             }
         }
