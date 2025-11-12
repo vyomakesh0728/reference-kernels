@@ -175,73 +175,25 @@ fp4_gemv_sm100_cute_mma(
 
         __syncthreads();
 
-        // ============================================================================
-        // CORRECT SM100 MMA ATOM FOR CUTLASS 4.2.1
-        // ============================================================================
-        // SM100 uses UMMA namespace (Unified MMA) not GMMA (which is SM90/Hopper)
-        // Type: SM100_MMA_F16BF16_SS with full template parameters
-        // Using M=128 to match kTileM for optimal performance on leaderboard shapes
-        using MMA_Atom_Arch = SM100_MMA_F16BF16_SS<
-            cutlass::half_t,     // a_type: FP16 input for A
-            cutlass::half_t,     // b_type: FP16 input for B
-            float,               // c_type: F32 accumulator
-            128, 8,              // M, N: tile dimensions (M must be 64 or 128)
-            UMMA::Major::K,      // a_major: K-major (row-major)
-            UMMA::Major::K,      // b_major: K-major (row-major)
-            UMMA::ScaleIn::One,  // a_neg: no negation/scaling
-            UMMA::ScaleIn::One   // b_neg: no negation/scaling
-        >;
-
-        // Create MMA_Atom instance for fragment creation and gemm calls
-        MMA_Atom<MMA_Atom_Arch> mma_atom;
-
-        using TiledMMA = TiledMMA<
-            MMA_Atom<MMA_Atom_Arch>,
-            Layout<Shape<_1,_1,_1>>     // 1x1x1 tiling (single MMA per thread group)
-        >;
-
-        TiledMMA tiled_mma;
-        auto thr_mma = tiled_mma.get_slice(tid);
-
-        auto tAs = thr_mma.partition_A(smem_A_tensor);  // (MMA, MMA_M, MMA_K)
-        auto tBs = thr_mma.partition_B(smem_B_tensor);  // (MMA, MMA_N, MMA_K)
-
-        // Create register-based accumulator (not TMEM)
-        auto gC = make_tensor(make_smem_ptr((half*)nullptr),
-                              make_layout(make_shape(Int<kTileM>{}, _8{}),
-                                        make_stride(_8{}, _1{})));
-        auto tCgC = thr_mma.partition_C(gC);  // (MMA, MMA_M, MMA_N)
-        auto tCs = make_tensor<float>(tCgC.layout());
-        clear(tCs);
-
-        // Create register fragments using MMA_Atom's make_fragment methods
-        // These ensure correct register counts for SM100 MMA instructions
-        auto rA = mma_atom.make_fragment_A(tAs);
-        auto rB = mma_atom.make_fragment_B(tBs);
-
-        const int k_mma_iters = kTileK / 16;
-
-        #pragma unroll
-        for (int k = 0; k < k_mma_iters; ++k) {
-            // Copy K-slice from shared memory partitions to register fragments
-            copy(tAs(_, _, k), rA(_, _, k));
-            copy(tBs(_, _, k), rB(_, _, k));
-
-            // Call gemm on this K-slice, accumulating into tCs
-            // gemm(MMA, D, A, B, C) computes D = A @ B + C
-            gemm(mma_atom, tCs, rA(_, _, k), rB(_, _, k), tCs);
-        }
-
+        // Compute GEMV using scalar FMA operations
+        // Each thread processes specific rows, accumulating over K dimension
         #pragma unroll
         for (int r = 0; r < rows_per_warp; ++r) {
             const int local_row = warp_id * rows_per_warp + r;
             if (local_row < kTileM && (m_cta + local_row) < M) {
-                float row_sum = 0.0f;
+                float sum = 0.0f;
+
+                // Inner product: row of A with broadcasted B vector
                 #pragma unroll
-                for (int i = 0; i < size(tCs); ++i) {
-                    row_sum += tCs(i);
+                for (int k = 0; k < kTileK; ++k) {
+                    half a_val = smem_A_tensor(local_row, k);
+                    // B is broadcasted across all 8 columns, just use column 0
+                    half b_val = smem_B_tensor(k, 0);
+
+                    sum += __half2float(a_val) * __half2float(b_val);
                 }
-                acc[r] += row_sum;
+
+                acc[r] += sum;
             }
         }
     }
