@@ -8,7 +8,8 @@ from task import input_t, output_t
 cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
 
 # ============================================================================
-# CUTLASS GEMV BlockScaled API - Production SM100 FP4 GEMV
+# CUTLASS GEMV BlockScaled API - Direct FP16 Output (No Decode Stage)
+# Uses CUTLASS blockwise GEMM with FP4 inputs, FP16 output directly
 # ============================================================================
 cuda_source = r"""
 #include <torch/extension.h>
@@ -37,14 +38,12 @@ using LayoutA = cutlass::layout::RowMajor;
 using ElementB = cutlass::float_e2m1_t;
 using ElementSFB = cutlass::float_e4m3_t;
 
-// GEMV produces FP4 output with scale factors, we'll decode to FP16 after
-using ElementC = cutlass::float_e2m1_t;
-using ElementD = cutlass::float_e2m1_t;  // FP4 intermediate output
+// GEMV produces FP16 output directly (no intermediate FP4 stage)
+using ElementC = cutlass::half_t;
+using ElementD = cutlass::half_t;  // FP16 final output
 using LayoutD = cutlass::layout::ColumnMajor;
 
-using ElementSFD = cutlass::float_e4m3_t;
-using LayoutSFD = cutlass::layout::ColumnMajor;
-
+// No scale factors needed for output (applied during mainloop)
 using ElementAccumulatorMainloop = cutlass::half_t;
 using ElementAccumulator = float;
 using ElementCompute = float;
@@ -57,17 +56,16 @@ static constexpr int kElementsPerAccess = 128 / cutlass::sizeof_bits<ElementA>::
 using ThreadShape = cutlass::gemm::GemmShape<16, 8>;
 static_assert(kVectorSize == ThreadShape::kM, "vector size mismatch");
 
-// Epilogue with scaling factor output
-using EpilogueOp = cutlass::epilogue::threadblock::GemvEpilogueWithScalingFactor<
+// Simple epilogue that outputs FP16 directly (no intermediate FP4 quantization)
+// Uses standard linear combination: D = alpha * accumulator + beta * C
+using EpilogueOp = cutlass::epilogue::threadblock::GemvEpilogueLinearCombination<
     kVectorSize,
     ThreadShape,
     ElementCompute,
     ElementAccumulator,
     ElementC,
     ElementD,
-    ElementSFD,
-    LayoutD,
-    LayoutSFD
+    LayoutD
 >;
 
 // Main GEMV kernel using CUTLASS BlockScaled API
@@ -84,67 +82,7 @@ using GemvKernel = cutlass::gemm::kernel::GemvBlockScaled<
 using Gemv = cutlass::gemm::device::GemvBlockScaled<GemvKernel>;
 
 // ============================================================================
-// GPU Decode Kernel: FP4 + FP8 Scale Factors → FP16
-// ============================================================================
-
-// FP4 E2M1 lookup table (1 sign, 2 exp, 1 mantissa)
-__constant__ float fp4_e2m1_lut[16] = {
-    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
-    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
-};
-
-__device__ __forceinline__ float decode_fp8_e4m3(uint8_t byte) {
-    // FP8 E4M3: 1 sign, 4 exp, 3 mantissa (bias = 7)
-    // Use CUTLASS type for proper decoding
-    cutlass::float_e4m3_t fp8_val;
-    reinterpret_cast<uint8_t&>(fp8_val) = byte;
-    return static_cast<float>(fp8_val);
-}
-
-__global__ void decode_fp4_to_fp16_kernel(
-    const uint8_t* __restrict__ fp4_packed,
-    const uint8_t* __restrict__ scale_factors,
-    half* __restrict__ output_fp16,
-    int M, int L
-) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int batch = blockIdx.y;
-
-    if (idx >= M || batch >= L) return;
-
-    const int packed_idx = idx / 2;
-    const int nibble_idx = idx % 2;
-    const int sf_idx = idx / kVectorSize;
-
-    // Get FP4 packed byte
-    const int batch_offset_fp4 = batch * (M / 2);
-    const uint8_t packed_byte = fp4_packed[batch_offset_fp4 + packed_idx];
-
-    // Extract nibble (low nibble = even idx, high nibble = odd idx)
-    uint8_t nibble;
-    if (nibble_idx == 0) {
-        nibble = packed_byte & 0x0F;
-    } else {
-        nibble = (packed_byte >> 4) & 0x0F;
-    }
-
-    // Decode FP4 E2M1 using lookup table
-    float decoded_val = fp4_e2m1_lut[nibble];
-
-    // Decode FP8 E4M3 scale factor
-    const int batch_offset_sf = batch * (M / kVectorSize);
-    uint8_t sf_byte = scale_factors[batch_offset_sf + sf_idx];
-    float sf_decoded = decode_fp8_e4m3(sf_byte);
-
-    // FIX: Scale factors from epilogue already incorporate st parameter
-    // Simply multiply dequantized FP4 value by the scale factor
-    float result = decoded_val * sf_decoded;
-    const int output_idx = batch * M + idx;
-    output_fp16[output_idx] = __float2half(result);
-}
-
-// ============================================================================
-// Launcher (FP4 output from GEMV, then GPU decode to FP16)
+// Launcher (Direct FP16 output from GEMV - no decode stage needed)
 // ============================================================================
 void launch_fp4_gemv_optimized(
     torch::Tensor A, torch::Tensor B,
@@ -163,12 +101,6 @@ void launch_fp4_gemv_optimized(
     const int gemm_k = static_cast<int>(K);
     const int gemm_batch = static_cast<int>(L);
 
-    // Allocate temporary FP4 output and scale factors
-    uint8_t* D_fp4_ptr = nullptr;
-    uint8_t* SFD_ptr = nullptr;
-    cudaMalloc(&D_fp4_ptr, gemm_batch * (gemm_m / 2) * sizeof(uint8_t));
-    cudaMalloc(&SFD_ptr, gemm_batch * (gemm_m / kVectorSize) * sizeof(uint8_t));
-
     // Calculate batch strides
     const int k_blks = (gemm_k + kVectorSize - 1) / kVectorSize;  // ceil(K/16)
     const int m_blks = (gemm_m + 127) / 128;                       // ceil(M/128)
@@ -180,10 +112,9 @@ void launch_fp4_gemv_optimized(
     const int64_t batch_stride_A = gemm_m * (gemm_k / 2);
     const int64_t batch_stride_B = gemm_k / 2;
     const int64_t batch_stride_C = 0;
-    const int64_t batch_stride_D = gemm_m / 2;  // FP4 packed
+    const int64_t batch_stride_D = gemm_m;  // FP16 output (not packed)
     const int64_t batch_stride_SFA = sf_elements_per_batch;
     const int64_t batch_stride_SFB = 32 * 4 * 1 * 4 * k_blks_sf;  // For B: M=1 (padded to 128)
-    const int64_t batch_stride_SFD = gemm_m / kVectorSize;
 
     // Construct TensorRefs
     cutlass::TensorRef<ElementA, LayoutA> ref_A(
@@ -192,13 +123,12 @@ void launch_fp4_gemv_optimized(
     );
 
     cutlass::TensorRef<ElementD, LayoutD> ref_D(
-        reinterpret_cast<ElementD*>(D_fp4_ptr),
+        reinterpret_cast<ElementD*>(D_fp16_ptr),
         LayoutD::packed({gemm_m, 1})
     );
 
     ElementCompute alpha = ElementCompute(1.0f);
     ElementCompute beta = ElementCompute(0.0f);
-    float epilogue_st = 2.0f;  // Deterministic quantization scale
 
     // Setup GEMV arguments
     typename Gemv::Arguments arguments{
@@ -206,17 +136,13 @@ void launch_fp4_gemv_optimized(
         gemm_batch,
         typename EpilogueOp::Params{
             ref_D,
-            reinterpret_cast<ElementSFD*>(SFD_ptr),
             alpha,
-            beta,
-            epilogue_st,
-            batch_stride_SFD,
-            gemm_m
+            beta
         },
         ref_A,
         B_ptr,
         nullptr,  // ptr_C
-        reinterpret_cast<ElementD*>(D_fp4_ptr),
+        reinterpret_cast<ElementD*>(D_fp16_ptr),
         SFA_ptr,
         SFB_ptr,
         gemm_k / 2,
@@ -225,11 +151,10 @@ void launch_fp4_gemv_optimized(
         batch_stride_C,
         batch_stride_D,
         batch_stride_SFA,
-        batch_stride_SFB,
-        batch_stride_SFD
+        batch_stride_SFB
     };
 
-    // Execute GEMV (produces FP4 + scale factors)
+    // Execute GEMV (produces FP16 output directly)
     Gemv gemv_op;
     cutlass::Status status = gemv_op.initialize(arguments);
     if (status != cutlass::Status::kSuccess) {
@@ -240,17 +165,6 @@ void launch_fp4_gemv_optimized(
     if (status != cutlass::Status::kSuccess) {
         throw std::runtime_error("CUTLASS GEMV execution failed");
     }
-
-    // Decode FP4 + scale factors → FP16 on GPU
-    dim3 block(256);
-    dim3 grid((gemm_m + 255) / 256, gemm_batch);
-    decode_fp4_to_fp16_kernel<<<grid, block>>>(
-        D_fp4_ptr, SFD_ptr, D_fp16_ptr, gemm_m, gemm_batch
-    );
-
-    // Free temporary buffers
-    cudaFree(D_fp4_ptr);
-    cudaFree(SFD_ptr);
 
     // Synchronize
     cudaError_t err = cudaDeviceSynchronize();
@@ -329,7 +243,7 @@ def custom_kernel(data: input_t) -> output_t:
     sfa_bytes = sfa_reordered.view(torch.uint8)
     sfb_bytes = sfb_reordered.view(torch.uint8)
 
-    # Launch CUTLASS GEMV (produces FP16 output directly!)
+    # Launch CUTLASS GEMV - outputs FP16 directly (no decode stage)
     mod = get_module()
     mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L)
 
