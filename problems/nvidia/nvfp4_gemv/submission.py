@@ -63,10 +63,16 @@ fp4_gemv_sm100_cute_mma(
     const int K_packed = K >> 1;
     const int K_scales = K >> 4;
 
+    // Batch offsets for tensor format on B200:
+    // a: M x K x L (K-major) → batch stride = M * K_packed
+    // b: 1 x K x L (K-major, vector) → batch stride = K_packed
+    // sfa: M x (K//16) x L → batch stride = M * K_scales
+    // sfb: 1 x (K//16) x L (vector) → batch stride = K_scales
+    // c: M x 1 x L → batch stride = M
     const long long batch_offset_A = static_cast<long long>(batch) * M * K_packed;
-    const long long batch_offset_B = static_cast<long long>(batch) * 128 * K_packed;
+    const long long batch_offset_B = static_cast<long long>(batch) * K_packed;
     const long long batch_offset_SFA = static_cast<long long>(batch) * M * K_scales;
-    const long long batch_offset_SFB = static_cast<long long>(batch) * 128 * K_scales;
+    const long long batch_offset_SFB = static_cast<long long>(batch) * K_scales;
     const long long batch_offset_D = static_cast<long long>(batch) * M;
 
     const uint8_t* A_batch = A_packed + batch_offset_A;
@@ -429,9 +435,9 @@ void launch_fp4_gemv_optimized(
 
         for (int64_t batch = 0; batch < L; ++batch) {
             const long long offset_A = batch * M * K_packed;
-            const long long offset_B = batch * 128 * K_packed;
+            const long long offset_B = batch * K_packed;
             const long long offset_SFA = batch * M * K_scales;
-            const long long offset_SFB = batch * 128 * K_scales;
+            const long long offset_SFB = batch * K_scales;
             const long long offset_D = batch * M;
 
             fp4_gemv_sm100_fallback<kTileM, kTileK, kThreads><<<grid, block>>>(
