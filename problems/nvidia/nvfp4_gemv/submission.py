@@ -302,7 +302,8 @@ def custom_kernel(data: input_t) -> output_t:
     """
     SM100 FP4 GEMV using CUTLASS BlockScaled API with FP16 output
     """
-    a, b, sfa_ref_cpu, sfb_ref_cpu, _, _, c = data
+    # CRITICAL: Use CUTLASS-permuted scale factors (indices 4,5), NOT reference format (2,3)
+    a, b, _, _, sfa_permuted, sfb_permuted, c = data
 
     M, _, L = c.shape
     K = a.shape[1] * 2  # Correct K dimension from packed FP4
@@ -316,11 +317,10 @@ def custom_kernel(data: input_t) -> output_t:
     a_bytes = a.view(torch.uint8)
     b_bytes = b.view(torch.uint8)
 
-    # Scale factors (permute to match batch-parallel layout)
-    sfa = sfa_ref_cpu.permute(2, 0, 1).cuda().contiguous()
-    sfb = sfb_ref_cpu.permute(2, 0, 1).cuda().contiguous()
-    sfa_bytes = sfa.view(torch.uint8)
-    sfb_bytes = sfb.view(torch.uint8)
+    # Scale factors - already in CUTLASS blocked format, just move to GPU
+    # Shape: sfa_permuted is [32, 4, ceil(M/128), 4, ceil(K/16/4), L]
+    sfa_bytes = sfa_permuted.cuda().contiguous().view(torch.uint8)
+    sfb_bytes = sfb_permuted.cuda().contiguous().view(torch.uint8)
 
     # Launch CUTLASS GEMV (produces FP16 output directly!)
     mod = get_module()
