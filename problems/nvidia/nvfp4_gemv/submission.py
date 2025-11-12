@@ -286,8 +286,15 @@ fp4_gemv_sm100_tc_optimized(
         auto tCsA = thread_mma.partition_A(gA);  // [MMA, MMA_M, MMA_K]
         auto tCsB = thread_mma.partition_B(gB);  // [MMA, MMA_N, MMA_K]
 
-        // Create register accumulator
-        auto tCrC = thread_mma.make_fragment_C();
+        // Create output tensor layout (64×8 for this tile)
+        // We don't actually store in shared memory, just need the layout for fragment
+        auto gC = make_tensor(make_smem_ptr((half*)nullptr),
+                              make_layout(make_shape(Int<kTileM>{}, _8{}),
+                                        make_stride(_8{}, _1{})));
+        auto tCgC = thread_mma.partition_C(gC);
+
+        // Create register accumulator from partitioned C
+        auto tCrC = thread_mma.make_fragment_C(tCgC);
         clear(tCrC);
 
         // Get K_TILE_MAX from partitioned tensor
