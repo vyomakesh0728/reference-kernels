@@ -218,7 +218,8 @@ fp4_gemv_sm100_cute_mma(
 
         #pragma unroll
         for (int k = 0; k < k_mma_iters; ++k) {
-            gemm(tAs(_, _, k), tBs(_, _, k), tCs);
+            // Use 5-argument gemm: gemm(MMA, D, A, B, C) = D = A * B + C
+            gemm(tiled_mma, tCs, tAs(_, _, k), tBs(_, _, k), tCs);
         }
 
         #pragma unroll
