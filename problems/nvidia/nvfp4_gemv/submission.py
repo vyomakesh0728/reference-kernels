@@ -391,7 +391,7 @@ def custom_kernel(data: input_t) -> output_t:
     K = a.shape[1] * 2
 
     # ========================================================================
-    # DEBUG: Print shapes and dtypes BEFORE permute
+    # DEBUG: Print shapes BEFORE permute
     # ========================================================================
     print("=" * 80)
     print("BEFORE PERMUTE:")
@@ -401,11 +401,6 @@ def custom_kernel(data: input_t) -> output_t:
     print(f"  SFA shape: {sfa_ref_cpu.shape}, dtype: {sfa_ref_cpu.dtype}")
     print(f"  SFB shape: {sfb_ref_cpu.shape}, dtype: {sfb_ref_cpu.dtype}")
     print(f"  M={M}, K={K}, L={L}")
-
-    # Print first and last elements
-    print(f"  A[0,0,0]: {a[0,0,0]}, A[-1,-1,-1]: {a[-1,-1,-1]}")
-    print(f"  B[0,0,0]: {b[0,0,0]}, B[-1,-1,-1]: {b[-1,-1,-1]}")
-    print(f"  C[0,0,0] before: {c[0,0,0]}, C[-1,-1,-1] before: {c[-1,-1,-1]}")
     print("=" * 80)
 
     # Permute to [L, M, K/2] layout
@@ -424,7 +419,7 @@ def custom_kernel(data: input_t) -> output_t:
     sfb_bytes = sfb.view(torch.uint8)
 
     # ========================================================================
-    # DEBUG: Print shapes and dtypes AFTER permute (BEFORE kernel launch)
+    # DEBUG: Print shapes AFTER permute (BEFORE kernel launch)
     # ========================================================================
     print("AFTER PERMUTE (BEFORE KERNEL):")
     print(f"  a_bytes shape: {a_bytes.shape}, dtype: {a_bytes.dtype}")
@@ -432,8 +427,6 @@ def custom_kernel(data: input_t) -> output_t:
     print(f"  c shape: {c.shape}, dtype: {c.dtype}")
     print(f"  sfa_bytes shape: {sfa_bytes.shape}, dtype: {sfa_bytes.dtype}")
     print(f"  sfb_bytes shape: {sfb_bytes.shape}, dtype: {sfb_bytes.dtype}")
-    print(f"  c[0,0,0] before kernel: {c[0,0,0]}")
-    print(f"  c[{L-1},{M-1},0] before kernel: {c[L-1,M-1,0]}")
     print(f"  Kernel params: M={M}, K={K}, L={L}")
     print("=" * 80)
 
@@ -442,22 +435,10 @@ def custom_kernel(data: input_t) -> output_t:
     mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L)
 
     # ========================================================================
-    # DEBUG: Print output values AFTER kernel
+    # DEBUG: Print shapes AFTER kernel
     # ========================================================================
     print("AFTER KERNEL (BEFORE PERMUTE BACK):")
     print(f"  c shape: {c.shape}, dtype: {c.dtype}")
-    print(f"  c[0,0,0] after kernel: {c[0,0,0]}")
-    print(f"  c[{L-1},{M-1},0] after kernel: {c[L-1,M-1,0]}")
-
-    # Check for buffer overruns
-    print(f"  D[0] (first row): {c[0,0,0]}")
-    print(f"  D[{M-1}] (last valid row): {c[0,M-1,0]}")
-
-    # Print first few rows to see pattern
-    print("  First 5 rows of output:")
-    for i in range(min(5, M)):
-        print(f"    Row {i}: {c[0,i,0]}")
-
     print("=" * 80)
 
     # Permute output back
@@ -476,12 +457,6 @@ def custom_kernel(data: input_t) -> output_t:
     # ========================================================================
     print("FINAL OUTPUT (AFTER PERMUTE BACK + SQUEEZE):")
     print(f"  c shape: {c.shape}, dtype: {c.dtype}")
-    if L == 1:
-        print(f"  c[0]: {c[0]}")
-        print(f"  c[{M-1}]: {c[M-1]}")
-    else:
-        print(f"  c[0,0]: {c[0,0]}")
-        print(f"  c[{M-1},{L-1}]: {c[M-1,L-1]}")
     print("=" * 80)
 
     return c
