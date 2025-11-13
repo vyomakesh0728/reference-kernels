@@ -461,15 +461,27 @@ def custom_kernel(data: input_t) -> output_t:
     print("=" * 80)
 
     # Permute output back
-    c = c.permute(1, 2, 0).contiguous()
+    c = c.permute(1, 2, 0).contiguous()  # [M, 1, L]
+
+    # ========================================================================
+    # CRITICAL FIX: Squeeze out the dummy middle dimension
+    # ========================================================================
+    # GEMV output should be [M, L] not [M, 1, L]
+    # For L=1: [M, 1, 1] → [M, 1] → [M]
+    # For L>1: [M, 1, L] → [M, L]
+    c = c.squeeze(1)  # Remove dimension 1 (the dummy "1" column dimension)
 
     # ========================================================================
     # DEBUG: Print final output shape
     # ========================================================================
-    print("FINAL OUTPUT (AFTER PERMUTE BACK):")
+    print("FINAL OUTPUT (AFTER PERMUTE BACK + SQUEEZE):")
     print(f"  c shape: {c.shape}, dtype: {c.dtype}")
-    print(f"  c[0,0,0]: {c[0,0,0].item()}")
-    print(f"  c[{M-1},0,{L-1}]: {c[M-1,0,L-1].item()}")
+    if L == 1:
+        print(f"  c[0]: {c[0].item()}")
+        print(f"  c[{M-1}]: {c[M-1].item()}")
+    else:
+        print(f"  c[0,0]: {c[0,0].item()}")
+        print(f"  c[{M-1},{L-1}]: {c[M-1,L-1].item()}")
     print("=" * 80)
 
     return c
