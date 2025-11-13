@@ -21,23 +21,24 @@ void launch_fp4_gemv_optimized(
 );
 """
 
-# Fixed CUDA implementation
+# CUDA implementation with CUTLASS GemvBlockScaled
 cuda_source = r"""
-#include <cute/tensor.hpp>
-#include <cutlass/arch/memory_sm100.h>
-#include <cutlass/numeric_conversion.h>
-#include <cutlass/array.h>
+#include <torch/extension.h>
 #include <cuda_runtime.h>
+
+// CUTLASS core includes
 #include <cutlass/cutlass.h>
 #include <cutlass/numeric_types.h>
+#include <cutlass/numeric_conversion.h>
 #include <cutlass/tensor_ref.h>
+
+// CUTLASS GEMV kernel includes
 #include <cutlass/gemm/device/gemv_blockscaled.h>
 #include <cutlass/gemm/kernel/gemv_blockscaled.h>
 #include <cutlass/epilogue/threadblock/epilogue_with_scaling_factor.h>
-#include <cutlass/util/host_tensor.h>
-#include <cutlass/util/reference/host/tensor_fill.h>
-#include <mma.h>
-#include <torch/extension.h>
+
+// CuTe includes for tensor operations
+#include <cute/tensor.hpp>
 
 
 
