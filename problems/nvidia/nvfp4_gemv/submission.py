@@ -104,9 +104,10 @@ fp4_gemv_sm100_ptx_mma(
     __shared__ __align__(16) half A_smem[kTileM][kTileK + 8];
     __shared__ __align__(16) half B_smem[kTileK][8];
 
-    // Accumulators: each thread holds 1 value for its assigned row
-    // With blockwise processing, threads work independently
-    float acc = 0.0f;
+    // Accumulators: each thread holds fragment of MMA output
+    // For m16n8k16: each thread gets 4 float values (2 rows × 2 cols)
+    // We accumulate across K tiles and extract column 0 at the end
+    float acc_frag[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
     // Main K loop - process in kTileK chunks
     for (int k_tile = 0; k_tile < K; k_tile += kTileK) {
@@ -172,42 +173,131 @@ fp4_gemv_sm100_ptx_mma(
         __syncthreads();
 
         // ====================================================================
-        // Phase 2: PTX MMA Compute (m16n8k16 Tensor Core Operations)
+        // Phase 2: True PTX MMA Compute (mma.sync.aligned.m16n8k16)
         // ====================================================================
-        // Use Blackwell SM100 tensor cores via PTX mma.sync.aligned
+        // Use actual Blackwell SM100 tensor core MMA instructions via PTX
         // Each warp processes 16 output rows using m16n8k16 MMA
-        // MMA: A[16,16] @ B[16,8] → C[16,8], we extract column 0 for GEMV
+        // Layout: A[16,16] @ B[16,8] → C[16,8], extract column 0 for GEMV
+        //
+        // Fragment distribution across warp (32 threads):
+        //   - A fragment: 8× uint32 (16×16 fp16) per thread
+        //   - B fragment: 4× uint32 (16×8 fp16) per thread
+        //   - C fragment: 4× float (16×8 fp32 accum) per thread
         // ====================================================================
 
-        // Each thread is responsible for computing one output row
-        // Assign rows to threads: thread i computes row i (with wraparound)
-        const int local_row = tid;
+        // Each warp processes 16 consecutive rows (m=16 dimension of MMA)
+        const int warp_row_base = (blockIdx.x * kTileM + warp_id * 16);
 
-        if (local_row < kTileM && (m_cta + local_row) < M) {
-            // Compute full dot product for this row across all K in this tile
-            float partial_sum = 0.0f;
+        // Process K dimension in 16-element chunks for m16n8k**16**
+        for (int k_mma = 0; k_mma < kTileK; k_mma += 16) {
+            if (warp_row_base >= M) break;
+            if (k_mma >= kTileK) break;
 
-            #pragma unroll 4
-            for (int k = 0; k < kTileK; k++) {
-                // Load from shared memory (already decoded and scaled)
-                half a_val = A_smem[local_row][k];
-                half b_val = B_smem[k][0];
+            // ================================================================
+            // Load MMA fragments from shared memory
+            // ================================================================
+            // MMA fragment layout for m16n8k16 (Blackwell):
+            //   - Each thread loads specific elements based on lane_id
+            //   - A: 16 rows × 16 cols (4 half values per thread)
+            //   - B: 16 rows × 8 cols (2 half values per thread)
+            // ================================================================
 
-                // FMA: compiler will use FP16 tensor core FMA units
-                partial_sum += __half2float(a_val) * __half2float(b_val);
+            // A fragment: load 4 half values per thread from A_smem
+            // Thread mapping: row = lane_id % 16, col_group = lane_id / 16
+            uint32_t a_frag[4];  // 8 half values = 4 uint32
+            {
+                const int frag_row = (warp_id * 16) + (lane_id % 16);
+                const int col_base = k_mma + (lane_id / 16) * 8;
+
+                if (frag_row < kTileM && col_base + 7 < kTileK) {
+                    // Load 8 consecutive half values (4 × half2)
+                    const half2* src = reinterpret_cast<const half2*>(&A_smem[frag_row][col_base]);
+                    a_frag[0] = reinterpret_cast<const uint32_t*>(src)[0];
+                    a_frag[1] = reinterpret_cast<const uint32_t*>(src)[1];
+                    a_frag[2] = reinterpret_cast<const uint32_t*>(src)[2];
+                    a_frag[3] = reinterpret_cast<const uint32_t*>(src)[3];
+                } else {
+                    a_frag[0] = a_frag[1] = a_frag[2] = a_frag[3] = 0;
+                }
             }
 
-            // Accumulate into per-thread accumulator
-            acc += partial_sum;
+            // B fragment: load 2 half values per thread from B_smem
+            // For GEMV: B is a vector, broadcast to 8 columns
+            // Thread mapping: k_idx = lane_id % 16, n_group = lane_id / 16
+            uint32_t b_frag[2];  // 4 half values = 2 uint32
+            {
+                const int k_base = k_mma + (lane_id % 16);
+
+                if (k_base < kTileK) {
+                    // Load vector element and replicate for 8 N columns
+                    half b_val = B_smem[k_base][0];
+                    half2 b_val2 = __halves2half2(b_val, b_val);
+                    uint32_t b_val_u32 = *reinterpret_cast<uint32_t*>(&b_val2);
+                    b_frag[0] = b_val_u32;
+                    b_frag[1] = b_val_u32;
+                } else {
+                    b_frag[0] = b_frag[1] = 0;
+                }
+            }
+
+            // ================================================================
+            // Execute PTX MMA instruction: mma.sync.aligned.m16n8k16
+            // ================================================================
+            // Instruction format (Blackwell FP16 → FP32):
+            //   mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
+            //   {c0, c1, c2, c3},  // Output: 4× float (2 rows × 2 cols per thread)
+            //   {a0, a1, a2, a3},  // Input A: 4× uint32 (8× half per thread)
+            //   {b0, b1},          // Input B: 2× uint32 (4× half per thread)
+            //   {c0, c1, c2, c3};  // Accumulator: 4× float (input/output)
+            // ================================================================
+
+            asm volatile(
+                "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                "{%0, %1, %2, %3}, "
+                "{%4, %5, %6, %7}, "
+                "{%8, %9}, "
+                "{%10, %11, %12, %13};"
+                : "+f"(acc_frag[0]), "+f"(acc_frag[1]), "+f"(acc_frag[2]), "+f"(acc_frag[3])
+                : "r"(a_frag[0]), "r"(a_frag[1]), "r"(a_frag[2]), "r"(a_frag[3]),
+                  "r"(b_frag[0]), "r"(b_frag[1]),
+                  "f"(acc_frag[0]), "f"(acc_frag[1]), "f"(acc_frag[2]), "f"(acc_frag[3])
+            );
         }
     }
 
-    // Write output: each thread writes its own row
-    const int local_row = tid;
-    if (local_row < kTileM) {
-        const int global_row = m_cta + local_row;
-        if (global_row < M) {
-            D_batch[global_row] = __float2half(acc);
+    // ========================================================================
+    // Write output: Extract column 0 from MMA fragments
+    // ========================================================================
+    // MMA output layout for m16n8k16:
+    //   - Each warp produces 16 rows × 8 cols
+    //   - Each thread holds 2 rows × 2 cols (4 float values)
+    //   - Fragment layout: [row_i_col_j, row_i_col_j+1, row_i+1_col_j, row_i+1_col_j+1]
+    //
+    // Column 0 extraction:
+    //   - Threads with (lane_id % 4) == 0 hold column 0 data
+    //   - acc_frag[0] = row_i, col_0
+    //   - acc_frag[2] = row_i+1, col_0
+    //
+    // Row assignment per thread:
+    //   - row_i = warp_row_base + (lane_id / 4) * 2
+    // ========================================================================
+
+    const int warp_row_base = (blockIdx.x * kTileM + warp_id * 16);
+    const int col_group = lane_id % 4;  // Which column pair this thread handles
+
+    // Only threads handling column 0-1 write (col_group == 0)
+    if (col_group == 0) {
+        const int row0 = warp_row_base + (lane_id / 4) * 2;
+        const int row1 = row0 + 1;
+
+        // Write row 0
+        if (row0 < M) {
+            D_batch[row0] = __float2half(acc_frag[0]);  // Column 0 of row 0
+        }
+
+        // Write row 1
+        if (row1 < M) {
+            D_batch[row1] = __float2half(acc_frag[2]);  // Column 0 of row 1
         }
     }
 }
@@ -232,11 +322,14 @@ void launch_fp4_gemv_optimized(
     // ========================================================================
     // Single kernel handles all shapes via grid.y batching
     // Optimal tile sizes for SM100 tensor cores
+    //   - kTileM = 128: Each of 8 warps processes 16 rows (m16n8k16)
+    //   - kTileK = 128: Process 128 K elements per tile (8× k16 MMA ops)
+    //   - kThreads = 256: 8 warps × 32 threads
     // ========================================================================
 
-    constexpr int kTileM = 64;
-    constexpr int kTileK = 128;
-    constexpr int kThreads = 256;
+    constexpr int kTileM = 128;  // 8 warps × 16 rows per warp
+    constexpr int kTileK = 128;  // 8 MMA ops along K (k=16 each)
+    constexpr int kThreads = 256;  // 8 warps
 
     int num_blocks = (M + kTileM - 1) / kTileM;
     dim3 grid(num_blocks, L);  // X: M tiles, Y: batch index
