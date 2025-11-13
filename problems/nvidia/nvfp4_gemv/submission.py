@@ -153,15 +153,16 @@ void launch_fp4_gemv_optimized(
     ElementD* D_fp4 = reinterpret_cast<ElementD*>(D_fp4_temp.data_ptr());
 
     // Batch stride calculations
-    const int batch_stride_a = M * K;
-    const int batch_stride_b = 1 * K;
-    const int batch_stride_sfa = M * (K / 16);
-    const int batch_stride_sfb = 1 * (K / 16);
-    const int batch_stride_d = M * 1;
+    // CRITICAL: Input A and B are PACKED (2 FP4 per byte), so physical stride = K/2
+    const int batch_stride_a = M * (K / 2);  // M rows × K/2 bytes per row
+    const int batch_stride_b = 1 * (K / 2);  // 1 row × K/2 bytes per row
+    const int batch_stride_sfa = M * (K / 16);  // M rows × K/16 scale factors per row
+    const int batch_stride_sfb = 1 * (K / 16);  // 1 row × K/16 scale factors per row
+    const int batch_stride_d = M * 1;  // M rows × 1 column (unpacked output)
     const int batch_stride_sfd = 0;
 
-    const int stride_a = K;
-    const int stride_d = 1;
+    const int stride_a = K / 2;  // K/2 bytes per row (packed FP4)
+    const int stride_d = 1;  // 1 byte per element (unpacked output)
     const float alpha = 1.0f;
     const float beta = 0.0f;
     const float epilogue_st = 1.0f;
