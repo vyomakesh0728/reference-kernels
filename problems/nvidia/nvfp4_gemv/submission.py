@@ -404,17 +404,26 @@ def custom_kernel(data: input_t) -> output_t:
     print("=" * 80)
 
     # Permute to [L, M, K/2] layout
-    a = a.permute(2, 0, 1).cuda().contiguous()
-    b = b.permute(2, 0, 1).cuda().contiguous()
-    c = c.permute(2, 0, 1).cuda().contiguous()
+    # CRITICAL: Clone first to avoid tensor aliasing/reuse between test calls
+    a = a.clone().permute(2, 0, 1).contiguous().cuda()
+    b = b.clone().permute(2, 0, 1).contiguous().cuda()
+    c = c.clone().permute(2, 0, 1).contiguous().cuda()
+
+    # DEBUG: Check permuted shapes before byte view
+    print(f"DEBUG: After permute+clone, a.shape = {a.shape}, expected [{L}, {M}, {K//2}]")
+    print(f"DEBUG: After permute+clone, b.shape = {b.shape}")
+
+    # Shape assertions to catch corruption early
+    assert a.shape == (L, M, K//2), f"Shape mismatch: a.shape={a.shape}, expected=({L}, {M}, {K//2})"
+    assert b.shape[0] == L and b.shape[2] == K//2, f"Shape mismatch: b.shape={b.shape}"
 
     # Reinterpret as raw bytes
     a_bytes = a.view(torch.uint8)
     b_bytes = b.view(torch.uint8)
 
-    # Scale factors
-    sfa = sfa_ref_cpu.permute(2, 0, 1).cuda().contiguous()
-    sfb = sfb_ref_cpu.permute(2, 0, 1).cuda().contiguous()
+    # Scale factors - also clone to avoid aliasing
+    sfa = sfa_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda()
+    sfb = sfb_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda()
     sfa_bytes = sfa.view(torch.uint8)
     sfb_bytes = sfb.view(torch.uint8)
 
