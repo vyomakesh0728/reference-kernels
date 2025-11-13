@@ -289,10 +289,10 @@ def custom_kernel(data: input_t) -> output_t:
     c = c.permute(2, 0, 1).cuda().contiguous()
 
     # Pre-allocate FP4 intermediate buffer (managed by PyTorch, eliminates cudaMalloc overhead)
-    # FP4: 4 bits per element = 0.5 bytes, so M×L elements = (M×L+1)//2 bytes
-    # Allocate as uint8 tensor for byte-aligned access
-    fp4_bytes = (M * L + 1) // 2
-    d_fp4_temp = torch.empty(fp4_bytes, dtype=torch.uint8, device='cuda')
+    # IMPORTANT: CUTLASS stores cutlass::float_e2m1_t as 1 byte per element (not packed!)
+    # Even though FP4 is 4 bits, CUTLASS uses 1 byte per element for easier indexing
+    # So M×L elements = M×L bytes
+    d_fp4_temp = torch.empty(M * L, dtype=torch.uint8, device='cuda')
 
     mod = get_module()
     mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, d_fp4_temp, M, K, L)
