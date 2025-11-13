@@ -173,84 +173,73 @@ fp4_gemv_sm100_ptx_mma(
         __syncthreads();
 
         // ====================================================================
-        // Phase 2: True PTX MMA Compute (mma.sync.aligned.m16n8k16)
+        // Phase 2: True PTX MMA with CORRECT Fragment Layout
         // ====================================================================
-        // Use actual Blackwell SM100 tensor core MMA instructions via PTX
-        // Each warp processes 16 output rows using m16n8k16 MMA
-        // Layout: A[16,16] @ B[16,8] → C[16,8], extract column 0 for GEMV
-        //
-        // Fragment distribution across warp (32 threads):
-        //   - A fragment: 8× uint32 (16×16 fp16) per thread
-        //   - B fragment: 4× uint32 (16×8 fp16) per thread
-        //   - C fragment: 4× float (16×8 fp32 accum) per thread
+        // NVIDIA m16n8k16 fragment layout (FIXED):
+        //   A (16×16): Each thread loads 8 halfs from 2 rows
+        //     - Thread 0-3: rows 0-1, handle 4 K-chunks each
+        //     - Thread 4-7: rows 2-3
+        //     - ... (8 groups of 4 threads = 16 rows total)
+        //   B (16×8): Each thread loads 4 halfs from K dimension
+        //   C (16×8): Each thread gets 4 floats (2 rows × 2 cols)
         // ====================================================================
 
-        // Each warp processes 16 consecutive rows (m=16 dimension of MMA)
-        const int warp_row_base = (blockIdx.x * kTileM + warp_id * 16);
+        // Each warp processes 16 rows
+        const int warp_m_offset = warp_id * 16;
 
-        // Process K dimension in 16-element chunks for m16n8k**16**
+        // Process K in 16-element chunks
         for (int k_mma = 0; k_mma < kTileK; k_mma += 16) {
-            if (warp_row_base >= M) break;
-            if (k_mma >= kTileK) break;
+            if (warp_m_offset >= kTileM) break;
 
             // ================================================================
-            // Load MMA fragments from shared memory
-            // ================================================================
-            // MMA fragment layout for m16n8k16 (Blackwell):
-            //   - Each thread loads specific elements based on lane_id
-            //   - A: 16 rows × 16 cols (4 half values per thread)
-            //   - B: 16 rows × 8 cols (2 half values per thread)
+            // CORRECTED Fragment Loading for m16n8k16
             // ================================================================
 
-            // A fragment: load 4 half values per thread from A_smem
-            // Thread mapping: row = lane_id % 16, col_group = lane_id / 16
-            uint32_t a_frag[4];  // 8 half values = 4 uint32
+            // A fragment: 16 rows × 16 cols distributed across 32 threads
+            // Each thread gets 2 rows worth of data (8 halfs = 4 uint32)
+            // Thread mapping: rows = (lane_id / 4) * 2 + [0,1]
+            uint32_t a_frag[4];
             {
-                const int frag_row = (warp_id * 16) + (lane_id % 16);
-                const int col_base = k_mma + (lane_id / 16) * 8;
+                const int row_pair = (lane_id / 4) * 2;  // Which pair of rows (0, 2, 4, ..., 14)
+                const int col_quad = (lane_id % 4) * 4;  // Which 4-column group (0, 4, 8, 12)
+                const int smem_row0 = warp_m_offset + row_pair;
+                const int smem_row1 = smem_row0 + 1;
 
-                if (frag_row < kTileM && col_base + 7 < kTileK) {
-                    // Load 8 consecutive half values (4 × half2)
-                    const half2* src = reinterpret_cast<const half2*>(&A_smem[frag_row][col_base]);
-                    a_frag[0] = reinterpret_cast<const uint32_t*>(src)[0];
-                    a_frag[1] = reinterpret_cast<const uint32_t*>(src)[1];
-                    a_frag[2] = reinterpret_cast<const uint32_t*>(src)[2];
-                    a_frag[3] = reinterpret_cast<const uint32_t*>(src)[3];
+                if (smem_row0 < kTileM && (k_mma + col_quad + 3) < kTileK) {
+                    // Load 4 halfs from row 0, 4 halfs from row 1
+                    const half* ptr0 = &A_smem[smem_row0][k_mma + col_quad];
+                    const half* ptr1 = &A_smem[smem_row1][k_mma + col_quad];
+
+                    // Pack as uint32: 2 halfs per uint32
+                    a_frag[0] = *reinterpret_cast<const uint32_t*>(ptr0 + 0);  // row0, cols [0,1]
+                    a_frag[1] = *reinterpret_cast<const uint32_t*>(ptr0 + 2);  // row0, cols [2,3]
+                    a_frag[2] = *reinterpret_cast<const uint32_t*>(ptr1 + 0);  // row1, cols [0,1]
+                    a_frag[3] = *reinterpret_cast<const uint32_t*>(ptr1 + 2);  // row1, cols [2,3]
                 } else {
                     a_frag[0] = a_frag[1] = a_frag[2] = a_frag[3] = 0;
                 }
             }
 
-            // B fragment: load 2 half values per thread from B_smem
-            // For GEMV: B is a vector, broadcast to 8 columns
-            // Thread mapping: k_idx = lane_id % 16, n_group = lane_id / 16
-            uint32_t b_frag[2];  // 4 half values = 2 uint32
+            // B fragment: 16 K-elements × 8 cols (broadcast vector for GEMV)
+            // Each thread gets 4 halfs from K dimension
+            uint32_t b_frag[2];
             {
-                const int k_base = k_mma + (lane_id % 16);
+                const int k_local = lane_id / 2;  // 16 K-elements covered by 32 threads
+                const int smem_k = k_mma + k_local;
 
-                if (k_base < kTileK) {
-                    // Load vector element and replicate for 8 N columns
-                    half b_val = B_smem[k_base][0];
-                    half2 b_val2 = __halves2half2(b_val, b_val);
-                    uint32_t b_val_u32 = *reinterpret_cast<uint32_t*>(&b_val2);
-                    b_frag[0] = b_val_u32;
-                    b_frag[1] = b_val_u32;
+                if (smem_k < kTileK) {
+                    // Load vector element and broadcast to 8 columns
+                    half b_val = B_smem[smem_k][0];
+                    half2 b_pair = __halves2half2(b_val, b_val);
+                    uint32_t b_packed = *reinterpret_cast<uint32_t*>(&b_pair);
+                    b_frag[0] = b_packed;
+                    b_frag[1] = b_packed;
                 } else {
                     b_frag[0] = b_frag[1] = 0;
                 }
             }
 
-            // ================================================================
-            // Execute PTX MMA instruction: mma.sync.aligned.m16n8k16
-            // ================================================================
-            // Instruction format (Blackwell FP16 → FP32):
-            //   mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
-            //   {c0, c1, c2, c3},  // Output: 4× float (2 rows × 2 cols per thread)
-            //   {a0, a1, a2, a3},  // Input A: 4× uint32 (8× half per thread)
-            //   {b0, b1},          // Input B: 2× uint32 (4× half per thread)
-            //   {c0, c1, c2, c3};  // Accumulator: 4× float (input/output)
-            // ================================================================
-
+            // Execute PTX MMA
             asm volatile(
                 "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
                 "{%0, %1, %2, %3}, "
@@ -266,38 +255,38 @@ fp4_gemv_sm100_ptx_mma(
     }
 
     // ========================================================================
-    // Write output: Extract column 0 from MMA fragments
+    // Write output: Extract column 0 from MMA fragments (CORRECTED)
     // ========================================================================
-    // MMA output layout for m16n8k16:
-    //   - Each warp produces 16 rows × 8 cols
-    //   - Each thread holds 2 rows × 2 cols (4 float values)
-    //   - Fragment layout: [row_i_col_j, row_i_col_j+1, row_i+1_col_j, row_i+1_col_j+1]
+    // MMA output layout for m16n8k16 (matches fragment loading):
+    //   - Thread mapping: rows = (lane_id / 4) * 2 + [0,1], cols = (lane_id % 4) * 2 + [0,1]
+    //   - acc_frag[0] = row_i, col_j
+    //   - acc_frag[1] = row_i, col_j+1
+    //   - acc_frag[2] = row_i+1, col_j
+    //   - acc_frag[3] = row_i+1, col_j+1
     //
-    // Column 0 extraction:
-    //   - Threads with (lane_id % 4) == 0 hold column 0 data
-    //   - acc_frag[0] = row_i, col_0
-    //   - acc_frag[2] = row_i+1, col_0
-    //
-    // Row assignment per thread:
-    //   - row_i = warp_row_base + (lane_id / 4) * 2
+    // For GEMV (column 0 only):
+    //   - Threads with (lane_id % 4) == 0 hold columns [0,1]
+    //   - Extract column 0: acc_frag[0] (row i) and acc_frag[2] (row i+1)
     // ========================================================================
 
-    const int warp_row_base = (blockIdx.x * kTileM + warp_id * 16);
-    const int col_group = lane_id % 4;  // Which column pair this thread handles
+    // Calculate global row indices
+    const int warp_row_base = m_cta + warp_id * 16;  // FIXED: Use m_cta not blockIdx.x * kTileM
+    const int row_pair = (lane_id / 4) * 2;  // Which pair of rows (0, 2, 4, ..., 14)
+    const int col_pair = lane_id % 4;  // Which column pair (0, 1, 2, 3 → cols [0-1], [2-3], [4-5], [6-7])
 
-    // Only threads handling column 0-1 write (col_group == 0)
-    if (col_group == 0) {
-        const int row0 = warp_row_base + (lane_id / 4) * 2;
-        const int row1 = row0 + 1;
+    // Only threads handling columns [0,1] write (col_pair == 0)
+    if (col_pair == 0) {
+        const int global_row0 = warp_row_base + row_pair;
+        const int global_row1 = global_row0 + 1;
 
-        // Write row 0
-        if (row0 < M) {
-            D_batch[row0] = __float2half(acc_frag[0]);  // Column 0 of row 0
+        // Write row 0, column 0
+        if (global_row0 < M) {
+            D_batch[global_row0] = __float2half(acc_frag[0]);
         }
 
-        // Write row 1
-        if (row1 < M) {
-            D_batch[row1] = __float2half(acc_frag[2]);  // Column 0 of row 1
+        // Write row 1, column 0
+        if (global_row1 < M) {
+            D_batch[global_row1] = __float2half(acc_frag[2]);
         }
     }
 }
