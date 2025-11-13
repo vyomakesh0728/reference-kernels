@@ -81,9 +81,9 @@ using Gemv = cutlass::gemm::device::GemvBlockScaled<GemvKernel>;
 
 // Unpack FP4 from packed format (2 per byte) to unpacked (1 byte per element)
 __global__ void unpack_fp4_kernel(
-    const uint8_t* __restrict__ packed_input,   // [L, M, K/2] packed bytes
-    cutlass::float_e2m1_t* __restrict__ unpacked_output,  // [L, M, K] unpacked elements
-    int total_packed_bytes  // Total packed bytes = L * M * (K/2)
+    const uint8_t* __restrict__ packed_input,   // [L, M, K_packed] packed bytes
+    uint8_t* __restrict__ unpacked_output,      // [L, M, K] unpacked bytes (reinterpret as float_e2m1_t*)
+    int total_packed_bytes  // Total packed bytes = L * M * K_packed
 ) {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -91,13 +91,15 @@ __global__ void unpack_fp4_kernel(
         const uint8_t packed_byte = packed_input[tid];
 
         // Extract two FP4 values from one byte
-        // Lower 4 bits = first FP4, upper 4 bits = second FP4
-        const uint8_t fp4_low = packed_byte & 0x0F;
-        const uint8_t fp4_high = (packed_byte >> 4) & 0x0F;
+        // torch.float4_e2m1fn_x2 layout: [low FP4][high FP4] in each byte
+        const uint8_t fp4_low_bits = packed_byte & 0x0F;       // Lower 4 bits
+        const uint8_t fp4_high_bits = (packed_byte >> 4) & 0x0F;  // Upper 4 bits
 
-        // Write to unpacked output (each FP4 gets its own byte)
-        unpacked_output[tid * 2 + 0] = *reinterpret_cast<const cutlass::float_e2m1_t*>(&fp4_low);
-        unpacked_output[tid * 2 + 1] = *reinterpret_cast<const cutlass::float_e2m1_t*>(&fp4_high);
+        // Write to unpacked output as raw bytes
+        // CUTLASS will interpret these bytes as cutlass::float_e2m1_t
+        // Each FP4 value uses only 4 bits, stored in lower 4 bits of each byte
+        unpacked_output[tid * 2 + 0] = fp4_low_bits;
+        unpacked_output[tid * 2 + 1] = fp4_high_bits;
     }
 }
 
@@ -210,9 +212,21 @@ void launch_fp4_gemv_optimized(
     const int blocks_a = (a_packed_bytes + threads - 1) / threads;
     const int blocks_b = (b_packed_bytes + threads - 1) / threads;
 
-    unpack_fp4_kernel<<<blocks_a, threads>>>(A_packed, A_unpacked, a_packed_bytes);
-    unpack_fp4_kernel<<<blocks_b, threads>>>(B_packed, B_unpacked, b_packed_bytes);
-    cudaDeviceSynchronize();  // Ensure unpacking completes
+    unpack_fp4_kernel<<<blocks_a, threads>>>(
+        A_packed,
+        reinterpret_cast<uint8_t*>(A_unpacked),
+        a_packed_bytes);
+    unpack_fp4_kernel<<<blocks_b, threads>>>(
+        B_packed,
+        reinterpret_cast<uint8_t*>(B_unpacked),
+        b_packed_bytes);
+
+    cudaError_t unpack_err = cudaDeviceSynchronize();
+    if (unpack_err != cudaSuccess) {
+        cudaFree(A_unpacked);
+        cudaFree(B_unpacked);
+        throw std::runtime_error(std::string("Unpack kernel error: ") + cudaGetErrorString(unpack_err));
+    }
 
     // Batch stride calculations
     // NOW using UNPACKED data (1 byte per FP4 element)
