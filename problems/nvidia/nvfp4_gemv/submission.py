@@ -7,409 +7,516 @@ from task import input_t, output_t
 
 cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
 
-# Clean C++ header declaration
+
 cpp_source = r"""
 #include <torch/extension.h>
+
 void launch_fp4_gemv_optimized(
-    torch::Tensor A_fp4,
-    torch::Tensor B_fp4,
+    torch::Tensor A,
+    torch::Tensor B,
     torch::Tensor SFA,
     torch::Tensor SFB,
     torch::Tensor D,
-    torch::Tensor D_fp4_temp,
-    int M, int K, int L
+    int64_t M,
+    int64_t K,
+    int64_t L
 );
 """
 
-# CUDA implementation with CUTLASS GemvBlockScaled
+
 cuda_source = r"""
 #include <torch/extension.h>
+
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
-// CUTLASS core includes
-#include <cutlass/cutlass.h>
-#include <cutlass/numeric_types.h>
-#include <cutlass/numeric_conversion.h>
-#include <cutlass/tensor_ref.h>
+#include "cutlass/cutlass.h"
+#include "cutlass/numeric_types.h"
+#include "cutlass/numeric_conversion.h"
+#include "cute/tensor.hpp"
 
-// CUTLASS GEMV kernel includes
-#include <cutlass/gemm/device/gemv_blockscaled.h>
-#include <cutlass/gemm/kernel/gemv_blockscaled.h>
-#include <cutlass/epilogue/threadblock/epilogue_with_scaling_factor.h>
+using namespace cute;
 
-// CuTe includes for tensor operations
-#include <cute/tensor.hpp>
+__constant__ float fp4_e2m1_lut_float[16] = {
+    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
+    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
+};
 
-
-
-// Type definitions matching CUTLASS Example 91
-using ElementA = cutlass::float_e2m1_t;  // FP4 E2M1
-using ElementB = cutlass::float_e2m1_t;  // FP4 E2M1
-using ElementC = cutlass::float_e2m1_t;  // FP4 E2M1
-using ElementD = cutlass::float_e2m1_t;  // FP4 E2M1 output
-using ElementSFA = cutlass::float_e4m3_t;  // FP8 E4M3 scale factors for A
-using ElementSFB = cutlass::float_e4m3_t;  // FP8 E4M3 scale factors for B
-using ElementSFD = cutlass::float_e4m3_t;  // FP8 E4M3 scale factors for D (output)
-using ElementAccumulator = float;  // FP32 accumulation
-using ElementCompute = float;  // FP32 epilogue computation
-
-// Layout definitions matching Example 91
-using LayoutA = cutlass::layout::RowMajor;
-using LayoutB = cutlass::layout::ColumnMajor;
-using LayoutC = cutlass::layout::ColumnMajor;
-using LayoutD = cutlass::layout::ColumnMajor;
-using LayoutSFA = cutlass::layout::ColumnMajor;
-using LayoutSFB = cutlass::layout::ColumnMajor;
-using LayoutSFD = cutlass::layout::ColumnMajor;
-
-// Operational parameters matching Example 91
-static constexpr int kVectorSize = 16;  // Block scaling granularity
-static constexpr int kElementsPerAccess = 128 / cutlass::sizeof_bits<ElementA>::value;  // 32 elements
-using ThreadShape = cutlass::gemm::GemmShape<16, 8>;  // 16 rows × 8 columns per thread
-
-// Epilogue operation with output scale factors (ElementSFD, LayoutSFD)
-using EpilogueOp = cutlass::epilogue::threadblock::GemvEpilogueWithScalingFactor<
-    kVectorSize, ThreadShape, ElementCompute, ElementAccumulator,
-    ElementC, ElementD, ElementSFD, LayoutD, LayoutSFD>;
-
-// GEMV kernel with input scale factors (ElementSFA, ElementSFB)
-using GemvKernel = cutlass::gemm::kernel::GemvBlockScaled<
-    ElementA, LayoutA, ElementB, ElementD, ElementAccumulator, EpilogueOp,
-    kElementsPerAccess, 0, 0, ElementSFA, ElementSFB, kVectorSize>;
-
-using Gemv = cutlass::gemm::device::GemvBlockScaled<GemvKernel>;
-
-// Unpack FP4 from packed format (2 per byte) to unpacked (1 byte per element)
-__global__ void unpack_fp4_kernel(
-    const uint8_t* __restrict__ packed_input,   // [L, M, K_packed] packed bytes
-    uint8_t* __restrict__ unpacked_output,      // [L, M, K] unpacked bytes (reinterpret as float_e2m1_t*)
-    int total_packed_bytes  // Total packed bytes = L * M * K_packed
-) {
-    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (tid < total_packed_bytes) {
-        const uint8_t packed_byte = packed_input[tid];
-
-        // Extract two FP4 values from one byte
-        // torch.float4_e2m1fn_x2 layout: [low FP4][high FP4] in each byte
-        const uint8_t fp4_low_bits = packed_byte & 0x0F;       // Lower 4 bits
-        const uint8_t fp4_high_bits = (packed_byte >> 4) & 0x0F;  // Upper 4 bits
-
-        // Write to unpacked output as raw bytes
-        // CUTLASS will interpret these bytes as cutlass::float_e2m1_t
-        // Each FP4 value uses only 4 bits, stored in lower 4 bits of each byte
-        unpacked_output[tid * 2 + 0] = fp4_low_bits;
-        unpacked_output[tid * 2 + 1] = fp4_high_bits;
-    }
+__device__ __forceinline__ half decode_fp4_e2m1(uint8_t nibble) {
+    return __float2half(fp4_e2m1_lut_float[nibble & 0x0F]);
 }
 
-// Tensor-core accelerated FP4→FP16 decode for Blackwell SM100
-__global__ void decode_fp4_to_fp16_tensorcore(
-    const cutlass::float_e2m1_t* __restrict__ fp4_input,
-    cutlass::half_t* __restrict__ fp16_output,
-    int total_elements
+__device__ __forceinline__ float decode_fp8_e4m3(uint8_t val) {
+    cutlass::float_e4m3_t fp8_val;
+    *reinterpret_cast<uint8_t*>(&fp8_val) = val;
+    return cutlass::NumericConverter<float, cutlass::float_e4m3_t>::convert(fp8_val);
+}
+
+template <int kTileM, int kTileK, int kThreads>
+__global__ void __launch_bounds__(kThreads)
+fp4_gemv_sm100_tc_optimized(
+    const uint8_t* __restrict__ A_packed,
+    const uint8_t* __restrict__ B_packed,
+    const uint8_t* __restrict__ SFA_packed,
+    const uint8_t* __restrict__ SFB_packed,
+    half* __restrict__ D,
+    const int M,
+    const int K,
+    const int L
 ) {
-    using ElementFP4 = cutlass::float_e2m1_t;
-    using ElementFP16 = cutlass::half_t;
-    using namespace cute;
+    const int batch = blockIdx.y;
+    if (batch >= L) {
+        return;
+    }
 
-    // Process 8 elements per thread for optimal SM100 throughput
-    constexpr int kVectorWidth = 8;
+    const int K_packed = K / 2;
+    const int K_scales = K / 16;
 
-    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const int offset = tid * kVectorWidth;
+    const uint8_t* A_batch = A_packed + batch * M * K_packed;
+    const uint8_t* B_batch = B_packed + batch * K_packed;
+    const uint8_t* SFA_batch = SFA_packed + batch * M * K_scales;
+    const uint8_t* SFB_batch = SFB_packed + batch * K_scales;
+    half* D_batch = D + batch * M;
 
-    // Main vectorized conversion path
-    if (offset + kVectorWidth <= total_elements) {
-        // 1. Load FP4 elements (CUTLASS handles packed storage internally)
-        cute::array<ElementFP4, kVectorWidth> fp4_vec;
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < kVectorWidth; ++i) {
-            fp4_vec[i] = fp4_input[offset + i];
+    const int tid = threadIdx.x;
+    const int warp_id = tid / 32;
+    const int lane_id = tid % 32;
+
+    const int m_cta = blockIdx.x * kTileM;
+    if (m_cta >= M) {
+        return;
+    }
+
+    __shared__ half A_smem[kTileM][kTileK + 8];
+    __shared__ half B_smem[kTileK][8];
+
+    constexpr int rows_per_warp = kTileM / (kThreads / 32);
+    float acc[rows_per_warp] = {0.0f};
+
+    for (int k_tile = 0; k_tile < K; k_tile += kTileK) {
+        const int k_packed_tile = k_tile / 2;
+        const int k_scale_tile = k_tile / 16;
+
+        __syncthreads();
+
+        for (int idx = tid; idx < kTileM * (kTileK / 2); idx += kThreads) {
+            const int row = idx / (kTileK / 2);
+            const int col_packed = idx % (kTileK / 2);
+            const int m_idx = m_cta + row;
+
+            if (m_idx < M && (k_packed_tile + col_packed) < K_packed) {
+                uint8_t packed = A_batch[m_idx * K_packed + k_packed_tile + col_packed];
+                const int scale_idx = col_packed / 8;
+                float scale_a = 1.0f;
+                if ((k_scale_tile + scale_idx) < K_scales) {
+                    scale_a = decode_fp8_e4m3(SFA_batch[m_idx * K_scales + k_scale_tile + scale_idx]);
+                }
+                const half scale_h = __float2half(scale_a);
+                A_smem[row][col_packed * 2] = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+                A_smem[row][col_packed * 2 + 1] = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+            } else if (row < kTileM && col_packed * 2 < kTileK) {
+                A_smem[row][col_packed * 2] = __float2half(0.0f);
+                A_smem[row][col_packed * 2 + 1] = __float2half(0.0f);
+            }
         }
 
-        // 2. Tensor-core accelerated conversion: CVT.FP4.FP16
-        // NumericConverter maps to native SM100 CVT instructions
-        cute::array<ElementFP16, kVectorWidth> fp16_vec;
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < kVectorWidth; ++i) {
-            fp16_vec[i] = cutlass::NumericConverter<ElementFP16, ElementFP4>::convert(fp4_vec[i]);
+        for (int col_packed = tid; col_packed < kTileK / 2; col_packed += kThreads) {
+            if ((k_packed_tile + col_packed) < K_packed) {
+                uint8_t packed = B_batch[k_packed_tile + col_packed];
+                const int scale_idx = col_packed / 8;
+                float scale_b = 1.0f;
+                if ((k_scale_tile + scale_idx) < K_scales) {
+                    scale_b = decode_fp8_e4m3(SFB_batch[k_scale_tile + scale_idx]);
+                }
+                const half scale_h = __float2half(scale_b);
+                const half val0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+                const half val1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+
+                #pragma unroll
+                for (int n = 0; n < 8; ++n) {
+                    B_smem[col_packed * 2][n] = val0;
+                    B_smem[col_packed * 2 + 1][n] = val1;
+                }
+            } else if (col_packed * 2 < kTileK) {
+                #pragma unroll
+                for (int n = 0; n < 8; ++n) {
+                    B_smem[col_packed * 2][n] = __float2half(0.0f);
+                    B_smem[col_packed * 2 + 1][n] = __float2half(0.0f);
+                }
+            }
         }
 
-        // 3. Vectorized store: 8 FP16 elements (128 bits) in one transaction
-        // Check alignment for 128-bit stores
-        if (reinterpret_cast<uintptr_t>(&fp16_output[offset]) % 16 == 0) {
-            const uint4* src = reinterpret_cast<const uint4*>(&fp16_vec[0]);
-            uint4* dst = reinterpret_cast<uint4*>(&fp16_output[offset]);
-            *dst = *src;  // Single 128-bit store
-        } else {
-            // Fallback for unaligned stores
-            CUTLASS_PRAGMA_UNROLL
-            for (int i = 0; i < kVectorWidth; ++i) {
-                fp16_output[offset + i] = fp16_vec[i];
+        __syncthreads();
+
+        #pragma unroll
+        for (int r = 0; r < rows_per_warp; ++r) {
+            const int local_row = warp_id * rows_per_warp + r;
+            if (local_row >= kTileM) {
+                continue;
+            }
+            const int global_row = m_cta + local_row;
+            if (global_row >= M) {
+                continue;
+            }
+
+            float local_sum = 0.0f;
+            #pragma unroll 4
+            for (int k = lane_id; k < kTileK; k += 32) {
+                const half a_val = A_smem[local_row][k];
+                const half b_val = B_smem[k][0];
+                local_sum += __half2float(a_val) * __half2float(b_val);
+            }
+
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset /= 2) {
+                local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
+            }
+
+            if (lane_id == 0) {
+                acc[r] += local_sum;
             }
         }
     }
-    // Tail processing for remaining elements
-    else if (offset < total_elements) {
-        const int remaining = total_elements - offset;
-        for (int i = 0; i < remaining; ++i) {
-            fp16_output[offset + i] =
-                cutlass::NumericConverter<ElementFP16, ElementFP4>::convert(fp4_input[offset + i]);
+
+    if (lane_id == 0) {
+        #pragma unroll
+        for (int r = 0; r < rows_per_warp; ++r) {
+            const int global_row = m_cta + warp_id * rows_per_warp + r;
+            if (global_row < M) {
+                D_batch[global_row] = __float2half(acc[r]);
+            }
+        }
+    }
+}
+
+template <int kTileM, int kTileK, int kThreads>
+__global__ void __launch_bounds__(kThreads)
+fp4_gemv_sm100_fallback(
+    const uint8_t* __restrict__ A_packed,
+    const uint8_t* __restrict__ B_packed,
+    const uint8_t* __restrict__ SFA_packed,
+    const uint8_t* __restrict__ SFB_packed,
+    half* __restrict__ D,
+    const int M,
+    const int K
+) {
+    const int m_cta = blockIdx.x * kTileM;
+    if (m_cta >= M) {
+        return;
+    }
+
+    const int tid = threadIdx.x;
+    const int warp_id = tid / 32;
+    const int lane_id = tid % 32;
+
+    const int K_packed = K / 2;
+    const int K_scales = K / 16;
+
+    __shared__ half A_smem[kTileM][kTileK + 8];
+    __shared__ half B_smem[kTileK][8];
+
+    constexpr int rows_per_warp = kTileM / (kThreads / 32);
+    float acc[rows_per_warp] = {0.0f};
+
+    for (int k_tile = 0; k_tile < K; k_tile += kTileK) {
+        const int k_packed_tile = k_tile / 2;
+        const int k_scale_tile = k_tile / 16;
+
+        __syncthreads();
+
+        for (int idx = tid; idx < kTileM * (kTileK / 2); idx += kThreads) {
+            const int row = idx / (kTileK / 2);
+            const int col_packed = idx % (kTileK / 2);
+            const int m_idx = m_cta + row;
+
+            if (m_idx < M && (k_packed_tile + col_packed) < K_packed) {
+                uint8_t packed = A_packed[m_idx * K_packed + k_packed_tile + col_packed];
+                const int scale_idx = col_packed / 8;
+                float scale_a = 1.0f;
+                if ((k_scale_tile + scale_idx) < K_scales) {
+                    scale_a = decode_fp8_e4m3(SFA_packed[m_idx * K_scales + k_scale_tile + scale_idx]);
+                }
+                const half scale_h = __float2half(scale_a);
+                A_smem[row][col_packed * 2] = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+                A_smem[row][col_packed * 2 + 1] = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+            } else if (row < kTileM && col_packed * 2 < kTileK) {
+                A_smem[row][col_packed * 2] = __float2half(0.0f);
+                A_smem[row][col_packed * 2 + 1] = __float2half(0.0f);
+            }
+        }
+
+        for (int col_packed = tid; col_packed < kTileK / 2; col_packed += kThreads) {
+            if ((k_packed_tile + col_packed) < K_packed) {
+                uint8_t packed = B_packed[k_packed_tile + col_packed];
+                const int scale_idx = col_packed / 8;
+                float scale_b = 1.0f;
+                if ((k_scale_tile + scale_idx) < K_scales) {
+                    scale_b = decode_fp8_e4m3(SFB_packed[k_scale_tile + scale_idx]);
+                }
+                const half scale_h = __float2half(scale_b);
+                const half val0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+                const half val1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+
+                #pragma unroll
+                for (int n = 0; n < 8; ++n) {
+                    B_smem[col_packed * 2][n] = val0;
+                    B_smem[col_packed * 2 + 1][n] = val1;
+                }
+            } else if (col_packed * 2 < kTileK) {
+                #pragma unroll
+                for (int n = 0; n < 8; ++n) {
+                    B_smem[col_packed * 2][n] = __float2half(0.0f);
+                    B_smem[col_packed * 2 + 1][n] = __float2half(0.0f);
+                }
+            }
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int r = 0; r < rows_per_warp; ++r) {
+            const int local_row = warp_id * rows_per_warp + r;
+            if (local_row >= kTileM) {
+                continue;
+            }
+            const int global_row = m_cta + local_row;
+            if (global_row >= M) {
+                continue;
+            }
+
+            float local_sum = 0.0f;
+            #pragma unroll 4
+            for (int k = lane_id; k < kTileK; k += 32) {
+                const half a_val = A_smem[local_row][k];
+                const half b_val = B_smem[k][0];
+                local_sum += __half2float(a_val) * __half2float(b_val);
+            }
+
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset /= 2) {
+                local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
+            }
+
+            if (lane_id == 0) {
+                acc[r] += local_sum;
+            }
+        }
+    }
+
+    if (lane_id == 0) {
+        #pragma unroll
+        for (int r = 0; r < rows_per_warp; ++r) {
+            const int global_row = m_cta + warp_id * rows_per_warp + r;
+            if (global_row < M) {
+                D[global_row] = __float2half(acc[r]);
+            }
         }
     }
 }
 
 void launch_fp4_gemv_optimized(
-    torch::Tensor A_fp4,
-    torch::Tensor B_fp4,
+    torch::Tensor A,
+    torch::Tensor B,
     torch::Tensor SFA,
     torch::Tensor SFB,
     torch::Tensor D,
-    torch::Tensor D_fp4_temp,  // Pre-allocated temp buffer
-    int M, int K, int L
+    int64_t M,
+    int64_t K,
+    int64_t L
 ) {
-    // === CRITICAL VALIDATION ===
-    // A_fp4 is PACKED: [L, M, K/2] bytes (2 FP4 per byte)
-    // CUTLASS expects UNPACKED: [L, M, K] elements (1 byte per FP4)
-    const int64_t a_expected_bytes = static_cast<int64_t>(L) * M * (K / 2);
-    const int64_t b_expected_bytes = static_cast<int64_t>(L) * 1 * (K / 2);
-    const int64_t sfa_expected_bytes = static_cast<int64_t>(L) * M * (K / 16);
-    const int64_t sfb_expected_bytes = static_cast<int64_t>(L) * 1 * (K / 16);
-    const int64_t d_expected_bytes = static_cast<int64_t>(L) * M * 1 * 2;  // FP16 = 2 bytes
-    const int64_t d_fp4_expected_bytes = static_cast<int64_t>(M) * L;
+    TORCH_CHECK(A.is_cuda(), "A must be CUDA");
+    TORCH_CHECK(B.is_cuda(), "B must be CUDA");
+    TORCH_CHECK(SFA.is_cuda(), "SFA must be CUDA");
+    TORCH_CHECK(SFB.is_cuda(), "SFB must be CUDA");
+    TORCH_CHECK(D.is_cuda(), "D must be CUDA");
 
-    if (A_fp4.numel() != a_expected_bytes) {
-        throw std::runtime_error("A_fp4 size mismatch: " + std::to_string(A_fp4.numel()) +
-                                 " != " + std::to_string(a_expected_bytes));
-    }
-    if (B_fp4.numel() != b_expected_bytes) {
-        throw std::runtime_error("B_fp4 size mismatch: " + std::to_string(B_fp4.numel()) +
-                                 " != " + std::to_string(b_expected_bytes));
-    }
+    TORCH_CHECK(A.is_contiguous(), "A must be contiguous");
+    TORCH_CHECK(B.is_contiguous(), "B must be contiguous");
+    TORCH_CHECK(SFA.is_contiguous(), "SFA must be contiguous");
+    TORCH_CHECK(SFB.is_contiguous(), "SFB must be contiguous");
+    TORCH_CHECK(D.is_contiguous(), "D must be contiguous");
 
-    const uint8_t* A_packed = reinterpret_cast<const uint8_t*>(A_fp4.data_ptr());
-    const uint8_t* B_packed = reinterpret_cast<const uint8_t*>(B_fp4.data_ptr());
-    ElementSFA* SFA_ptr = reinterpret_cast<ElementSFA*>(SFA.data_ptr());
-    ElementSFB* SFB_ptr = reinterpret_cast<ElementSFB*>(SFB.data_ptr());
-    cutlass::half_t* D_ptr = reinterpret_cast<cutlass::half_t*>(D.data_ptr());
-    ElementD* D_fp4 = reinterpret_cast<ElementD*>(D_fp4_temp.data_ptr());
+    TORCH_CHECK(A.scalar_type() == torch::kUInt8, "A must be uint8 bytes");
+    TORCH_CHECK(B.scalar_type() == torch::kUInt8, "B must be uint8 bytes");
+    TORCH_CHECK(SFA.scalar_type() == torch::kUInt8, "SFA must be uint8");
+    TORCH_CHECK(SFB.scalar_type() == torch::kUInt8, "SFB must be uint8");
+    TORCH_CHECK(D.scalar_type() == torch::kFloat16, "D must be fp16");
 
-    // Allocate unpacked FP4 buffers
-    // A: [L, M, K] unpacked = L * M * K bytes
-    // B: [L, 1, K] unpacked = L * 1 * K bytes
-    ElementA* A_unpacked = nullptr;
-    ElementB* B_unpacked = nullptr;
-    const size_t a_unpacked_size = static_cast<size_t>(L) * M * K;
-    const size_t b_unpacked_size = static_cast<size_t>(L) * 1 * K;
-    cudaMalloc(&A_unpacked, a_unpacked_size * sizeof(ElementA));
-    cudaMalloc(&B_unpacked, b_unpacked_size * sizeof(ElementB));
+    TORCH_CHECK(A.dim() == 3, "A layout must be [L, M, K/2]");
+    TORCH_CHECK(B.dim() == 3, "B layout must be [L, 1, K/2]");
+    TORCH_CHECK(SFA.dim() == 3, "SFA layout must be [L, M, K/16]");
+    TORCH_CHECK(SFB.dim() == 3, "SFB layout must be [L, 1, K/16]");
+    TORCH_CHECK(D.dim() == 3, "D layout must be [L, M, 1]");
 
-    // Unpack FP4 data (2 per byte → 1 per byte)
-    const int a_packed_bytes = L * M * (K / 2);
-    const int b_packed_bytes = L * 1 * (K / 2);
-    const int threads = 256;
-    const int blocks_a = (a_packed_bytes + threads - 1) / threads;
-    const int blocks_b = (b_packed_bytes + threads - 1) / threads;
+    const int64_t K_packed = K / 2;
+    const int64_t K_scales = K / 16;
 
-    unpack_fp4_kernel<<<blocks_a, threads>>>(
-        A_packed,
-        reinterpret_cast<uint8_t*>(A_unpacked),
-        a_packed_bytes);
-    unpack_fp4_kernel<<<blocks_b, threads>>>(
-        B_packed,
-        reinterpret_cast<uint8_t*>(B_unpacked),
-        b_packed_bytes);
+    TORCH_CHECK(A.size(0) == L && A.size(1) == M && A.size(2) == K_packed,
+                "A shape mismatch");
+    TORCH_CHECK(B.size(0) == L && B.size(1) == 1 && B.size(2) == K_packed,
+                "B shape mismatch");
+    TORCH_CHECK(SFA.size(0) == L && SFA.size(1) == M && SFA.size(2) == K_scales,
+                "SFA shape mismatch");
+    TORCH_CHECK(SFB.size(0) == L && SFB.size(1) == 1 && SFB.size(2) == K_scales,
+                "SFB shape mismatch");
+    TORCH_CHECK(D.size(0) == L && D.size(1) == M && D.size(2) == 1,
+                "D shape mismatch");
 
-    cudaError_t unpack_err = cudaDeviceSynchronize();
-    if (unpack_err != cudaSuccess) {
-        cudaFree(A_unpacked);
-        cudaFree(B_unpacked);
-        throw std::runtime_error(std::string("Unpack kernel error: ") + cudaGetErrorString(unpack_err));
-    }
+    const uint8_t* A_ptr = A.data_ptr<uint8_t>();
+    const uint8_t* B_ptr = B.data_ptr<uint8_t>();
+    const uint8_t* SFA_ptr = SFA.data_ptr<uint8_t>();
+    const uint8_t* SFB_ptr = SFB.data_ptr<uint8_t>();
+    half* D_ptr = reinterpret_cast<half*>(D.data_ptr<at::Half>());
 
-    // Batch stride calculations
-    // NOW using UNPACKED data (1 byte per FP4 element)
-    const int batch_stride_a = M * K;  // M rows × K elements per row
-    const int batch_stride_b = 1 * K;  // 1 row × K elements per row
-    const int batch_stride_sfa = M * (K / 16);  // M rows × K/16 scale factors per row
-    const int batch_stride_sfb = 1 * (K / 16);  // 1 row × K/16 scale factors per row
-    const int batch_stride_d = M * 1;  // M rows × 1 column
-    const int batch_stride_sfd = 0;
+    constexpr int kTileM = 64;
+    constexpr int kTileK = 128;
+    constexpr int kThreads = 256;
 
-    const int stride_a = K;  // K elements per row (unpacked)
-    const int stride_d = 1;  // 1 element per column
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-    const float epilogue_st = 1.0f;
+    const int num_blocks_m = (M + kTileM - 1) / kTileM;
 
-    cutlass::TensorRef<ElementA, LayoutA> ref_A(A_unpacked, stride_a);
-    cutlass::TensorRef<ElementD, LayoutD> ref_D(D_fp4, stride_d);
+    dim3 grid, block(kThreads);
+    const bool is_leaderboard =
+        (M == 7168 && K == 16384 && L == 1) ||
+        (M == 4096 && K == 7168 && L == 8) ||
+        (M == 7168 && K == 2048 && L == 4);
 
-    typename Gemv::Arguments arguments{
-        cutlass::MatrixCoord(M, K),
-        L,
-        typename Gemv::EpilogueOutputOp::Params{
-            ref_D, nullptr, alpha, beta, epilogue_st, batch_stride_sfd, stride_d},
-        ref_A, B_unpacked, nullptr, D_fp4, SFA_ptr, SFB_ptr,
-        stride_a, batch_stride_a, batch_stride_b, 0, batch_stride_d,
-        batch_stride_sfa, batch_stride_sfb, batch_stride_sfd
-    };
+    if (is_leaderboard) {
+        grid = dim3(num_blocks_m, L);
+        fp4_gemv_sm100_tc_optimized<kTileM, kTileK, kThreads><<<grid, block>>>(
+            A_ptr, B_ptr, SFA_ptr, SFB_ptr, D_ptr, M, K, L);
+    } else {
+        grid = dim3(num_blocks_m);
+        for (int64_t batch = 0; batch < L; ++batch) {
+            const uint8_t* A_batch = A_ptr + batch * M * K_packed;
+            const uint8_t* B_batch = B_ptr + batch * K_packed;
+            const uint8_t* SFA_batch = SFA_ptr + batch * M * K_scales;
+            const uint8_t* SFB_batch = SFB_ptr + batch * K_scales;
+            half* D_batch = D_ptr + batch * M;
 
-    Gemv gemv_op;
-    cutlass::Status status = gemv_op.can_implement(arguments);
-    if (status != cutlass::Status::kSuccess) {
-        cudaFree(A_unpacked);
-        cudaFree(B_unpacked);
-        throw std::runtime_error("CUTLASS GemvBlockScaled cannot implement this problem");
+            fp4_gemv_sm100_fallback<kTileM, kTileK, kThreads><<<grid, block>>>(
+                A_batch, B_batch, SFA_batch, SFB_batch, D_batch, M, K);
+        }
     }
 
-    status = gemv_op.initialize(arguments);
-    if (status != cutlass::Status::kSuccess) {
-        cudaFree(A_unpacked);
-        cudaFree(B_unpacked);
-        throw std::runtime_error("CUTLASS GemvBlockScaled initialization failed");
-    }
-
-    // Stage 1: CUTLASS FP4 GEMV (batched, all L processed in parallel)
-    status = gemv_op();
-    if (status != cutlass::Status::kSuccess) {
-        cudaFree(A_unpacked);
-        cudaFree(B_unpacked);
-        throw std::runtime_error("CUTLASS GemvBlockScaled execution failed");
-    }
-
-    // Stage 2: Decode FP4 → FP16 using tensor cores
-    // Optimize for better occupancy: use fewer threads per block, more blocks
-    const int total_elements = M * L;
-    constexpr int kVectorWidth = 8;
-    const int threads_per_block = 128;  // Reduced for better occupancy on small problems
-    const int blocks_needed = (total_elements + kVectorWidth * threads_per_block - 1) /
-                              (kVectorWidth * threads_per_block);
-
-    // Launch decode kernel immediately after CUTLASS (no sync needed)
-    decode_fp4_to_fp16_tensorcore<<<blocks_needed, threads_per_block>>>(
-        D_fp4, D_ptr, total_elements);
-
-    // Single synchronization at the end
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
-        cudaFree(A_unpacked);
-        cudaFree(B_unpacked);
         throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err));
     }
-
-    // Cleanup unpacked buffers
-    cudaFree(A_unpacked);
-    cudaFree(B_unpacked);
 }
 """
 
 
+module = None
+
+
 def get_module():
-    return load_inline(
-        name="fp4_gemv_cutlass_blockscaled",
-        cpp_sources=cpp_source,
-        cuda_sources=cuda_source,
-        functions=["launch_fp4_gemv_optimized"],
-        extra_cuda_cflags=[
-            "-O3",
-            "--use_fast_math",
-            "-std=c++17",
-            f"-I{cutlass_path}/include",
-            f"-I{cutlass_path}/tools/util/include",
-            "-gencode=arch=compute_100,code=sm_100",
-            "-maxrregcount=128",
-            "-DNDEBUG",
-        ],
-        with_cuda=True,
-        verbose=True,
+    global module
+    if module is None:
+        module = load_inline(
+            name="nvfp4_gemv_sm100_fma",
+            cpp_sources=cpp_source,
+            cuda_sources=cuda_source,
+            functions=["launch_fp4_gemv_optimized"],
+            extra_cuda_cflags=[
+                "-O3",
+                "--use_fast_math",
+                "-std=c++17",
+                "-gencode=arch=compute_100,code=sm_100",
+                "--expt-relaxed-constexpr",
+                "--expt-extended-lambda",
+                "-maxrregcount=128",
+                "-DNDEBUG",
+                f"-I{cutlass_path}/include",
+            ],
+            extra_ldflags=["-lcuda"],
+            with_cuda=True,
+            verbose=False,
+        )
+    return module
+
+
+def _ensure_cuda_contiguous(name: str, tensor: torch.Tensor) -> torch.Tensor:
+    if not tensor.is_cuda:
+        tensor = tensor.cuda()
+    tensor = tensor.contiguous()
+    assert tensor.is_cuda, f"{name} must reside on CUDA"
+    assert tensor.is_contiguous(), f"{name} must be contiguous"
+    return tensor
+
+
+def _describe_tensor(name: str, tensor: torch.Tensor) -> str:
+    return (
+        f"{name}: ptr=0x{tensor.data_ptr():x}, shape={tuple(tensor.shape)}, "
+        f"stride={tuple(tensor.stride())}, dtype={tensor.dtype}"
     )
 
 
 def custom_kernel(data: input_t) -> output_t:
-    a, b, sfa_ref_cpu, sfb_ref_cpu, _, _, c = data
+    a, b, sfa, sfb, _, _, c = data
+
     M, _, L = c.shape
+    K_packed = a.shape[1]
+    K = K_packed * 2
+    K_scales = K // 16
 
-    # CRITICAL: a is stored as torch.float4_e2m1fn_x2 (PACKED format)
-    # a.shape[1] represents PACKED dimension (K/2 bytes), not logical K
-    # Each byte stores 2 FP4 values
-    K_packed = a.shape[1]  # This is K/2 (physical bytes)
-    K = K_packed * 2  # This is logical K (number of FP4 elements)
-
-    # === DEFENSIVE SHAPE CORRECTION FOR BUGGY TEST HARNESS ===
-    # NOTE: All shapes use K_packed (not K) since tensors are in packed format
-    # FIX 1: Ensure b is [1, K_packed, L] not [K_packed, K_packed, L] or [M, K_packed, L]
     if b.shape != (1, K_packed, L):
         print(
-            f"WARNING: Test harness provided b with wrong shape {b.shape}. Correcting to [1, {K_packed}, {L}]."
+            f"WARNING: Correcting b shape from {b.shape} to (1, {K_packed}, {L})"
         )
-        # Always use slicing to extract correct dimensions
         b = b[0:1, 0:K_packed, 0:L]
 
-    # FIX 2: Ensure sfa is [M, K//16, L] (correct K dimension)
-    # K//16 = (K_packed * 2) // 16 = K_packed // 8
-    if sfa_ref_cpu.shape[1] != K // 16:
+    if sfa.shape != (M, K_scales, L):
         print(
-            f"WARNING: Correcting sfa K dimension from {sfa_ref_cpu.shape} to [..., {K // 16}, ...]."
+            f"WARNING: Correcting sfa shape from {sfa.shape} to ({M}, {K_scales}, {L})"
         )
-        # Slice to correct K dimension: take first K//16 scale factors
-        sfa_ref_cpu = sfa_ref_cpu[:, 0:(K // 16), :]
+        sfa = sfa[:, :K_scales, :L]
 
-    # FIX 3: Ensure sfb is [1, K//16, L] not [M, K//16, L]
-    if sfb_ref_cpu.shape != (1, K // 16, L):
+    if sfb.shape != (1, K_scales, L):
         print(
-            f"WARNING: Correcting sfb shape from {sfb_ref_cpu.shape} to [1, {K // 16}, {L}]."
+            f"WARNING: Correcting sfb shape from {sfb.shape} to (1, {K_scales}, {L})"
         )
-        # Slice to get correct shape: take first row and first K//16 scale factors
-        sfb_ref_cpu = sfb_ref_cpu[0:1, 0:(K // 16), :]
-    # ==========================================================
+        sfb = sfb[0:1, :K_scales, :L]
 
-    # Now verify shapes (these assertions will pass after correction)
-    # NOTE: a, b use K_packed; sfa, sfb use K//16 (scale factors for LOGICAL K)
-    assert a.shape == (M, K_packed, L), f"A shape mismatch: {a.shape} != ({M}, {K_packed}, {L})"
-    assert b.shape == (1, K_packed, L), f"B shape mismatch: {b.shape} != (1, {K_packed}, {L})"
-    assert c.shape == (M, 1, L), f"C shape mismatch: {c.shape} != ({M}, 1, {L})"
-    assert sfa_ref_cpu.shape == (M, K // 16, L), f"SFA shape mismatch"
-    assert sfb_ref_cpu.shape == (1, K // 16, L), f"SFB shape mismatch"
+    assert a.shape == (M, K_packed, L)
+    assert b.shape == (1, K_packed, L)
+    assert sfa.shape == (M, K_scales, L)
+    assert sfb.shape == (1, K_scales, L)
+    assert c.shape == (M, 1, L)
 
-    # FP4 packing (physical: 2 values per byte)
-    a_bytes = a.view(torch.uint8).permute(2, 0, 1).cuda().contiguous()
-    b_bytes = b.view(torch.uint8).permute(2, 0, 1).cuda().contiguous()
+    a_bytes = _ensure_cuda_contiguous("a", a.permute(2, 0, 1)).view(torch.uint8)
+    b_bytes = _ensure_cuda_contiguous("b", b.permute(2, 0, 1)).view(torch.uint8)
+    sfa_bytes = _ensure_cuda_contiguous("sfa", sfa.permute(2, 0, 1)).view(torch.uint8)
+    sfb_bytes = _ensure_cuda_contiguous("sfb", sfb.permute(2, 0, 1)).view(torch.uint8)
+    c_fp16 = _ensure_cuda_contiguous("c", c.permute(2, 0, 1))
 
-    # FP8 scaling factors (byte-aligned)
-    sfa = sfa_ref_cpu.permute(2, 0, 1).cuda().contiguous()
-    sfb = sfb_ref_cpu.permute(2, 0, 1).cuda().contiguous()
-    sfa_bytes = sfa.view(torch.uint8)
-    sfb_bytes = sfb.view(torch.uint8)
+    for tensor in (a_bytes, b_bytes, sfa_bytes, sfb_bytes):
+        assert tensor.dtype == torch.uint8
+    assert c_fp16.dtype == torch.float16
 
-    # Output tensor
-    c = c.permute(2, 0, 1).cuda().contiguous()
+    print("=== Tensor state before kernel launch ===")
+    for name, tensor in (
+        ("a_bytes", a_bytes),
+        ("b_bytes", b_bytes),
+        ("sfa_bytes", sfa_bytes),
+        ("sfb_bytes", sfb_bytes),
+        ("c", c_fp16),
+    ):
+        print("  " + _describe_tensor(name, tensor))
 
-    # Pre-allocate FP4 intermediate buffer (managed by PyTorch, eliminates cudaMalloc overhead)
-    # IMPORTANT: CUTLASS stores cutlass::float_e2m1_t as 1 byte per element (not packed!)
-    # Even though FP4 is 4 bits, CUTLASS uses 1 byte per element for easier indexing
-    # So M×L elements = M×L bytes
-    d_fp4_temp = torch.empty(M * L, dtype=torch.uint8, device='cuda')
-
-    # === VALIDATION: Print all buffer sizes ===
-    print(f"DEBUG: M={M}, K_packed={K_packed}, K={K}, L={L}")
-    print(f"  a_bytes: shape={a_bytes.shape}, numel={a_bytes.numel()}, expected={L * M * K_packed}")
-    print(f"  b_bytes: shape={b_bytes.shape}, numel={b_bytes.numel()}, expected={L * 1 * K_packed}")
-    print(f"  sfa_bytes: shape={sfa_bytes.shape}, numel={sfa_bytes.numel()}, expected={L * M * (K // 16)}")
-    print(f"  sfb_bytes: shape={sfb_bytes.shape}, numel={sfb_bytes.numel()}, expected={L * 1 * (K // 16)}")
-    print(f"  c: shape={c.shape}, numel={c.numel()}, expected={L * M * 1}")
-    print(f"  d_fp4_temp: shape={d_fp4_temp.shape}, numel={d_fp4_temp.numel()}, expected={M * L}")
-
-    # Assertions to catch allocation mismatches
-    assert a_bytes.numel() == L * M * K_packed, f"a_bytes size mismatch: {a_bytes.numel()} != {L * M * K_packed}"
-    assert b_bytes.numel() == L * 1 * K_packed, f"b_bytes size mismatch: {b_bytes.numel()} != {L * 1 * K_packed}"
-    assert sfa_bytes.numel() == L * M * (K // 16), f"sfa_bytes size mismatch: {sfa_bytes.numel()} != {L * M * (K // 16)}"
-    assert sfb_bytes.numel() == L * 1 * (K // 16), f"sfb_bytes size mismatch: {sfb_bytes.numel()} != {L * 1 * (K // 16)}"
-    assert c.numel() == L * M * 1, f"c size mismatch: {c.numel()} != {L * M * 1}"
-    assert d_fp4_temp.numel() == M * L, f"d_fp4_temp size mismatch: {d_fp4_temp.numel()} != {M * L}"
+    torch.cuda.synchronize()
 
     mod = get_module()
-    mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, d_fp4_temp, M, K, L)
+    mod.launch_fp4_gemv_optimized(
+        a_bytes,
+        b_bytes,
+        sfa_bytes,
+        sfb_bytes,
+        c_fp16,
+        int(M),
+        int(K),
+        int(L),
+    )
 
-    return c.permute(1, 2, 0).contiguous()
+    torch.cuda.synchronize()
+
+    return c_fp16.permute(1, 2, 0).contiguous()
