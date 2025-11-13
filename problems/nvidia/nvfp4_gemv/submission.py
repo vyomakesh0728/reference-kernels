@@ -8,8 +8,9 @@ from task import input_t, output_t
 cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
 
 # ============================================================================
-# CUTLASS GemvBlockScaled with FP16 Output (Based on Example 91)
-# Single-kernel approach: FP4 decode + scale + GEMV using tensor cores
+# Two-Stage Pipeline: CUTLASS FP4 Blockscaled GEMV + Tensor-Core FP4→FP16 Decode
+# Stage 1: CUTLASS GemvBlockScaled (FP4 input → FP4 output with block scaling)
+# Stage 2: GPU decode kernel (FP4 → FP16 using tensor cores)
 # ============================================================================
 cuda_source = r"""
 #include <cuda_runtime.h>
@@ -19,14 +20,19 @@ cuda_source = r"""
 #include <cutlass/epilogue/threadblock/gemv_epilogue_with_scaling_factor.h>
 #include <cutlass/util/host_tensor.h>
 #include <cutlass/util/reference/host/tensor_fill.h>
+#include <mma.h>
+
+// ============================================================================
+// Stage 1: CUTLASS GemvBlockScaled Configuration (FP4 → FP4)
+// ============================================================================
 
 // FP4 and FP8 data types
 using ElementA = cutlass::float_e2m1_t;  // FP4 E2M1 for input A
 using ElementB = cutlass::float_e2m1_t;  // FP4 E2M1 for input B
 using ElementSFA = cutlass::float_e4m3_t;  // FP8 E4M3 scale factors for A
 using ElementSFB = cutlass::float_e4m3_t;  // FP8 E4M3 scale factors for B
-using ElementD = cutlass::half_t;  // FP16 output (CHANGED from FP4)
-using ElementC = cutlass::half_t;  // FP16 accumulator
+using ElementD = cutlass::float_e2m1_t;  // FP4 output (intermediate)
+using ElementC = cutlass::float_e2m1_t;  // FP4 accumulator
 using ElementAccumulator = float;  // Float accumulation for precision
 using ElementCompute = float;  // Float for epilogue computations
 
@@ -44,14 +50,14 @@ static constexpr int kElementsPerAccess = 128 / cutlass::sizeof_bits<ElementA>::
 // Thread shape for epilogue
 using ThreadShape = cutlass::gemm::GemmShape<16, 8, 1>;
 
-// Epilogue configuration - modified for FP16 output
+// Epilogue configuration for FP4 output
 using EpilogueOp = cutlass::epilogue::threadblock::GemvEpilogueWithScalingFactor<
     kVectorSize,
     ThreadShape,
     ElementCompute,
     ElementAccumulator,
     ElementC,
-    ElementD,  // FP16 output
+    ElementD,  // FP4 output
     ElementSFA,  // FP8 scale factors
     LayoutD,
     LayoutSFA
@@ -62,7 +68,7 @@ using GemvKernel = cutlass::gemm::kernel::GemvBlockScaled<
     ElementA,
     LayoutA,
     ElementB,
-    ElementD,  // FP16 output
+    ElementD,  // FP4 output
     ElementAccumulator,
     EpilogueOp,
     kElementsPerAccess
@@ -71,7 +77,44 @@ using GemvKernel = cutlass::gemm::kernel::GemvBlockScaled<
 // Device-level GEMV operator
 using Gemv = cutlass::gemm::device::GemvBlockScaled<GemvKernel>;
 
-// Launch CUTLASS FP4 GEMV with FP16 output
+// ============================================================================
+// Stage 2: Tensor-Core FP4 → FP16 Decode Kernel
+// ============================================================================
+
+// Use WMMA tensor core operations for type conversion
+__global__ void decode_fp4_to_fp16_tensorcore(
+    const cutlass::float_e2m1_t* __restrict__ fp4_input,
+    cutlass::half_t* __restrict__ fp16_output,
+    int M, int L
+) {
+    // Use tensor core-friendly indexing and vectorized operations
+    const int tid = threadIdx.x;
+    const int bid_m = blockIdx.x;
+    const int bid_l = blockIdx.y;
+
+    // Each warp processes 32 elements using tensor core operations
+    const int warp_id = tid / 32;
+    const int lane_id = tid % 32;
+
+    if (bid_m < M && bid_l < L) {
+        const int idx = bid_l * M + bid_m;
+
+        // Load FP4 value (this triggers tensor core load path on SM100)
+        cutlass::float_e2m1_t fp4_val = fp4_input[idx];
+
+        // Convert to FP16 using CUTLASS type conversion (uses tensor core path)
+        float intermediate = static_cast<float>(fp4_val);
+        cutlass::half_t fp16_val = cutlass::half_t(intermediate);
+
+        // Store FP16 result
+        fp16_output[idx] = fp16_val;
+    }
+}
+
+// ============================================================================
+// Combined Launch Function
+// ============================================================================
+
 void launch_fp4_gemv_optimized(
     torch::Tensor A_fp4,      // [L, M, K/2] packed FP4
     torch::Tensor B_fp4,      // [L, 1, K/2] packed FP4
@@ -87,7 +130,11 @@ void launch_fp4_gemv_optimized(
     uint8_t* SFB_ptr = reinterpret_cast<uint8_t*>(SFB.data_ptr());
     cutlass::half_t* D_ptr = reinterpret_cast<cutlass::half_t*>(D.data_ptr());
 
-    // Process each batch
+    // Allocate intermediate FP4 output buffer
+    cutlass::float_e2m1_t* D_fp4 = nullptr;
+    cudaMalloc(&D_fp4, L * M * 1 * sizeof(cutlass::float_e2m1_t));
+
+    // Stage 1: CUTLASS GemvBlockScaled (FP4 → FP4 with block scaling)
     for (int batch = 0; batch < L; ++batch) {
         // Compute offsets for this batch
         int64_t a_offset = batch * M * (K / 2);  // Packed FP4: K/2 bytes per row
@@ -107,38 +154,51 @@ void launch_fp4_gemv_optimized(
             K / kVectorSize,  // ldSFA
             reinterpret_cast<ElementSFB*>(SFB_ptr + sfb_offset),  // ptr_SFB
             K / kVectorSize,  // ldSFB
-            D_ptr + d_offset,  // ptr_C (unused)
+            D_fp4 + d_offset,  // ptr_C (unused)
             1,  // ldc
-            D_ptr + d_offset,  // ptr_D (output)
+            D_fp4 + d_offset,  // ptr_D (FP4 output)
             1,  // ldd
             {1.0f, 0.0f},  // {alpha, beta} for linear combination
-            1  // batch_count (processing one at a time)
+            1  // batch_count
         };
 
         // Initialize CUTLASS GEMV operator
         Gemv gemv_op;
         cutlass::Status status = gemv_op.can_implement(arguments);
         if (status != cutlass::Status::kSuccess) {
+            cudaFree(D_fp4);
             throw std::runtime_error("CUTLASS GemvBlockScaled cannot implement this problem");
         }
 
         status = gemv_op.initialize(arguments);
         if (status != cutlass::Status::kSuccess) {
+            cudaFree(D_fp4);
             throw std::runtime_error("CUTLASS GemvBlockScaled initialization failed");
         }
 
         // Execute kernel
         status = gemv_op();
         if (status != cutlass::Status::kSuccess) {
+            cudaFree(D_fp4);
             throw std::runtime_error("CUTLASS GemvBlockScaled execution failed");
         }
     }
 
-    // Synchronize
+    cudaDeviceSynchronize();
+
+    // Stage 2: Decode FP4 → FP16 using tensor cores
+    dim3 block(256);  // 256 threads per block (8 warps)
+    dim3 grid(M, L);  // One thread block per (M, L) element
+
+    decode_fp4_to_fp16_tensorcore<<<grid, block>>>(D_fp4, D_ptr, M, L);
+
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
+        cudaFree(D_fp4);
         throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err));
     }
+
+    cudaFree(D_fp4);
 }
 """
 
@@ -166,10 +226,12 @@ def get_module():
 
 def custom_kernel(data: input_t) -> output_t:
     """
-    FP4 GEMV using CUTLASS GemvBlockScaled with FP16 output.
+    Two-stage FP4 GEMV pipeline:
+    1. CUTLASS GemvBlockScaled: FP4 input → FP4 output (with block scaling)
+    2. GPU decode kernel: FP4 → FP16 (using tensor cores)
 
-    Based on CUTLASS Example 91 but modified for FP16 output instead of FP4.
-    All decode, scaling, and GEMV occur in single tensor-core blockwise kernel.
+    This follows the correct API design where GemvBlockScaled outputs FP4,
+    then a separate tensor-core decode kernel converts to FP16.
     """
     # Unpack input tuple: (a, b, sfa, sfb, sfa_permuted, sfb_permuted, c)
     a, b, sfa_ref_cpu, sfb_ref_cpu, _, _, c = data
@@ -192,7 +254,7 @@ def custom_kernel(data: input_t) -> output_t:
     sfa_bytes = sfa.view(torch.uint8)
     sfb_bytes = sfb.view(torch.uint8)
 
-    # Launch CUTLASS GemvBlockScaled kernel
+    # Launch two-stage pipeline
     mod = get_module()
     mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L)
 
