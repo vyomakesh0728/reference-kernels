@@ -25,6 +25,7 @@ void launch_fp4_gemv_optimized(
 cuda_source = r"""
 #include <torch/extension.h>
 #include <cuda_runtime.h>
+#include <algorithm>
 
 // CUTLASS core includes
 #include <cutlass/cutlass.h>
@@ -145,23 +146,48 @@ void launch_fp4_gemv_optimized(
     torch::Tensor D_fp4_temp,  // Pre-allocated temp buffer
     int M, int K, int L
 ) {
+    TORCH_CHECK(A_unpacked.is_cuda(), "A_unpacked must be CUDA");
+    TORCH_CHECK(B_unpacked.is_cuda(), "B_unpacked must be CUDA");
+    TORCH_CHECK(SFA.is_cuda(), "SFA must be CUDA");
+    TORCH_CHECK(SFB.is_cuda(), "SFB must be CUDA");
+    TORCH_CHECK(D.is_cuda(), "D must be CUDA");
+    TORCH_CHECK(D_fp4_temp.is_cuda(), "D_fp4_temp must be CUDA");
+
+    TORCH_CHECK(A_unpacked.is_contiguous(), "A_unpacked must be contiguous");
+    TORCH_CHECK(B_unpacked.is_contiguous(), "B_unpacked must be contiguous");
+    TORCH_CHECK(SFA.is_contiguous(), "SFA must be contiguous");
+    TORCH_CHECK(SFB.is_contiguous(), "SFB must be contiguous");
+    TORCH_CHECK(D.is_contiguous(), "D must be contiguous");
+    TORCH_CHECK(D_fp4_temp.is_contiguous(), "D_fp4_temp must be contiguous");
+
+    TORCH_CHECK(A_unpacked.dim() == 3, "A_unpacked must be [L, M, K]");
+    TORCH_CHECK(B_unpacked.dim() == 3, "B_unpacked must be [L, 1, K]");
+    TORCH_CHECK(SFA.dim() == 3, "SFA must be [L, M, K/16]");
+    TORCH_CHECK(SFB.dim() == 3, "SFB must be [L, 1, K/16]");
+    TORCH_CHECK(D.dim() == 3, "D must be [L, M, 1]");
+
+    TORCH_CHECK(A_unpacked.scalar_type() == torch::kUInt8, "A_unpacked must be uint8");
+    TORCH_CHECK(B_unpacked.scalar_type() == torch::kUInt8, "B_unpacked must be uint8");
+    TORCH_CHECK(SFA.scalar_type() == torch::kUInt8, "SFA must be uint8 view of fp8");
+    TORCH_CHECK(SFB.scalar_type() == torch::kUInt8, "SFB must be uint8 view of fp8");
+    TORCH_CHECK(D.scalar_type() == torch::kFloat16, "D must be fp16");
+    TORCH_CHECK(D_fp4_temp.scalar_type() == torch::kUInt8, "D_fp4_temp must be uint8");
+
     // === CRITICAL VALIDATION ===
     // A_unpacked / B_unpacked already provide one byte per FP4 element
     const int64_t a_expected_bytes = static_cast<int64_t>(L) * M * K;
     const int64_t b_expected_bytes = static_cast<int64_t>(L) * 1 * K;
     const int64_t sfa_expected_bytes = static_cast<int64_t>(L) * M * (K / 16);
     const int64_t sfb_expected_bytes = static_cast<int64_t>(L) * 1 * (K / 16);
-    const int64_t d_expected_bytes = static_cast<int64_t>(L) * M * 1 * 2;  // FP16 = 2 bytes
+    const int64_t d_expected_elements = static_cast<int64_t>(L) * M * 1;
     const int64_t d_fp4_expected_bytes = static_cast<int64_t>(M) * L;
 
-    if (A_unpacked.numel() != a_expected_bytes) {
-        throw std::runtime_error("A_unpacked size mismatch: " + std::to_string(A_unpacked.numel()) +
-                                 " != " + std::to_string(a_expected_bytes));
-    }
-    if (B_unpacked.numel() != b_expected_bytes) {
-        throw std::runtime_error("B_unpacked size mismatch: " + std::to_string(B_unpacked.numel()) +
-                                 " != " + std::to_string(b_expected_bytes));
-    }
+    TORCH_CHECK(A_unpacked.numel() == a_expected_bytes, "A_unpacked numel mismatch");
+    TORCH_CHECK(B_unpacked.numel() == b_expected_bytes, "B_unpacked numel mismatch");
+    TORCH_CHECK(SFA.numel() == sfa_expected_bytes, "SFA numel mismatch");
+    TORCH_CHECK(SFB.numel() == sfb_expected_bytes, "SFB numel mismatch");
+    TORCH_CHECK(D.numel() == d_expected_elements, "D numel mismatch");
+    TORCH_CHECK(D_fp4_temp.numel() == d_fp4_expected_bytes, "D_fp4_temp numel mismatch");
     ElementA* A_unpacked_ptr = reinterpret_cast<ElementA*>(A_unpacked.data_ptr());
     ElementB* B_unpacked_ptr = reinterpret_cast<ElementB*>(B_unpacked.data_ptr());
     ElementSFA* SFA_ptr = reinterpret_cast<ElementSFA*>(SFA.data_ptr());
@@ -169,17 +195,22 @@ void launch_fp4_gemv_optimized(
     cutlass::half_t* D_ptr = reinterpret_cast<cutlass::half_t*>(D.data_ptr());
     ElementD* D_fp4 = reinterpret_cast<ElementD*>(D_fp4_temp.data_ptr());
 
-    // Batch stride calculations
-    // NOW using UNPACKED data (1 byte per FP4 element)
-    const int batch_stride_a = M * K;  // M rows × K elements per row
-    const int batch_stride_b = 1 * K;  // 1 row × K elements per row
-    const int batch_stride_sfa = M * (K / 16);  // M rows × K/16 scale factors per row
-    const int batch_stride_sfb = 1 * (K / 16);  // 1 row × K/16 scale factors per row
-    const int batch_stride_d = M * 1;  // M rows × 1 column
+    // Batch stride calculations derived from actual tensor strides
+    const auto a_strides = A_unpacked.strides();
+    const auto b_strides = B_unpacked.strides();
+    const auto sfa_strides = SFA.strides();
+    const auto sfb_strides = SFB.strides();
+    const auto d_strides = D.strides();
+
+    const int batch_stride_a = static_cast<int>(a_strides[0]);
+    const int batch_stride_b = static_cast<int>(b_strides[0]);
+    const int batch_stride_sfa = static_cast<int>(sfa_strides[0]);
+    const int batch_stride_sfb = static_cast<int>(sfb_strides[0]);
+    const int batch_stride_d = static_cast<int>(d_strides[0]);
     const int batch_stride_sfd = 0;
 
-    const int stride_a = K;  // K elements per row (unpacked)
-    const int stride_d = 1;  // 1 element per column
+    const int stride_a = static_cast<int>(a_strides[1]);
+    const int stride_d = std::max(1, static_cast<int>(d_strides[1]));
     const float alpha = 1.0f;
     const float beta = 0.0f;
     const float epilogue_st = 1.0f;
@@ -351,7 +382,33 @@ def custom_kernel(data: input_t) -> output_t:
     assert c.numel() == L * M * 1, f"c size mismatch: {c.numel()} != {L * M * 1}"
     assert d_fp4_temp.numel() == M * L, f"d_fp4_temp size mismatch: {d_fp4_temp.numel()} != {M * L}"
 
+    tensors_to_validate = {
+        "a_unpacked": a_unpacked,
+        "b_unpacked": b_unpacked,
+        "sfa_bytes": sfa_bytes,
+        "sfb_bytes": sfb_bytes,
+        "c": c,
+        "d_fp4_temp": d_fp4_temp,
+    }
+    for name, tensor in tensors_to_validate.items():
+        assert tensor.is_cuda, f"{name} must be on CUDA device"
+        assert tensor.is_contiguous(), f"{name} must be contiguous"
+
+    def _describe_tensor(name: str, tensor: torch.Tensor) -> str:
+        return (
+            f"{name}: ptr=0x{tensor.data_ptr():x}, shape={tuple(tensor.shape)}, "
+            f"stride={tuple(tensor.stride())}, dtype={tensor.dtype}"
+        )
+
+    print("=== Tensor state before kernel launch ===")
+    for n, t in tensors_to_validate.items():
+        print("  " + _describe_tensor(n, t))
+
+    torch.cuda.synchronize()
+
     mod = get_module()
     mod.launch_fp4_gemv_optimized(a_unpacked, b_unpacked, sfa_bytes, sfb_bytes, c, d_fp4_temp, M, K, L)
+
+    torch.cuda.synchronize()
 
     return c.permute(1, 2, 0).contiguous()
