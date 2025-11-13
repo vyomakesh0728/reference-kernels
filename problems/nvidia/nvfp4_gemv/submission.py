@@ -135,53 +135,79 @@ void launch_fp4_gemv_optimized(
     cudaMalloc(&D_fp4, L * M * 1 * sizeof(cutlass::float_e2m1_t));
 
     // Stage 1: CUTLASS GemvBlockScaled (FP4 → FP4 with block scaling)
-    for (int batch = 0; batch < L; ++batch) {
-        // Compute offsets for this batch
-        int64_t a_offset = batch * M * (K / 2);  // Packed FP4: K/2 bytes per row
-        int64_t b_offset = batch * 1 * (K / 2);
-        int64_t sfa_offset = batch * M * (K / 16);
-        int64_t sfb_offset = batch * 1 * (K / 16);
-        int64_t d_offset = batch * M * 1;
+    // Process all batches with proper CUTLASS API structure
 
-        // CUTLASS GemvBlockScaled arguments
-        typename Gemv::Arguments arguments{
-            {M, 1, K},  // Problem size (M x 1 GEMV, K reduction dimension)
-            reinterpret_cast<ElementA*>(A_ptr + a_offset),  // ptr_A
-            K,  // lda (stride for A)
-            reinterpret_cast<ElementB*>(B_ptr + b_offset),  // ptr_B
-            K,  // ldb (stride for B)
-            reinterpret_cast<ElementSFA*>(SFA_ptr + sfa_offset),  // ptr_SFA
-            K / kVectorSize,  // ldSFA
-            reinterpret_cast<ElementSFB*>(SFB_ptr + sfb_offset),  // ptr_SFB
-            K / kVectorSize,  // ldSFB
-            D_fp4 + d_offset,  // ptr_C (unused)
-            1,  // ldc
-            D_fp4 + d_offset,  // ptr_D (FP4 output)
-            1,  // ldd
-            {1.0f, 0.0f},  // {alpha, beta} for linear combination
-            1  // batch_count
-        };
+    // Batch strides (distance between consecutive batch elements)
+    int batch_stride_a = M * (K / 2);      // A: M rows × K/2 packed elements
+    int batch_stride_b = 1 * (K / 2);      // B: 1 row × K/2 packed elements
+    int batch_stride_sfa = M * (K / 16);   // SFA: M rows × K/16 scale factors
+    int batch_stride_sfb = 1 * (K / 16);   // SFB: 1 row × K/16 scale factors
+    int batch_stride_d = M * 1;            // D: M rows × 1 column
+    int batch_stride_sfd = 0;              // No scale factor for output
 
-        // Initialize CUTLASS GEMV operator
-        Gemv gemv_op;
-        cutlass::Status status = gemv_op.can_implement(arguments);
-        if (status != cutlass::Status::kSuccess) {
-            cudaFree(D_fp4);
-            throw std::runtime_error("CUTLASS GemvBlockScaled cannot implement this problem");
-        }
+    // Leading dimensions
+    int stride_a = K;                      // Row-major A: stride = K
+    int stride_d = 1;                      // Column-major output: stride = 1 (single column)
 
-        status = gemv_op.initialize(arguments);
-        if (status != cutlass::Status::kSuccess) {
-            cudaFree(D_fp4);
-            throw std::runtime_error("CUTLASS GemvBlockScaled initialization failed");
-        }
+    // Alpha/beta for linear combination (C = alpha*A@B + beta*C)
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    float epilogue_st = 1.0f;              // Scale parameter for epilogue
 
-        // Execute kernel
-        status = gemv_op();
-        if (status != cutlass::Status::kSuccess) {
-            cudaFree(D_fp4);
-            throw std::runtime_error("CUTLASS GemvBlockScaled execution failed");
-        }
+    // CUTLASS GemvBlockScaled Arguments (matching Example 91 structure)
+    typename Gemv::Arguments arguments{
+        cutlass::MatrixCoord(M, K),  // problem_size: M rows × K columns
+        L,                            // batch_count
+
+        // Epilogue parameters
+        typename Gemv::EpilogueOutputOp::Params{
+            D_fp4,                    // ptr_D (FP4 output)
+            nullptr,                  // ptr_SFD (no output scale factors)
+            alpha,                    // alpha
+            beta,                     // beta
+            epilogue_st,              // st parameter
+            batch_stride_sfd,         // batch_stride_sfd
+            stride_d                  // stride_d
+        },
+
+        // Mainloop pointers
+        reinterpret_cast<ElementA*>(A_ptr),                // ptr_A
+        reinterpret_cast<ElementB*>(B_ptr),                // ptr_B
+        nullptr,                                            // ptr_C (unused)
+        D_fp4,                                              // ptr_D (output)
+        reinterpret_cast<ElementSFA*>(SFA_ptr),            // ptr_SFA
+        reinterpret_cast<ElementSFB*>(SFB_ptr),            // ptr_SFB
+
+        // Strides and batch strides
+        stride_a,                     // stride_a
+        batch_stride_a,               // batch_stride_a
+        batch_stride_b,               // batch_stride_b
+        0,                            // batch_stride_c (unused)
+        batch_stride_d,               // batch_stride_d
+        batch_stride_sfa,             // batch_stride_sfa
+        batch_stride_sfb,             // batch_stride_sfb
+        batch_stride_sfd              // batch_stride_sfd
+    };
+
+    // Initialize and execute CUTLASS GEMV operator
+    Gemv gemv_op;
+    cutlass::Status status = gemv_op.can_implement(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        cudaFree(D_fp4);
+        throw std::runtime_error("CUTLASS GemvBlockScaled cannot implement this problem");
+    }
+
+    status = gemv_op.initialize(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        cudaFree(D_fp4);
+        throw std::runtime_error("CUTLASS GemvBlockScaled initialization failed");
+    }
+
+    // Execute kernel (processes all L batches)
+    status = gemv_op();
+    if (status != cutlass::Status::kSuccess) {
+        cudaFree(D_fp4);
+        throw std::runtime_error("CUTLASS GemvBlockScaled execution failed");
     }
 
     cudaDeviceSynchronize();
