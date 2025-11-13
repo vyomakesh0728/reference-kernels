@@ -316,18 +316,25 @@ def get_module():
 def custom_kernel(data: input_t) -> output_t:
     a, b, sfa_ref_cpu, sfb_ref_cpu, _, _, c = data
     M, _, L = c.shape
-    K = a.shape[1]
+
+    # CRITICAL: a is stored as torch.float4_e2m1fn_x2 (PACKED format)
+    # a.shape[1] represents PACKED dimension (K/2 bytes), not logical K
+    # Each byte stores 2 FP4 values
+    K_packed = a.shape[1]  # This is K/2 (physical bytes)
+    K = K_packed * 2  # This is logical K (number of FP4 elements)
 
     # === DEFENSIVE SHAPE CORRECTION FOR BUGGY TEST HARNESS ===
-    # FIX 1: Ensure b is [1, K, L] not [K, K, L] or [M, K, L]
-    if b.shape != (1, K, L):
+    # NOTE: All shapes use K_packed (not K) since tensors are in packed format
+    # FIX 1: Ensure b is [1, K_packed, L] not [K_packed, K_packed, L] or [M, K_packed, L]
+    if b.shape != (1, K_packed, L):
         print(
-            f"WARNING: Test harness provided b with wrong shape {b.shape}. Correcting to [1, {K}, {L}]."
+            f"WARNING: Test harness provided b with wrong shape {b.shape}. Correcting to [1, {K_packed}, {L}]."
         )
         # Always use slicing to extract correct dimensions
-        b = b[0:1, 0:K, 0:L]
+        b = b[0:1, 0:K_packed, 0:L]
 
     # FIX 2: Ensure sfa is [M, K//16, L] (correct K dimension)
+    # K//16 = (K_packed * 2) // 16 = K_packed // 8
     if sfa_ref_cpu.shape[1] != K // 16:
         print(
             f"WARNING: Correcting sfa K dimension from {sfa_ref_cpu.shape} to [..., {K // 16}, ...]."
@@ -345,8 +352,9 @@ def custom_kernel(data: input_t) -> output_t:
     # ==========================================================
 
     # Now verify shapes (these assertions will pass after correction)
-    assert a.shape == (M, K, L), f"A shape mismatch: {a.shape} != ({M}, {K}, {L})"
-    assert b.shape == (1, K, L), f"B shape mismatch: {b.shape} != (1, {K}, {L})"
+    # NOTE: a, b use K_packed; sfa, sfb use K//16 (scale factors for LOGICAL K)
+    assert a.shape == (M, K_packed, L), f"A shape mismatch: {a.shape} != ({M}, {K_packed}, {L})"
+    assert b.shape == (1, K_packed, L), f"B shape mismatch: {b.shape} != (1, {K_packed}, {L})"
     assert c.shape == (M, 1, L), f"C shape mismatch: {c.shape} != ({M}, 1, {L})"
     assert sfa_ref_cpu.shape == (M, K // 16, L), f"SFA shape mismatch"
     assert sfb_ref_cpu.shape == (1, K // 16, L), f"SFB shape mismatch"
@@ -371,21 +379,21 @@ def custom_kernel(data: input_t) -> output_t:
     d_fp4_temp = torch.empty(M * L, dtype=torch.uint8, device='cuda')
 
     # === VALIDATION: Print all buffer sizes ===
-    print(f"DEBUG: M={M}, K={K}, L={L}")
-    print(f"  a_bytes: shape={a_bytes.shape}, numel={a_bytes.numel()}, expected={L * M * (K // 2)}")
-    print(f"  b_bytes: shape={b_bytes.shape}, numel={b_bytes.numel()}, expected={L * 1 * (K // 2)}")
+    print(f"DEBUG: M={M}, K_packed={K_packed}, K={K}, L={L}")
+    print(f"  a_bytes: shape={a_bytes.shape}, numel={a_bytes.numel()}, expected={L * M * K_packed}")
+    print(f"  b_bytes: shape={b_bytes.shape}, numel={b_bytes.numel()}, expected={L * 1 * K_packed}")
     print(f"  sfa_bytes: shape={sfa_bytes.shape}, numel={sfa_bytes.numel()}, expected={L * M * (K // 16)}")
     print(f"  sfb_bytes: shape={sfb_bytes.shape}, numel={sfb_bytes.numel()}, expected={L * 1 * (K // 16)}")
     print(f"  c: shape={c.shape}, numel={c.numel()}, expected={L * M * 1}")
     print(f"  d_fp4_temp: shape={d_fp4_temp.shape}, numel={d_fp4_temp.numel()}, expected={M * L}")
 
     # Assertions to catch allocation mismatches
-    assert a_bytes.numel() == L * M * (K // 2), f"a_bytes size mismatch!"
-    assert b_bytes.numel() == L * 1 * (K // 2), f"b_bytes size mismatch!"
-    assert sfa_bytes.numel() == L * M * (K // 16), f"sfa_bytes size mismatch!"
-    assert sfb_bytes.numel() == L * 1 * (K // 16), f"sfb_bytes size mismatch!"
-    assert c.numel() == L * M * 1, f"c size mismatch!"
-    assert d_fp4_temp.numel() == M * L, f"d_fp4_temp size mismatch!"
+    assert a_bytes.numel() == L * M * K_packed, f"a_bytes size mismatch: {a_bytes.numel()} != {L * M * K_packed}"
+    assert b_bytes.numel() == L * 1 * K_packed, f"b_bytes size mismatch: {b_bytes.numel()} != {L * 1 * K_packed}"
+    assert sfa_bytes.numel() == L * M * (K // 16), f"sfa_bytes size mismatch: {sfa_bytes.numel()} != {L * M * (K // 16)}"
+    assert sfb_bytes.numel() == L * 1 * (K // 16), f"sfb_bytes size mismatch: {sfb_bytes.numel()} != {L * 1 * (K // 16)}"
+    assert c.numel() == L * M * 1, f"c size mismatch: {c.numel()} != {L * M * 1}"
+    assert d_fp4_temp.numel() == M * L, f"d_fp4_temp size mismatch: {d_fp4_temp.numel()} != {M * L}"
 
     mod = get_module()
     mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, d_fp4_temp, M, K, L)
