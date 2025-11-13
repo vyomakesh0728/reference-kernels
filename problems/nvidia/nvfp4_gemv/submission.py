@@ -156,17 +156,18 @@ void launch_fp4_gemv_optimized(
     float beta = 0.0f;
     float epilogue_st = 1.0f;              // Scale parameter for epilogue
 
-    // Create TensorRef for A (matching Example 91 - A uses TensorRef, not raw pointer)
+    // Create TensorRef for A and D (matching Example 91)
     cutlass::TensorRef<ElementA, LayoutA> ref_A(A_ptr, stride_a);
+    cutlass::TensorRef<ElementD, LayoutD> ref_D(D_fp4, stride_d);
 
     // CUTLASS GemvBlockScaled Arguments (matching Example 91 structure exactly)
     typename Gemv::Arguments arguments{
         cutlass::MatrixCoord(M, K),  // problem_size: M rows × K columns
         L,                            // batch_count
 
-        // Epilogue parameters
+        // Epilogue parameters (D uses TensorRef, not raw pointer)
         typename Gemv::EpilogueOutputOp::Params{
-            D_fp4,                    // ptr_D (FP4 output)
+            ref_D,                    // ref_D: TensorRef<ElementD, LayoutD>
             nullptr,                  // ptr_SFD (no output scale factors)
             alpha,                    // alpha
             beta,                     // beta
