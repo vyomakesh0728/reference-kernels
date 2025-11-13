@@ -17,9 +17,9 @@ cuda_source = r"""
 #include <cutlass/cutlass.h>
 #include <cutlass/numeric_types.h>
 #include <cutlass/tensor_ref.h>
-#include <cutlass/gemm/device/gemv_block_scaled.h>
-#include <cutlass/gemm/kernel/gemv_block_scaled.h>
-#include <cutlass/epilogue/threadblock/gemv_epilogue_with_scaling_factor.h>
+#include <cutlass/gemm/device/gemv_blockscaled.h>
+#include <cutlass/gemm/kernel/gemv_blockscaled.h>
+#include <cutlass/epilogue/threadblock/epilogue_with_scaling_factor.h>
 #include <cutlass/util/host_tensor.h>
 #include <cutlass/util/reference/host/tensor_fill.h>
 #include <mma.h>
@@ -53,7 +53,7 @@ static constexpr int kElementsPerAccess = 128 / cutlass::sizeof_bits<ElementA>::
 using ThreadShape = cutlass::gemm::GemmShape<16, 8, 1>;
 
 // Epilogue configuration for FP4 output
-using EpilogueOp = cutlass::epilogue::threadblock::GemvEpilogueWithScalingFactor<
+using EpilogueOp = cutlass::epilogue::threadblock::EpilogueWithScalingFactor<
     kVectorSize,
     ThreadShape,
     ElementCompute,
@@ -66,7 +66,7 @@ using EpilogueOp = cutlass::epilogue::threadblock::GemvEpilogueWithScalingFactor
 >;
 
 // GemvBlockScaled kernel configuration
-using GemvKernel = cutlass::gemm::kernel::GemvBlockScaled<
+using GemvKernel = cutlass::gemm::kernel::GemvBlockscaled<
     ElementA,
     LayoutA,
     ElementB,
@@ -77,7 +77,7 @@ using GemvKernel = cutlass::gemm::kernel::GemvBlockScaled<
 >;
 
 // Device-level GEMV operator
-using Gemv = cutlass::gemm::device::GemvBlockScaled<GemvKernel>;
+using Gemv = cutlass::gemm::device::GemvBlockscaled<GemvKernel>;
 
 // ============================================================================
 // Stage 2: Tensor-Core FP4 → FP16 Decode Kernel
