@@ -116,6 +116,7 @@ def my_kernel(
     m, n, k, l = problem_size
 
     # Create CuTe tensors with blockscaled layout
+    # A tensor: [M, K, L] in K-major layout
     a_tensor = cute.make_tensor(
         a_ptr,
         cute.make_layout(
@@ -124,17 +125,17 @@ def my_kernel(
         ),
     )
 
-    # B tensor with N padded to 128 for compatibility
-    n_padded_128 = 128
+    # B tensor: [1, K, L] in K-major layout (NOT PADDED)
+    # Must match checklist requirement: shape [1 × K × L] exactly
     b_tensor = cute.make_tensor(
         b_ptr,
         cute.make_layout(
-            (n_padded_128, cute.assume(k, 32), l),
-            stride=(cute.assume(k, 32), 1, cute.assume(n_padded_128 * k, 32)),
+            (n, cute.assume(k, 32), l),  # Use actual n=1, not padded 128
+            stride=(cute.assume(k, 32), 1, cute.assume(n * k, 32)),
         ),
     )
 
-    # Scale factor tensors
+    # Scale factor A: [M, K//16, L] in K-major layout
     sfa_tensor = cute.make_tensor(
         sfa_ptr,
         cute.make_layout(
@@ -147,14 +148,15 @@ def my_kernel(
         ),
     )
 
+    # Scale factor B: [1, K//16, L] in K-major layout (NOT PADDED)
     sfb_tensor = cute.make_tensor(
         sfb_ptr,
         cute.make_layout(
-            (n_padded_128, cute.assume(k // sf_vec_size, 32), l),
+            (n, cute.assume(k // sf_vec_size, 32), l),  # Use actual n=1
             stride=(
                 cute.assume(k // sf_vec_size, 32),
                 1,
-                cute.assume(n_padded_128 * k // sf_vec_size, 32),
+                cute.assume(n * k // sf_vec_size, 32),
             ),
         ),
     )
