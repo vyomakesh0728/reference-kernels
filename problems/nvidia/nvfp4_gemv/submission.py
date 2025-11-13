@@ -163,11 +163,14 @@ void launch_fp4_gemv_optimized(
 
     cudaDeviceSynchronize();
 
-    // Stage 2: CUTLASS FP16 GEMV for each batch
+    // Stage 2: CUTLASS FP16 GEMV - Process all batches
+    // Note: For optimal performance on L>1, consider using batch-parallel grid
     Gemm gemm_op;
     ElementAccumulator alpha = 1.0f;
     ElementAccumulator beta = 0.0f;
 
+    // Process batches sequentially (simple but correct approach)
+    // TODO: Optimize with strided batched GEMM or grid-level batch parallelism
     for (int batch = 0; batch < L; ++batch) {
         typename Gemm::Arguments arguments{
             {static_cast<int>(M), 1, static_cast<int>(K)},  // M x 1 = (M x K) @ (K x 1)
