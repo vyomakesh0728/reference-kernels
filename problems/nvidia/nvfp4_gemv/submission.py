@@ -16,6 +16,7 @@ void launch_fp4_gemv_optimized(
     torch::Tensor SFA,
     torch::Tensor SFB,
     torch::Tensor D,
+    torch::Tensor D_fp4_temp,
     int M, int K, int L
 );
 """
@@ -140,6 +141,7 @@ void launch_fp4_gemv_optimized(
     torch::Tensor SFA,
     torch::Tensor SFB,
     torch::Tensor D,
+    torch::Tensor D_fp4_temp,  // Pre-allocated temp buffer
     int M, int K, int L
 ) {
     ElementA* A_ptr = reinterpret_cast<ElementA*>(A_fp4.data_ptr());
@@ -147,23 +149,21 @@ void launch_fp4_gemv_optimized(
     ElementSFA* SFA_ptr = reinterpret_cast<ElementSFA*>(SFA.data_ptr());
     ElementSFB* SFB_ptr = reinterpret_cast<ElementSFB*>(SFB.data_ptr());
     cutlass::half_t* D_ptr = reinterpret_cast<cutlass::half_t*>(D.data_ptr());
+    ElementD* D_fp4 = reinterpret_cast<ElementD*>(D_fp4_temp.data_ptr());
 
-    ElementD* D_fp4 = nullptr;
-    const size_t fp4_elements = M * L;
-    cudaMalloc(&D_fp4, fp4_elements * sizeof(ElementD));
+    // Batch stride calculations
+    const int batch_stride_a = M * K;
+    const int batch_stride_b = 1 * K;
+    const int batch_stride_sfa = M * (K / 16);
+    const int batch_stride_sfb = 1 * (K / 16);
+    const int batch_stride_d = M * 1;
+    const int batch_stride_sfd = 0;
 
-    int batch_stride_a = M * K;
-    int batch_stride_b = 1 * K;
-    int batch_stride_sfa = M * (K / 16);
-    int batch_stride_sfb = 1 * (K / 16);
-    int batch_stride_d = M * 1;
-    int batch_stride_sfd = 0;
-
-    int stride_a = K;
-    int stride_d = 1;
-    float alpha = 1.0f;
-    float beta = 0.0f;
-    float epilogue_st = 1.0f;
+    const int stride_a = K;
+    const int stride_d = 1;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    const float epilogue_st = 1.0f;
 
     cutlass::TensorRef<ElementA, LayoutA> ref_A(A_ptr, stride_a);
     cutlass::TensorRef<ElementD, LayoutD> ref_D(D_fp4, stride_d);
@@ -181,41 +181,37 @@ void launch_fp4_gemv_optimized(
     Gemv gemv_op;
     cutlass::Status status = gemv_op.can_implement(arguments);
     if (status != cutlass::Status::kSuccess) {
-        cudaFree(D_fp4);
         throw std::runtime_error("CUTLASS GemvBlockScaled cannot implement this problem");
     }
 
     status = gemv_op.initialize(arguments);
     if (status != cutlass::Status::kSuccess) {
-        cudaFree(D_fp4);
         throw std::runtime_error("CUTLASS GemvBlockScaled initialization failed");
     }
 
+    // Stage 1: CUTLASS FP4 GEMV (batched, all L processed in parallel)
     status = gemv_op();
     if (status != cutlass::Status::kSuccess) {
-        cudaFree(D_fp4);
         throw std::runtime_error("CUTLASS GemvBlockScaled execution failed");
     }
 
-    cudaDeviceSynchronize();
-
     // Stage 2: Decode FP4 → FP16 using tensor cores
-    const int total_elements = M * L;  // Total FP4 elements to decode
-    constexpr int kVectorWidth = 8;    // Must match kernel's kVectorWidth
-    const int threads_per_block = 256;  // Increased for better occupancy
+    // Optimize for better occupancy: use fewer threads per block, more blocks
+    const int total_elements = M * L;
+    constexpr int kVectorWidth = 8;
+    const int threads_per_block = 128;  // Reduced for better occupancy on small problems
     const int blocks_needed = (total_elements + kVectorWidth * threads_per_block - 1) /
                               (kVectorWidth * threads_per_block);
 
+    // Launch decode kernel immediately after CUTLASS (no sync needed)
     decode_fp4_to_fp16_tensorcore<<<blocks_needed, threads_per_block>>>(
         D_fp4, D_ptr, total_elements);
 
+    // Single synchronization at the end
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
-        cudaFree(D_fp4);
         throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err));
     }
-
-    cudaFree(D_fp4);
 }
 """
 
@@ -292,7 +288,13 @@ def custom_kernel(data: input_t) -> output_t:
     # Output tensor
     c = c.permute(2, 0, 1).cuda().contiguous()
 
+    # Pre-allocate FP4 intermediate buffer (managed by PyTorch, eliminates cudaMalloc overhead)
+    # FP4: 4 bits per element = 0.5 bytes, so M×L elements = (M×L+1)//2 bytes
+    # Allocate as uint8 tensor for byte-aligned access
+    fp4_bytes = (M * L + 1) // 2
+    d_fp4_temp = torch.empty(fp4_bytes, dtype=torch.uint8, device='cuda')
+
     mod = get_module()
-    mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L)
+    mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, d_fp4_temp, M, K, L)
 
     return c.permute(1, 2, 0).contiguous()
