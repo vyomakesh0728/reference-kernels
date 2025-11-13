@@ -15,6 +15,8 @@ cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
 cuda_source = r"""
 #include <cuda_runtime.h>
 #include <cutlass/cutlass.h>
+#include <cutlass/numeric_types.h>
+#include <cutlass/tensor_ref.h>
 #include <cutlass/gemm/device/gemv_block_scaled.h>
 #include <cutlass/gemm/kernel/gemv_block_scaled.h>
 #include <cutlass/epilogue/threadblock/gemv_epilogue_with_scaling_factor.h>
@@ -123,38 +125,41 @@ void launch_fp4_gemv_optimized(
     torch::Tensor D,          // [L, M, 1] FP16 output
     int M, int K, int L
 ) {
-    // Get raw pointers
-    uint8_t* A_ptr = reinterpret_cast<uint8_t*>(A_fp4.data_ptr());
-    uint8_t* B_ptr = reinterpret_cast<uint8_t*>(B_fp4.data_ptr());
-    uint8_t* SFA_ptr = reinterpret_cast<uint8_t*>(SFA.data_ptr());
-    uint8_t* SFB_ptr = reinterpret_cast<uint8_t*>(SFB.data_ptr());
+    // Get properly typed pointers (matching Example 91)
+    ElementA* A_ptr = reinterpret_cast<ElementA*>(A_fp4.data_ptr());
+    ElementB* B_ptr = reinterpret_cast<ElementB*>(B_fp4.data_ptr());
+    ElementSFA* SFA_ptr = reinterpret_cast<ElementSFA*>(SFA.data_ptr());
+    ElementSFB* SFB_ptr = reinterpret_cast<ElementSFB*>(SFB.data_ptr());
     cutlass::half_t* D_ptr = reinterpret_cast<cutlass::half_t*>(D.data_ptr());
 
     // Allocate intermediate FP4 output buffer
-    cutlass::float_e2m1_t* D_fp4 = nullptr;
-    cudaMalloc(&D_fp4, L * M * 1 * sizeof(cutlass::float_e2m1_t));
+    ElementD* D_fp4 = nullptr;
+    cudaMalloc(&D_fp4, L * M * 1 * sizeof(ElementD));
 
     // Stage 1: CUTLASS GemvBlockScaled (FP4 → FP4 with block scaling)
     // Process all batches with proper CUTLASS API structure
 
-    // Batch strides (distance between consecutive batch elements)
-    int batch_stride_a = M * (K / 2);      // A: M rows × K/2 packed elements
-    int batch_stride_b = 1 * (K / 2);      // B: 1 row × K/2 packed elements
+    // Batch strides (distance between consecutive batch elements in ELEMENTS, not bytes)
+    int batch_stride_a = M * K;            // A: M rows × K elements (NOTE: K not K/2)
+    int batch_stride_b = 1 * K;            // B: 1 row × K elements
     int batch_stride_sfa = M * (K / 16);   // SFA: M rows × K/16 scale factors
     int batch_stride_sfb = 1 * (K / 16);   // SFB: 1 row × K/16 scale factors
     int batch_stride_d = M * 1;            // D: M rows × 1 column
     int batch_stride_sfd = 0;              // No scale factor for output
 
     // Leading dimensions
-    int stride_a = K;                      // Row-major A: stride = K
-    int stride_d = 1;                      // Column-major output: stride = 1 (single column)
+    int stride_a = K;                      // Row-major A: stride = K elements
+    int stride_d = 1;                      // Column-major output: stride = 1
 
     // Alpha/beta for linear combination (C = alpha*A@B + beta*C)
     float alpha = 1.0f;
     float beta = 0.0f;
     float epilogue_st = 1.0f;              // Scale parameter for epilogue
 
-    // CUTLASS GemvBlockScaled Arguments (matching Example 91 structure)
+    // Create TensorRef for A (matching Example 91 - A uses TensorRef, not raw pointer)
+    cutlass::TensorRef<ElementA, LayoutA> ref_A(A_ptr, stride_a);
+
+    // CUTLASS GemvBlockScaled Arguments (matching Example 91 structure exactly)
     typename Gemv::Arguments arguments{
         cutlass::MatrixCoord(M, K),  // problem_size: M rows × K columns
         L,                            // batch_count
@@ -170,16 +175,16 @@ void launch_fp4_gemv_optimized(
             stride_d                  // stride_d
         },
 
-        // Mainloop pointers
-        reinterpret_cast<ElementA*>(A_ptr),                // ptr_A
-        reinterpret_cast<ElementB*>(B_ptr),                // ptr_B
-        nullptr,                                            // ptr_C (unused)
-        D_fp4,                                              // ptr_D (output)
-        reinterpret_cast<ElementSFA*>(SFA_ptr),            // ptr_SFA
-        reinterpret_cast<ElementSFB*>(SFB_ptr),            // ptr_SFB
+        // Mainloop parameters (A is TensorRef, others are pointers)
+        ref_A,                        // ref_A: TensorRef<ElementA, LayoutA>
+        B_ptr,                        // ptr_B: ElementB*
+        nullptr,                      // ptr_C: ElementC* (unused)
+        D_fp4,                        // ptr_D: ElementD*
+        SFA_ptr,                      // ptr_SFA: ElementSFA*
+        SFB_ptr,                      // ptr_SFB: ElementSFB*
 
         // Strides and batch strides
-        stride_a,                     // stride_a
+        stride_a,                     // stride_a (already in ref_A, but also passed)
         batch_stride_a,               // batch_stride_a
         batch_stride_b,               // batch_stride_b
         0,                            // batch_stride_c (unused)
