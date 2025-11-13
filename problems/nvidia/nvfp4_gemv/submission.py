@@ -40,31 +40,40 @@ cuda_source = r"""
 
 
 
-using ElementA = cutlass::float_e2m1_t;
-using ElementB = cutlass::float_e2m1_t;
-using ElementSFA = cutlass::float_e4m3_t;
-using ElementSFB = cutlass::float_e4m3_t;
-using ElementD = cutlass::float_e2m1_t;
-using ElementC = cutlass::float_e2m1_t;
-using ElementAccumulator = float;
-using ElementCompute = float;
+// Type definitions matching CUTLASS Example 91
+using ElementA = cutlass::float_e2m1_t;  // FP4 E2M1
+using ElementB = cutlass::float_e2m1_t;  // FP4 E2M1
+using ElementC = cutlass::float_e2m1_t;  // FP4 E2M1
+using ElementD = cutlass::float_e2m1_t;  // FP4 E2M1 output
+using ElementSFA = cutlass::float_e4m3_t;  // FP8 E4M3 scale factors for A
+using ElementSFB = cutlass::float_e4m3_t;  // FP8 E4M3 scale factors for B
+using ElementSFD = cutlass::float_e4m3_t;  // FP8 E4M3 scale factors for D (output)
+using ElementAccumulator = float;  // FP32 accumulation
+using ElementCompute = float;  // FP32 epilogue computation
 
+// Layout definitions matching Example 91
 using LayoutA = cutlass::layout::RowMajor;
 using LayoutB = cutlass::layout::ColumnMajor;
+using LayoutC = cutlass::layout::ColumnMajor;
 using LayoutD = cutlass::layout::ColumnMajor;
 using LayoutSFA = cutlass::layout::ColumnMajor;
 using LayoutSFB = cutlass::layout::ColumnMajor;
+using LayoutSFD = cutlass::layout::ColumnMajor;
 
-static constexpr int kVectorSize = 16;
-static constexpr int kElementsPerAccess = 128 / cutlass::sizeof_bits<ElementA>::value;
-using ThreadShape = cutlass::gemm::GemmShape<16, 8>;  // Match Example 91: M=16, N=8
+// Operational parameters matching Example 91
+static constexpr int kVectorSize = 16;  // Block scaling granularity
+static constexpr int kElementsPerAccess = 128 / cutlass::sizeof_bits<ElementA>::value;  // 32 elements
+using ThreadShape = cutlass::gemm::GemmShape<16, 8>;  // 16 rows × 8 columns per thread
 
+// Epilogue operation with output scale factors (ElementSFD, LayoutSFD)
 using EpilogueOp = cutlass::epilogue::threadblock::GemvEpilogueWithScalingFactor<
     kVectorSize, ThreadShape, ElementCompute, ElementAccumulator,
-    ElementC, ElementD, ElementSFA, LayoutD, LayoutSFA>;
+    ElementC, ElementD, ElementSFD, LayoutD, LayoutSFD>;
 
+// GEMV kernel with input scale factors (ElementSFA, ElementSFB)
 using GemvKernel = cutlass::gemm::kernel::GemvBlockScaled<
-    ElementA, LayoutA, ElementB, ElementD, ElementAccumulator, EpilogueOp, kElementsPerAccess>;
+    ElementA, LayoutA, ElementB, ElementD, ElementAccumulator, EpilogueOp,
+    kElementsPerAccess, 0, 0, ElementSFA, ElementSFB, kVectorSize>;
 
 using Gemv = cutlass::gemm::device::GemvBlockScaled<GemvKernel>;
 
