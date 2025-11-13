@@ -79,6 +79,28 @@ using GemvKernel = cutlass::gemm::kernel::GemvBlockScaled<
 
 using Gemv = cutlass::gemm::device::GemvBlockScaled<GemvKernel>;
 
+// Unpack FP4 from packed format (2 per byte) to unpacked (1 byte per element)
+__global__ void unpack_fp4_kernel(
+    const uint8_t* __restrict__ packed_input,   // [L, M, K/2] packed bytes
+    cutlass::float_e2m1_t* __restrict__ unpacked_output,  // [L, M, K] unpacked elements
+    int total_packed_bytes  // Total packed bytes = L * M * (K/2)
+) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (tid < total_packed_bytes) {
+        const uint8_t packed_byte = packed_input[tid];
+
+        // Extract two FP4 values from one byte
+        // Lower 4 bits = first FP4, upper 4 bits = second FP4
+        const uint8_t fp4_low = packed_byte & 0x0F;
+        const uint8_t fp4_high = (packed_byte >> 4) & 0x0F;
+
+        // Write to unpacked output (each FP4 gets its own byte)
+        unpacked_output[tid * 2 + 0] = *reinterpret_cast<const cutlass::float_e2m1_t*>(&fp4_low);
+        unpacked_output[tid * 2 + 1] = *reinterpret_cast<const cutlass::float_e2m1_t*>(&fp4_high);
+    }
+}
+
 // Tensor-core accelerated FP4→FP16 decode for Blackwell SM100
 __global__ void decode_fp4_to_fp16_tensorcore(
     const cutlass::float_e2m1_t* __restrict__ fp4_input,
@@ -145,29 +167,69 @@ void launch_fp4_gemv_optimized(
     torch::Tensor D_fp4_temp,  // Pre-allocated temp buffer
     int M, int K, int L
 ) {
-    ElementA* A_ptr = reinterpret_cast<ElementA*>(A_fp4.data_ptr());
-    ElementB* B_ptr = reinterpret_cast<ElementB*>(B_fp4.data_ptr());
+    // === CRITICAL VALIDATION ===
+    // A_fp4 is PACKED: [L, M, K/2] bytes (2 FP4 per byte)
+    // CUTLASS expects UNPACKED: [L, M, K] elements (1 byte per FP4)
+    const int64_t a_expected_bytes = static_cast<int64_t>(L) * M * (K / 2);
+    const int64_t b_expected_bytes = static_cast<int64_t>(L) * 1 * (K / 2);
+    const int64_t sfa_expected_bytes = static_cast<int64_t>(L) * M * (K / 16);
+    const int64_t sfb_expected_bytes = static_cast<int64_t>(L) * 1 * (K / 16);
+    const int64_t d_expected_bytes = static_cast<int64_t>(L) * M * 1 * 2;  // FP16 = 2 bytes
+    const int64_t d_fp4_expected_bytes = static_cast<int64_t>(M) * L;
+
+    if (A_fp4.numel() != a_expected_bytes) {
+        throw std::runtime_error("A_fp4 size mismatch: " + std::to_string(A_fp4.numel()) +
+                                 " != " + std::to_string(a_expected_bytes));
+    }
+    if (B_fp4.numel() != b_expected_bytes) {
+        throw std::runtime_error("B_fp4 size mismatch: " + std::to_string(B_fp4.numel()) +
+                                 " != " + std::to_string(b_expected_bytes));
+    }
+
+    const uint8_t* A_packed = reinterpret_cast<const uint8_t*>(A_fp4.data_ptr());
+    const uint8_t* B_packed = reinterpret_cast<const uint8_t*>(B_fp4.data_ptr());
     ElementSFA* SFA_ptr = reinterpret_cast<ElementSFA*>(SFA.data_ptr());
     ElementSFB* SFB_ptr = reinterpret_cast<ElementSFB*>(SFB.data_ptr());
     cutlass::half_t* D_ptr = reinterpret_cast<cutlass::half_t*>(D.data_ptr());
     ElementD* D_fp4 = reinterpret_cast<ElementD*>(D_fp4_temp.data_ptr());
 
+    // Allocate unpacked FP4 buffers
+    // A: [L, M, K] unpacked = L * M * K bytes
+    // B: [L, 1, K] unpacked = L * 1 * K bytes
+    ElementA* A_unpacked = nullptr;
+    ElementB* B_unpacked = nullptr;
+    const size_t a_unpacked_size = static_cast<size_t>(L) * M * K;
+    const size_t b_unpacked_size = static_cast<size_t>(L) * 1 * K;
+    cudaMalloc(&A_unpacked, a_unpacked_size * sizeof(ElementA));
+    cudaMalloc(&B_unpacked, b_unpacked_size * sizeof(ElementB));
+
+    // Unpack FP4 data (2 per byte → 1 per byte)
+    const int a_packed_bytes = L * M * (K / 2);
+    const int b_packed_bytes = L * 1 * (K / 2);
+    const int threads = 256;
+    const int blocks_a = (a_packed_bytes + threads - 1) / threads;
+    const int blocks_b = (b_packed_bytes + threads - 1) / threads;
+
+    unpack_fp4_kernel<<<blocks_a, threads>>>(A_packed, A_unpacked, a_packed_bytes);
+    unpack_fp4_kernel<<<blocks_b, threads>>>(B_packed, B_unpacked, b_packed_bytes);
+    cudaDeviceSynchronize();  // Ensure unpacking completes
+
     // Batch stride calculations
-    // CRITICAL: Input A and B are PACKED (2 FP4 per byte), so physical stride = K/2
-    const int batch_stride_a = M * (K / 2);  // M rows × K/2 bytes per row
-    const int batch_stride_b = 1 * (K / 2);  // 1 row × K/2 bytes per row
+    // NOW using UNPACKED data (1 byte per FP4 element)
+    const int batch_stride_a = M * K;  // M rows × K elements per row
+    const int batch_stride_b = 1 * K;  // 1 row × K elements per row
     const int batch_stride_sfa = M * (K / 16);  // M rows × K/16 scale factors per row
     const int batch_stride_sfb = 1 * (K / 16);  // 1 row × K/16 scale factors per row
-    const int batch_stride_d = M * 1;  // M rows × 1 column (unpacked output)
+    const int batch_stride_d = M * 1;  // M rows × 1 column
     const int batch_stride_sfd = 0;
 
-    const int stride_a = K / 2;  // K/2 bytes per row (packed FP4)
-    const int stride_d = 1;  // 1 byte per element (unpacked output)
+    const int stride_a = K;  // K elements per row (unpacked)
+    const int stride_d = 1;  // 1 element per column
     const float alpha = 1.0f;
     const float beta = 0.0f;
     const float epilogue_st = 1.0f;
 
-    cutlass::TensorRef<ElementA, LayoutA> ref_A(A_ptr, stride_a);
+    cutlass::TensorRef<ElementA, LayoutA> ref_A(A_unpacked, stride_a);
     cutlass::TensorRef<ElementD, LayoutD> ref_D(D_fp4, stride_d);
 
     typename Gemv::Arguments arguments{
@@ -175,7 +237,7 @@ void launch_fp4_gemv_optimized(
         L,
         typename Gemv::EpilogueOutputOp::Params{
             ref_D, nullptr, alpha, beta, epilogue_st, batch_stride_sfd, stride_d},
-        ref_A, B_ptr, nullptr, D_fp4, SFA_ptr, SFB_ptr,
+        ref_A, B_unpacked, nullptr, D_fp4, SFA_ptr, SFB_ptr,
         stride_a, batch_stride_a, batch_stride_b, 0, batch_stride_d,
         batch_stride_sfa, batch_stride_sfb, batch_stride_sfd
     };
@@ -183,17 +245,23 @@ void launch_fp4_gemv_optimized(
     Gemv gemv_op;
     cutlass::Status status = gemv_op.can_implement(arguments);
     if (status != cutlass::Status::kSuccess) {
+        cudaFree(A_unpacked);
+        cudaFree(B_unpacked);
         throw std::runtime_error("CUTLASS GemvBlockScaled cannot implement this problem");
     }
 
     status = gemv_op.initialize(arguments);
     if (status != cutlass::Status::kSuccess) {
+        cudaFree(A_unpacked);
+        cudaFree(B_unpacked);
         throw std::runtime_error("CUTLASS GemvBlockScaled initialization failed");
     }
 
     // Stage 1: CUTLASS FP4 GEMV (batched, all L processed in parallel)
     status = gemv_op();
     if (status != cutlass::Status::kSuccess) {
+        cudaFree(A_unpacked);
+        cudaFree(B_unpacked);
         throw std::runtime_error("CUTLASS GemvBlockScaled execution failed");
     }
 
@@ -212,8 +280,14 @@ void launch_fp4_gemv_optimized(
     // Single synchronization at the end
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
+        cudaFree(A_unpacked);
+        cudaFree(B_unpacked);
         throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err));
     }
+
+    // Cleanup unpacked buffers
+    cudaFree(A_unpacked);
+    cudaFree(B_unpacked);
 }
 """
 
@@ -295,6 +369,23 @@ def custom_kernel(data: input_t) -> output_t:
     # Even though FP4 is 4 bits, CUTLASS uses 1 byte per element for easier indexing
     # So M×L elements = M×L bytes
     d_fp4_temp = torch.empty(M * L, dtype=torch.uint8, device='cuda')
+
+    # === VALIDATION: Print all buffer sizes ===
+    print(f"DEBUG: M={M}, K={K}, L={L}")
+    print(f"  a_bytes: shape={a_bytes.shape}, numel={a_bytes.numel()}, expected={L * M * (K // 2)}")
+    print(f"  b_bytes: shape={b_bytes.shape}, numel={b_bytes.numel()}, expected={L * 1 * (K // 2)}")
+    print(f"  sfa_bytes: shape={sfa_bytes.shape}, numel={sfa_bytes.numel()}, expected={L * M * (K // 16)}")
+    print(f"  sfb_bytes: shape={sfb_bytes.shape}, numel={sfb_bytes.numel()}, expected={L * 1 * (K // 16)}")
+    print(f"  c: shape={c.shape}, numel={c.numel()}, expected={L * M * 1}")
+    print(f"  d_fp4_temp: shape={d_fp4_temp.shape}, numel={d_fp4_temp.numel()}, expected={M * L}")
+
+    # Assertions to catch allocation mismatches
+    assert a_bytes.numel() == L * M * (K // 2), f"a_bytes size mismatch!"
+    assert b_bytes.numel() == L * 1 * (K // 2), f"b_bytes size mismatch!"
+    assert sfa_bytes.numel() == L * M * (K // 16), f"sfa_bytes size mismatch!"
+    assert sfb_bytes.numel() == L * 1 * (K // 16), f"sfb_bytes size mismatch!"
+    assert c.numel() == L * M * 1, f"c size mismatch!"
+    assert d_fp4_temp.numel() == M * L, f"d_fp4_temp size mismatch!"
 
     mod = get_module()
     mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, d_fp4_temp, M, K, L)
