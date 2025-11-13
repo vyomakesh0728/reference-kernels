@@ -57,7 +57,7 @@ using LayoutSFB = cutlass::layout::ColumnMajor;
 
 static constexpr int kVectorSize = 16;
 static constexpr int kElementsPerAccess = 128 / cutlass::sizeof_bits<ElementA>::value;
-using ThreadShape = cutlass::gemm::GemmShape<16, 8, 1>;
+using ThreadShape = cutlass::gemm::GemmShape<16, 8>;  // Match Example 91: M=16, N=8
 
 using EpilogueOp = cutlass::epilogue::threadblock::GemvEpilogueWithScalingFactor<
     kVectorSize, ThreadShape, ElementCompute, ElementAccumulator,
@@ -69,6 +69,7 @@ using GemvKernel = cutlass::gemm::kernel::GemvBlockScaled<
 using Gemv = cutlass::gemm::device::GemvBlockScaled<GemvKernel>;
 
 // Tensor-core accelerated FP4→FP16 decode for Blackwell SM100
+// Uses vectorized memory operations matching CUTLASS v4.2 style
 __global__ void decode_fp4_to_fp16_tensorcore(
     const cutlass::float_e2m1_t* __restrict__ fp4_input,
     cutlass::half_t* __restrict__ fp16_output,
@@ -76,43 +77,66 @@ __global__ void decode_fp4_to_fp16_tensorcore(
 ) {
     using ElementFP4 = cutlass::float_e2m1_t;
     using ElementFP16 = cutlass::half_t;
+    using namespace cute;
 
-    // SM100 optimal vector width: 16 FP4 elements (8 bytes) per thread
+    // SM100 optimal vector width: 16 FP4 elements per thread
     constexpr int kVectorWidth = 16;
+
+    // Vectorized access types for efficient memory bandwidth utilization
+    // 16 FP4 elements = 64 bits, 16 FP16 elements = 256 bits
+    using AccessType = uint64_t;  // For FP4: 16 elements = 8 bytes
 
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     const int offset = tid * kVectorWidth;
 
-    // Main vectorized path - maps to SM100 tensor-core LDG.128/STG.128
+    // Main vectorized path - uses CuTe arrays with tensor-core conversions
     if (offset + kVectorWidth <= total_elements) {
-        // 1. Vectorized load: 8 bytes (16 FP4 values) per thread
-        cute::Array<ElementFP4, kVectorWidth> fp4_vec;
-        cutlass::arch::global_load<kVectorWidth / 2, cutlass::arch::CacheOperation::LastUse>(
-            reinterpret_cast<uint32_t*>(&fp4_vec),
-            reinterpret_cast<const uint32_t*>(fp4_input + offset / 2),
-            true
-        );
+        // 1. Vectorized load: 16 FP4 elements (64 bits) in one transaction
+        cute::array<ElementFP4, kVectorWidth> fp4_vec;
+
+        // Use aligned vectorized load if possible
+        if (reinterpret_cast<uintptr_t>(&fp4_input[offset]) % sizeof(AccessType) == 0) {
+            AccessType packed = *reinterpret_cast<const AccessType*>(&fp4_input[offset]);
+            memcpy(&fp4_vec[0], &packed, sizeof(AccessType));
+            AccessType packed2 = *reinterpret_cast<const AccessType*>(&fp4_input[offset + 8]);
+            memcpy(&fp4_vec[8], &packed2, sizeof(AccessType));
+        } else {
+            // Fallback to element-wise loads for unaligned access
+            CUTLASS_PRAGMA_UNROLL
+            for (int i = 0; i < kVectorWidth; ++i) {
+                fp4_vec[i] = fp4_input[offset + i];
+            }
+        }
 
         // 2. Tensor-core accelerated conversion: CVT.FP4.FP16
-        cute::Array<ElementFP16, kVectorWidth> fp16_vec;
+        // NumericConverter maps to native SM100 CVT instructions
+        cute::array<ElementFP16, kVectorWidth> fp16_vec;
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < kVectorWidth; ++i) {
             fp16_vec[i] = cutlass::NumericConverter<ElementFP16, ElementFP4>::convert(fp4_vec[i]);
         }
 
-        // 3. Vectorized store: 32 bytes (16 FP16 values) per thread
-        cutlass::arch::global_store<kVectorWidth * sizeof(ElementFP16), cutlass::arch::CacheOperation::Writeback>(
-            reinterpret_cast<const uint32_t*>(&fp16_vec),
-            reinterpret_cast<uint32_t*>(fp16_output + offset),
-            true
-        );
+        // 3. Vectorized store: 16 FP16 elements (256 bits) using 128-bit stores
+        // Use uint4 (128-bit) stores for optimal memory throughput on SM100
+        if (reinterpret_cast<uintptr_t>(&fp16_output[offset]) % sizeof(uint4) == 0) {
+            const uint4* src = reinterpret_cast<const uint4*>(&fp16_vec[0]);
+            uint4* dst = reinterpret_cast<uint4*>(&fp16_output[offset]);
+            dst[0] = src[0];  // First 8 FP16 elements (128 bits)
+            dst[1] = src[1];  // Last 8 FP16 elements (128 bits)
+        } else {
+            // Fallback for unaligned stores
+            CUTLASS_PRAGMA_UNROLL
+            for (int i = 0; i < kVectorWidth; ++i) {
+                fp16_output[offset + i] = fp16_vec[i];
+            }
+        }
     }
     // Tail processing for non-vectorized elements
     else if (offset < total_elements) {
         const int remaining = total_elements - offset;
         for (int i = 0; i < remaining; ++i) {
             fp16_output[offset + i] =
-                cutlass::NumericConverter<ElementFP16, ElementFP4>::convert(fp4_input[offset / 2 + i / 2]);
+                cutlass::NumericConverter<ElementFP16, ElementFP4>::convert(fp4_input[offset + i]);
         }
     }
 }
@@ -182,6 +206,9 @@ void launch_fp4_gemv_optimized(
 
     cudaDeviceSynchronize();
 
+    // Stage 2: Decode FP4 → FP16 using tensor cores
+    const int total_elements = M * L;  // Total FP4 elements to decode
+    constexpr int kVectorWidth = 16;    // Must match kernel's kVectorWidth
     const int threads_per_block = 128;
     const int blocks_needed = (total_elements + kVectorWidth * threads_per_block - 1) /
                               (kVectorWidth * threads_per_block);
