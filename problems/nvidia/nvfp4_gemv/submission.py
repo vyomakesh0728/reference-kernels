@@ -89,9 +89,9 @@ fp4_gemv_sm100_ptx_mma(
 
     // Batch offsets
     const uint8_t* A_batch = A_packed + batch * M * K_packed;
-    const uint8_t* B_batch = B_packed + batch * K_packed;
+    const uint8_t* B_batch = B_packed + batch * 128 * K_packed;
     const uint8_t* SFA_batch = SFA_packed + batch * M * K_scales;
-    const uint8_t* SFB_batch = SFB_packed + batch * K_scales;
+    const uint8_t* SFB_batch = SFB_packed + batch * 128 * K_scales;
     half* D_batch = D + batch * M;
 
     // Thread indexing and warp constants
@@ -102,6 +102,12 @@ fp4_gemv_sm100_ptx_mma(
     if (m_cta >= M) return;
     // Number of warps that collaboratively compute one M tile
     const int warps_per_tile = kTileM / 16;
+
+    // The B vector and its scale factors are stored with a padded N dimension of
+    // size 128.  Only the first column (index 0) is needed for GEMV.  We do
+    // not distribute these replicas across M, so every CTA uses the 0th
+    // replica.  Keeping this here clarifies that b_replica is always 0.
+    const int b_replica = 0;
 
     // Shared memory allocations.  We align by 128 bytes to satisfy the
     // requirements of ldmatrix (16x8 half tile = 256B).  A_smem holds the
@@ -150,9 +156,13 @@ fp4_gemv_sm100_ptx_mma(
                     float scale_val = decode_fp8_e4m3(SFA_batch[m_idx * K_scales + k_scale_tile + scale_idx]);
                     scale_h = __float2half(scale_val);
                 }
-                // Unpack two FP4s from the byte and multiply by scale
-                half v0 = decode_fp4_e2m1(packed & 0x0F);
-                half v1 = decode_fp4_e2m1((packed >> 4) & 0x0F);
+                // Unpack two FP4s from the byte and multiply by scale.
+                // NOTE: According to the nvfp4 e2m1fn_x2 specification, the high nibble
+                // (bits 4..7) encodes the first element and the low nibble (bits 0..3)
+                // encodes the second element.  Therefore decode the high nibble first
+                // and the low nibble second.
+                half v0 = decode_fp4_e2m1((packed >> 4) & 0x0F);
+                half v1 = decode_fp4_e2m1(packed & 0x0F);
                 A_smem[row][col_packed * 2]     = __hmul(v0, scale_h);
                 A_smem[row][col_packed * 2 + 1] = __hmul(v1, scale_h);
             } else if (row < kTileM && col_packed * 2 < kTileK) {
@@ -171,15 +181,18 @@ fp4_gemv_sm100_ptx_mma(
         // indices are padded with zero.
         for (int col_packed = tid; col_packed < kTileK / 2; col_packed += kThreads) {
             if ((k_packed_tile + col_packed) < K_packed) {
-                uint8_t packed = B_batch[k_packed_tile + col_packed];
-                int scale_idx = col_packed / 8;
+                // Load the packed FP4 value from the first replica (index 0) of B.
+                const uint8_t packed = B_batch[k_packed_tile + col_packed];
+                const int scale_idx = col_packed / 8;
                 half scale_h = __float2half(1.0f);
                 if ((k_scale_tile + scale_idx) < K_scales) {
                     float scale_val = decode_fp8_e4m3(SFB_batch[k_scale_tile + scale_idx]);
                     scale_h = __float2half(scale_val);
                 }
-                half v0 = decode_fp4_e2m1(packed & 0x0F);
-                half v1 = decode_fp4_e2m1((packed >> 4) & 0x0F);
+                // Decode FP4 values for B.  The high nibble represents the first
+                // element and the low nibble represents the second element.
+                half v0 = decode_fp4_e2m1((packed >> 4) & 0x0F);
+                half v1 = decode_fp4_e2m1(packed & 0x0F);
                 v0 = __hmul(v0, scale_h);
                 v1 = __hmul(v1, scale_h);
                 // Broadcast both values to all eight columns
@@ -410,12 +423,18 @@ def custom_kernel(data: input_t) -> output_t:
     c = c.clone().permute(2, 0, 1).contiguous().cuda()
 
     # DEBUG: Check permuted shapes before byte view
-    print(f"DEBUG: After permute+clone, a.shape = {a.shape}, expected [{L}, {M}, {K//2}]")
+    print(
+        f"DEBUG: After permute+clone, a.shape = {a.shape}, expected [{L}, {M}, {K // 2}]"
+    )
     print(f"DEBUG: After permute+clone, b.shape = {b.shape}")
 
     # Shape assertions to catch corruption early
-    assert a.shape == (L, M, K//2), f"Shape mismatch: a.shape={a.shape}, expected=({L}, {M}, {K//2})"
-    assert b.shape[0] == L and b.shape[2] == K//2, f"Shape mismatch: b.shape={b.shape}"
+    assert a.shape == (L, M, K // 2), (
+        f"Shape mismatch: a.shape={a.shape}, expected=({L}, {M}, {K // 2})"
+    )
+    assert b.shape[0] == L and b.shape[2] == K // 2, (
+        f"Shape mismatch: b.shape={b.shape}"
+    )
 
     # Reinterpret as raw bytes
     a_bytes = a.view(torch.uint8)
@@ -459,12 +478,13 @@ def custom_kernel(data: input_t) -> output_t:
     # GEMV output should be [M, L] not [M, 1, L]
     # For L=1: [M, 1, 1] → [M, 1] → [M]
     # For L>1: [M, 1, L] → [M, L]
-    c = c.squeeze(1)  # Remove dimension 1 (the dummy "1" column dimension)
+    # c = c.squeeze(1)  # Remove dimension 1 (the dummy "1" column dimension)
 
     # ========================================================================
     # DEBUG: Print final output shape
     # ========================================================================
-    print("FINAL OUTPUT (AFTER PERMUTE BACK + SQUEEZE):")
+    # We no longer squeeze the middle dimension, so adjust the debug label accordingly.
+    print("FINAL OUTPUT (AFTER PERMUTE BACK):")
     print(f"  c shape: {c.shape}, dtype: {c.dtype}")
     print("=" * 80)
 
