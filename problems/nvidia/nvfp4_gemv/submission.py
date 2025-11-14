@@ -220,7 +220,7 @@ fp4_gemv_sm100_ptx_mma(
                 if ((k_scale_tile + scale_idx) < K_scales) {
                     int scale_global_idx = k_scale_tile + scale_idx;
                     // Row 0 because GEMV has N=1; SFB_batch is [128, K_scales]
-                    scale_byte = SFB_batch[scale_global_idx];
+                    scale_byte = SFB_batch[0 * K_scales + scale_global_idx];
                     float scale_val = decode_fp8_e4m3(scale_byte);
                     scale_h = __float2half(scale_val);
                 }
@@ -438,7 +438,7 @@ __global__ void fp4_gemv_naive_one(
         int scale_idx = k_idx >> 4;
         float scaleA = 1.0f;
         if (scale_idx < K_scales) {
-            uint8_t scale_byte = SFA_batch[scale_idx];
+            uint8_t scale_byte = SFA_batch[0 * K_scales + scale_idx];
             scaleA = decode_fp8_e4m3(scale_byte);
         }
         float a_scaled = a_val * scaleA;
@@ -457,7 +457,7 @@ __global__ void fp4_gemv_naive_one(
         // corresponds directly to index 0 in SFB_batch.
         float scaleB = 1.0f;
         if (scale_idx < K_scales) {
-            uint8_t scale_byte_b = SFB_batch[scale_idx];
+            uint8_t scale_byte_b = SFB_batch[0 * K_scales + scale_idx];
             scaleB = decode_fp8_e4m3(scale_byte_b);
         }
         float b_scaled = b_val * scaleB;
