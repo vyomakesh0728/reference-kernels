@@ -1,9 +1,26 @@
 import torch
 from task import input_t, output_t
 from utils import make_match_reference
+import numpy as np
 
 # Scaling factor vector size
 sf_vec_size = 16
+
+# FP4 E2M1 lookup table (same as in CUDA kernel)
+fp4_e2m1_lut = np.array([
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0
+], dtype=np.float32)
+
+def decode_fp4_e2m1(nibble):
+    """Decode a single FP4 E2M1 nibble to float"""
+    return fp4_e2m1_lut[nibble & 0x0F]
+
+def decode_fp8_e4m3(byte_val):
+    """Decode FP8 E4M3 to float using torch"""
+    # Create a torch tensor with the byte value and convert to float8_e4m3fn
+    tensor = torch.tensor([byte_val], dtype=torch.uint8).view(torch.float8_e4m3fn)
+    return tensor.to(torch.float32).item()
 
 # Helper function for ceiling division
 def ceil_div(a, b):
@@ -32,12 +49,77 @@ def ref_kernel(
     PyTorch reference implementation of NVFP4 block-scaled GEMV.
     """
     a_ref, b_ref, sfa_ref_cpu, sfb_ref_cpu, _, _, c_ref = data
-    
+
     # Get dimensions from MxNxL layout
-    _, _, l = c_ref.shape
+    M, K_packed, L = a_ref.shape
+    K = K_packed * 2
+    K_scales = K // 16
 
     # Call torch._scaled_mm to compute the GEMV result
-    for l_idx in range(l):
+    for l_idx in range(L):
+        # ====================================================================
+        # DEBUG: Print decoded FP4 values and scales for first batch
+        # ====================================================================
+        if l_idx == 0:
+            print("=" * 80)
+            print("[REFERENCE] Decoding FP4 values for batch 0")
+            print("=" * 80)
+
+            # Convert tensors to CPU numpy for easier indexing
+            a_bytes = a_ref[:, :, l_idx].cpu().view(torch.uint8).numpy()
+            b_bytes = b_ref[:, :, l_idx].cpu().view(torch.uint8).numpy()
+            sfa_bytes = sfa_ref_cpu[:, :, l_idx].view(torch.uint8).numpy()
+            sfb_bytes = sfb_ref_cpu[:, :, l_idx].view(torch.uint8).numpy()
+
+            # Print A matrix values (first 3 rows, first 32 elements)
+            for m in range(min(3, M)):
+                for k_packed in range(min(16, K_packed)):  # 16 packed = 32 unpacked
+                    packed_byte = a_bytes[m, k_packed]
+                    scale_idx = k_packed // 8
+                    scale_byte = sfa_bytes[m, scale_idx] if scale_idx < K_scales else 0
+                    scale_val = decode_fp8_e4m3(scale_byte)
+
+                    # Decode two FP4 values from packed byte
+                    # High nibble is first element, low nibble is second
+                    nibble0 = (packed_byte >> 4) & 0x0F
+                    nibble1 = packed_byte & 0x0F
+                    fp4_0 = decode_fp4_e2m1(nibble0)
+                    fp4_1 = decode_fp4_e2m1(nibble1)
+                    scaled_0 = fp4_0 * scale_val
+                    scaled_1 = fp4_1 * scale_val
+
+                    k0 = k_packed * 2
+                    k1 = k0 + 1
+
+                    print(f"[REF A] batch={l_idx} m={m} k={k0},{k1} | "
+                          f"packed=0x{packed_byte:02x} scale_byte=0x{scale_byte:02x} scale={scale_val:.6f} | "
+                          f"fp4_raw=({fp4_0:.6f},{fp4_1:.6f}) scaled=({scaled_0:.6f},{scaled_1:.6f})")
+
+            # Print B vector values (first 32 elements)
+            print()
+            for k_packed in range(min(16, K_packed)):  # 16 packed = 32 unpacked
+                packed_byte = b_bytes[0, k_packed]  # B is [1, K_packed, L] -> [n=0, k_packed]
+                scale_idx = k_packed // 8
+                scale_byte = sfb_bytes[0, scale_idx] if scale_idx < K_scales else 0
+                scale_val = decode_fp8_e4m3(scale_byte)
+
+                # Decode two FP4 values
+                nibble0 = (packed_byte >> 4) & 0x0F
+                nibble1 = packed_byte & 0x0F
+                fp4_0 = decode_fp4_e2m1(nibble0)
+                fp4_1 = decode_fp4_e2m1(nibble1)
+                scaled_0 = fp4_0 * scale_val
+                scaled_1 = fp4_1 * scale_val
+
+                k0 = k_packed * 2
+                k1 = k0 + 1
+
+                print(f"[REF B] batch={l_idx} k={k0},{k1} | "
+                      f"packed=0x{packed_byte:02x} scale_byte=0x{scale_byte:02x} scale={scale_val:.6f} | "
+                      f"fp4_raw=({fp4_0:.6f},{fp4_1:.6f}) scaled=({scaled_0:.6f},{scaled_1:.6f})")
+
+            print("=" * 80)
+
         # Convert the scale factor tensor to blocked format
         scale_a = to_blocked(sfa_ref_cpu[:, :, l_idx])
         scale_b = to_blocked(sfb_ref_cpu[:, :, l_idx])

@@ -152,8 +152,10 @@ fp4_gemv_sm100_ptx_mma(
                 uint8_t packed = A_batch[m_idx * K_packed + k_packed_tile + col_packed];
                 int scale_idx = col_packed / 8;
                 half scale_h = __float2half(1.0f);
+                uint8_t scale_byte = 0;
                 if ((k_scale_tile + scale_idx) < K_scales) {
-                    float scale_val = decode_fp8_e4m3(SFA_batch[m_idx * K_scales + k_scale_tile + scale_idx]);
+                    scale_byte = SFA_batch[m_idx * K_scales + k_scale_tile + scale_idx];
+                    float scale_val = decode_fp8_e4m3(scale_byte);
                     scale_h = __float2half(scale_val);
                 }
                 // Unpack two FP4s from the byte and multiply by scale.
@@ -163,8 +165,22 @@ fp4_gemv_sm100_ptx_mma(
                 // and the low nibble second.
                 half v0 = decode_fp4_e2m1((packed >> 4) & 0x0F);
                 half v1 = decode_fp4_e2m1(packed & 0x0F);
-                A_smem[row][col_packed * 2]     = __hmul(v0, scale_h);
-                A_smem[row][col_packed * 2 + 1] = __hmul(v1, scale_h);
+                half v0_scaled = __hmul(v0, scale_h);
+                half v1_scaled = __hmul(v1, scale_h);
+                A_smem[row][col_packed * 2]     = v0_scaled;
+                A_smem[row][col_packed * 2 + 1] = v1_scaled;
+
+                // DEBUG: Print for first few elements of first batch
+                int k_idx0 = k_tile + col_packed * 2;
+                int k_idx1 = k_idx0 + 1;
+                if (batch == 0 && m_idx < 3 && k_idx0 < 32 && tid == idx) {
+                    printf("[KERNEL A] batch=%d m=%d k=%d,%d | packed=0x%02x scale_byte=0x%02x scale=%f | "
+                           "fp4_raw=(%f,%f) scaled=(%f,%f)\n",
+                           batch, m_idx, k_idx0, k_idx1,
+                           packed, scale_byte, __half2float(scale_h),
+                           __half2float(v0), __half2float(v1),
+                           __half2float(v0_scaled), __half2float(v1_scaled));
+                }
             } else if (row < kTileM && col_packed * 2 < kTileK) {
                 // Pad out-of-range entries with zero
                 A_smem[row][col_packed * 2]     = __float2half(0.0f);
@@ -185,21 +201,36 @@ fp4_gemv_sm100_ptx_mma(
                 const uint8_t packed = B_batch[k_packed_tile + col_packed];
                 const int scale_idx = col_packed / 8;
                 half scale_h = __float2half(1.0f);
+                uint8_t scale_byte = 0;
                 if ((k_scale_tile + scale_idx) < K_scales) {
-                    float scale_val = decode_fp8_e4m3(SFB_batch[k_scale_tile + scale_idx]);
+                    scale_byte = SFB_batch[k_scale_tile + scale_idx];
+                    float scale_val = decode_fp8_e4m3(scale_byte);
                     scale_h = __float2half(scale_val);
                 }
                 // Decode FP4 values for B.  The high nibble represents the first
                 // element and the low nibble represents the second element.
                 half v0 = decode_fp4_e2m1((packed >> 4) & 0x0F);
                 half v1 = decode_fp4_e2m1(packed & 0x0F);
-                v0 = __hmul(v0, scale_h);
-                v1 = __hmul(v1, scale_h);
+                half v0_scaled = __hmul(v0, scale_h);
+                half v1_scaled = __hmul(v1, scale_h);
+
+                // DEBUG: Print for first few elements of first batch
+                int k_idx0 = k_tile + col_packed * 2;
+                int k_idx1 = k_idx0 + 1;
+                if (batch == 0 && k_idx0 < 32 && col_packed == tid) {
+                    printf("[KERNEL B] batch=%d k=%d,%d | packed=0x%02x scale_byte=0x%02x scale=%f | "
+                           "fp4_raw=(%f,%f) scaled=(%f,%f)\n",
+                           batch, k_idx0, k_idx1,
+                           packed, scale_byte, __half2float(scale_h),
+                           __half2float(v0), __half2float(v1),
+                           __half2float(v0_scaled), __half2float(v1_scaled));
+                }
+
                 // Broadcast both values to all eight columns
                 #pragma unroll
                 for (int n = 0; n < 8; n++) {
-                    B_smem[col_packed * 2][n]     = v0;
-                    B_smem[col_packed * 2 + 1][n] = v1;
+                    B_smem[col_packed * 2][n]     = v0_scaled;
+                    B_smem[col_packed * 2 + 1][n] = v1_scaled;
                 }
             } else if (col_packed * 2 < kTileK) {
                 // Pad with zero
