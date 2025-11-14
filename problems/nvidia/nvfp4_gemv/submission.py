@@ -1,9 +1,8 @@
 import os
 
 import torch
-from torch.utils.cpp_extension import load_inline
-
 from task import input_t, output_t
+from torch.utils.cpp_extension import load_inline
 
 cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
 
@@ -87,6 +86,14 @@ fp4_gemv_sm100_ptx_mma(
     const int K_packed = K / 2;
     const int K_scales = K / 16;
 
+    // --------------------------------------------------------------------
+    // Compute the number of scale factor column blocks. Each FP8 scale
+    // represents 16 FP4 values, and we arrange the scale factors in a
+    // blocked layout with 4‑element groups along the K dimension.  The
+    // number of column blocks is K_scales / 4 (guaranteed to be an
+    // integer for valid inputs).
+    const int n_col_blocks = K_scales / 4;
+
     // Batch offsets
     const uint8_t* A_batch = A_packed + batch * M * K_packed;
     const uint8_t* B_batch = B_packed + batch * 128 * K_packed;
@@ -106,8 +113,6 @@ fp4_gemv_sm100_ptx_mma(
     // The B vector and its scale factors are stored with a padded N dimension of
     // size 128.  Only the first column (index 0) is needed for GEMV.  We do
     // not distribute these replicas across M, so every CTA uses the 0th
-    // replica.  Keeping this here clarifies that b_replica is always 0.
-    const int b_replica = 0;
 
     // Shared memory allocations.  We align by 128 bytes to satisfy the
     // requirements of ldmatrix (16x8 half tile = 256B).  A_smem holds the
@@ -127,6 +132,11 @@ fp4_gemv_sm100_ptx_mma(
     float c_frag_1 = 0.0f;
     float c_frag_2 = 0.0f;
     float c_frag_3 = 0.0f;
+    // --------------------------------------------------------------------
+    // DEBUG: Accumulator for naive dot product of the first row using decoded
+    // A_smem and B_smem. This will accumulate contributions across all K tiles
+    // to verify decode+scale correctness without using tensor core MMA.
+    float naive_sum = 0.0f;
 
     // Loop over K in tiles of kTileK elements.  Each iteration loads and
     // decodes a slice of A and B into shared memory, performs all mma.sync
@@ -151,10 +161,14 @@ fp4_gemv_sm100_ptx_mma(
             if (m_idx < M && (k_packed_tile + col_packed) < K_packed) {
                 uint8_t packed = A_batch[m_idx * K_packed + k_packed_tile + col_packed];
                 int scale_idx = col_packed / 8;
+                // Initialize the scale to 1.0f (no scaling) and scale byte to 0.
                 half scale_h = __float2half(1.0f);
                 uint8_t scale_byte = 0;
-                if ((k_scale_tile + scale_idx) < K_scales) {
-                    scale_byte = SFA_batch[m_idx * K_scales + k_scale_tile + scale_idx];
+                // Compute global scale index for A: one scale per 16 FP4 values
+                int scale_global_idx = k_scale_tile + scale_idx;
+                // Apply the scale if within bounds
+                if (scale_global_idx < K_scales) {
+                    scale_byte = SFA_batch[m_idx * K_scales + scale_global_idx];
                     float scale_val = decode_fp8_e4m3(scale_byte);
                     scale_h = __float2half(scale_val);
                 }
@@ -200,10 +214,13 @@ fp4_gemv_sm100_ptx_mma(
                 // Load the packed FP4 value from the first replica (index 0) of B.
                 const uint8_t packed = B_batch[k_packed_tile + col_packed];
                 const int scale_idx = col_packed / 8;
+                // Initialize the scale to 1.0f (no scaling) and scale byte to 0.
                 half scale_h = __float2half(1.0f);
                 uint8_t scale_byte = 0;
                 if ((k_scale_tile + scale_idx) < K_scales) {
-                    scale_byte = SFB_batch[k_scale_tile + scale_idx];
+                    int scale_global_idx = k_scale_tile + scale_idx;
+                    // Row 0 because GEMV has N=1; SFB_batch is [128, K_scales]
+                    scale_byte = SFB_batch[scale_global_idx];
                     float scale_val = decode_fp8_e4m3(scale_byte);
                     scale_h = __float2half(scale_val);
                 }
@@ -243,6 +260,21 @@ fp4_gemv_sm100_ptx_mma(
         }
 
         // Ensure all decoded values are visible before MMA
+        __syncthreads();
+
+        // --------------------------------------------------------------------
+        // DEBUG: Naive K-loop compute for the first row of this tile.
+        // Each CTA thread 0 accumulates the dot product of A_smem row 0 and
+        // B_smem column 0 (broadcasted) for the current K-tile. This serves as a
+        // reference to confirm the correctness of FP4/FP8 decode and scaling.
+        if (tid == 0) {
+            for (int kk_naive = 0; kk_naive < kTileK; ++kk_naive) {
+                float a_val = __half2float(A_smem[0][kk_naive]);
+                float b_val = __half2float(B_smem[kk_naive][0]);
+                naive_sum += a_val * b_val;
+            }
+        }
+        // Synchronize to ensure the naive accumulation is complete before MMA.
         __syncthreads();
 
         // --------------------------------------------------------------------
@@ -327,8 +359,118 @@ fp4_gemv_sm100_ptx_mma(
             }
         }
     }
+
+    // ------------------------------------------------------------------------
+    // DEBUG: Compare the naive dot product with the tensor core result for the
+    // first row of this tile.  After scattering the MMA results to D_batch,
+    // synchronize to ensure the writes are visible.  Then thread 0 reads the
+    // tensor core result from D_batch and prints both values along with their
+    // difference.  Only emit for the first batch and first tile to avoid
+    // excessive output.
+    __syncthreads();
+    if (batch == 0 && blockIdx.x == 0 && tid == 0) {
+        float tc_val = 0.0f;
+        if (m_cta < M) {
+            tc_val = __half2float(D_batch[m_cta]);
+        }
+        float diff = naive_sum - tc_val;
+        printf("[KERNEL NAIVE] batch=%d m_tile=%d naive_dot=%f tc_dot=%f diff=%f\n",
+               batch, m_cta, naive_sum, tc_val, diff);
+    }
 }
 
+// ============================================================================
+// Naive GEMV kernel: compute a single output element (row 0) per batch
+// using FP4 decode and FP8 block scaling. This kernel is intended for
+// debugging and correctness verification. Each block computes the dot
+// product for the first row of A and the first element of B (N=1) for a
+// single batch, looping over the entire K dimension without any tensor
+// cores or shared memory tiling. The result is accumulated in FP32 and
+// written back to D[0] for the corresponding batch.
+//
+// Grid configuration: grid.x = L (one block per batch), blockDim.x = 1.
+//
+__global__ void fp4_gemv_naive_one(
+    const uint8_t* __restrict__ A_packed,
+    const uint8_t* __restrict__ B_packed,
+    const uint8_t* __restrict__ SFA_packed,
+    const uint8_t* __restrict__ SFB_packed,
+    half* __restrict__ D,
+    const int M, const int K, const int L
+) {
+    // Each block handles one batch (grid.x == L). Only thread 0 does work.
+    int batch = blockIdx.x;
+    if (batch >= L) return;
+    // Only a single thread per block performs the accumulation.
+    if (threadIdx.x > 0) return;
+
+    const int K_packed = K / 2;
+    const int K_scales = K / 16;
+    const int n_col_blocks = K_scales / 4;
+
+    // Batch pointers into packed data and scale factors. For B, the N dimension
+    // is padded to 128 rows.
+    const uint8_t* A_batch = A_packed + batch * M * K_packed;
+    const uint8_t* B_batch = B_packed + batch * 128 * K_packed;
+    const uint8_t* SFA_batch = SFA_packed + batch * M * K_scales;
+    const uint8_t* SFB_batch = SFB_packed + batch * 128 * K_scales;
+    half* D_batch = D + batch * M;
+
+    float acc = 0.0f;
+
+    // Loop over all K elements. For each k_idx, decode A[0,k], decode B[0,k],
+    // apply their respective scale factors, and accumulate the product.
+    for (int k_idx = 0; k_idx < K; ++k_idx) {
+        int col_packed = k_idx >> 1;    // k_idx / 2
+        bool high_nibble = ((k_idx & 1) == 0);
+
+        // --------------------------------------------------------------------
+        // Decode A[0, k_idx] and apply its scale factor from SFA
+        // --------------------------------------------------------------------
+        uint8_t packed = 0;
+        if (0 < M && col_packed < K_packed) {
+            packed = A_batch[col_packed];
+        }
+        uint8_t nibble = high_nibble ? ((packed >> 4) & 0x0F) : (packed & 0x0F);
+        float a_val = __half2float(decode_fp4_e2m1(nibble));
+
+        // Compute the FP8 scale factor index for A: one scale per 16 FP4 values
+        int scale_idx = k_idx >> 4;
+        float scaleA = 1.0f;
+        if (scale_idx < K_scales) {
+            uint8_t scale_byte = SFA_batch[scale_idx];
+            scaleA = decode_fp8_e4m3(scale_byte);
+        }
+        float a_scaled = a_val * scaleA;
+
+        // --------------------------------------------------------------------
+        // Decode B[0, k_idx] and apply its scale factor from SFB
+        // --------------------------------------------------------------------
+        uint8_t packedB = 0;
+        if (col_packed < K_packed) {
+            packedB = B_batch[col_packed];
+        }
+        uint8_t nibbleB = high_nibble ? ((packedB >> 4) & 0x0F) : (packedB & 0x0F);
+        float b_val = __half2float(decode_fp4_e2m1(nibbleB));
+
+        // For B, use the same scale index as A. Row 0 of the padded N dimension
+        // corresponds directly to index 0 in SFB_batch.
+        float scaleB = 1.0f;
+        if (scale_idx < K_scales) {
+            uint8_t scale_byte_b = SFB_batch[scale_idx];
+            scaleB = decode_fp8_e4m3(scale_byte_b);
+        }
+        float b_scaled = b_val * scaleB;
+
+        // Accumulate the product in FP32
+        acc += a_scaled * b_scaled;
+    }
+
+    // Write the result to D[0] for this batch. Cast to half for storage.
+    if (0 < M) {
+        D_batch[0] = __float2half(acc);
+    }
+}
 // ============================================================================
 // Unified Launcher (Single Kernel for All Shapes)
 // ============================================================================
@@ -369,10 +511,47 @@ void launch_fp4_gemv_optimized(
         throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err));
     }
 }
+
+// ============================================================================
+// Host launcher for the naive GEMV kernel. This function prepares device
+// pointers and launches fp4_gemv_naive_one with a grid of L blocks and a
+// single thread per block. It computes only the first row of the output
+// (m=0) for each batch. No tensor cores are used.
+// ============================================================================
+void launch_fp4_gemv_naive_one(
+    torch::Tensor A, torch::Tensor B,
+    torch::Tensor SFA, torch::Tensor SFB,
+    torch::Tensor D,
+    int64_t M, int64_t K, int64_t L
+) {
+    const uint8_t* A_ptr = A.data_ptr<uint8_t>();
+    const uint8_t* B_ptr = B.data_ptr<uint8_t>();
+    const uint8_t* SFA_ptr = SFA.data_ptr<uint8_t>();
+    const uint8_t* SFB_ptr = SFB.data_ptr<uint8_t>();
+    half* D_ptr = reinterpret_cast<half*>(D.data_ptr<at::Half>());
+
+    // Launch naive kernel: one block per batch, one thread per block
+    dim3 grid(L);
+    dim3 block(1);
+    fp4_gemv_naive_one<<<grid, block>>>(
+        A_ptr, B_ptr, SFA_ptr, SFB_ptr, D_ptr, M, K, L
+    );
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err));
+    }
+}
 """
 
 cpp_source = """
 void launch_fp4_gemv_optimized(
+    torch::Tensor A, torch::Tensor B,
+    torch::Tensor SFA, torch::Tensor SFB,
+    torch::Tensor D,
+    int64_t M, int64_t K, int64_t L
+);
+
+void launch_fp4_gemv_naive_one(
     torch::Tensor A, torch::Tensor B,
     torch::Tensor SFA, torch::Tensor SFB,
     torch::Tensor D,
@@ -390,7 +569,7 @@ def get_module():
             name="nvfp4_gemv_sm100_ptx",
             cpp_sources=cpp_source,
             cuda_sources=cuda_source,
-            functions=["launch_fp4_gemv_optimized"],
+            functions=["launch_fp4_gemv_optimized", "launch_fp4_gemv_naive_one"],
             verbose=True,
             extra_cuda_cflags=[
                 "-O3",
