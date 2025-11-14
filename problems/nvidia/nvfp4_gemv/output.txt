@@ -1,0 +1,70 @@
+## Benchmarks
+
+❌ k: 16384; l: 1; m: 7168; seed: 1111 failed testing:
+mismatch found! custom implementation doesn't match reference:
+Number of mismatched elements: 7118
+ERROR AT (0, 0, 0): 0.0 4668.0
+ERROR AT (1, 0, 0): ...
+[...]
+
+❌ k: 7168; l: 8; m: 4096; seed: 1111 failed testing:
+mismatch found! custom implementation doesn't match reference:
+Number of mismatched elements: 32591
+ERROR AT (0, 0, 0): 0.0 2244.0
+ERROR AT (0, 0, 1): ...
+[...]
+
+❌ k: 2048; l: 4; m: 7168; seed: 1111 failed testing:
+mismatch found! custom implementation doesn't match reference:
+Number of mismatched elements: 28604
+ERROR AT (0, 0, 0): 0.0 504.75
+ERROR AT (0, 0, 1): ...
+[...]
+
+## Program stdout
+================================================================================
+BEFORE PERMUTE:
+  A shape: torch.Size([7168, 8192, 1]), dtype: torch.float4_e2m1fn_x2
+  B shape: torch.Size([128, 8192, 1]), dtype: torch.float4_e2m1fn_x2
+  C shape: torch.Size([7168, 1, 1]), dtype: torch.float16
+  SFA shape: torch.Size([7168, 1024, 1]), dtype: torch.float8_e4m3fn
+  SFB shape: torch.Size([128, 1024, 1]), dtype: torch.float8_e4m3fn
+  M=7168, K=16384, L=1
+================================================================================
+DEBUG: After permute+clone, a.shape = torch.Size([1, 7168, 8192]), expected [1, 7168, 8192]
+DEBUG: After permute+clone, b.shape = torch.Size([1, 128, 8192])
+
+AFTER PERMUTE (BEFORE KERNEL):
+  a_bytes shape: torch.Size([1, 7168, 8192]), dtype: torch.uint8
+  b_bytes shape: torch.Size([1, 128, 8192]), dtype: torch.uint8
+  c shape: torch.Size([1, 7168, 1]), dtype: torch.float16
+  sfa_bytes shape: torch.Size([1, 7168, 1024]), dtype: torch.uint8
+  sfb_bytes shape: torch.Size([1, 128, 1024]), dtype: torch.uint8
+  Kernel params: M=7168, K=16384, L=1
+================================================================================
+
+[compiler warnings...]
+ptxas info    : Used 48 registers, used 1 barriers, 64 bytes cumulative stack size, 19456 bytes smem
+ptxas info    : Compile time = 21.718 ms
+ptxas info    : Used 36 registers, used 0 barriers
+ptxas info    : Compile time = 7.136 ms
+
+[KERNEL A] batch=0 m=0 k=0,1 | packed=0x03 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,3.000000)
+[KERNEL A] batch=0 m=0 k=2,3 | packed=0x00 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL A] batch=0 m=0 k=4,5 | packed=0x00 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[...]
+
+[KERNEL A] batch=0 m=1 k=0,1 | packed=0x00 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL A] batch=0 m=1 k=2,3 | packed=0x02 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,0.000000)
+[...]
+
+[KERNEL A] batch=0 m=2 k=0,1 | packed=0x02 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,0.000000)
+[KERNEL A] batch=0 m=2 k=2,3 | packed=0x00 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[...]
+
+[KERNEL B] batch=0 k=0,1 | packed=0x03 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,3.000000)
+[KERNEL B] batch=0 k=2,3 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[...]
+
+[... 6587 lines omitted]
+'```
