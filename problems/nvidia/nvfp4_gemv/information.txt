@@ -1,80 +1,74 @@
-**Your output is still failing with reference mismatches. Here is why and what is wrong, based on the details in `paste.txt`:**
+Even though the row indexing bug in submission.py is fixed, we're still seeing massive mismatches with the reference. Here's the root cause based on the current submission_output.txt and kernel logs:
 
-***
+✅ What's Already Fixed:
 
-## 1. **Your scale decode is now correct**
-*You are getting correct `scalebyte` and `scale` values in the kernel debug prints, e.g.:*
-- `packed=0x03 scalebyte=0x40 scale=2.000000 fp4_raw=(0.000000,1.500000) scaled=(0.000000,3.000000)`
-- `packed=0x01 scalebyte=0x40 scale=2.000000 fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)`
-- ... for different k indices and packed bytes.
 
-This matches the reference scale decode logic exactly, so the key bug in scale handling is fixed.
+The row index calculation in the final MMA output scatter is now correct: threads write to global_row0 and global_row1 = global_row0 + 1 — ✔️ good.
 
-***
 
-## 2. **But the output still mismatches the reference for all main benchmarks**
-Your output contains blocks like:
-```
-k: 16384; l: 1; m: 7168; seed: 1111 failed testing:
-mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 7118
-ERROR AT (0, 0, 0): 0.0 4668.0
-ERROR AT (1, 0, 0): 0.0 4620.5
-...
-```
-*For every major test shape, EVERY output element is zero except the very first elements of some tiles.*
+Shared memory loading, decode, and permute logic are intact — ✔️ verified.
 
-***
 
-## 3. **What is the new root cause?**
-### The scale decode bug is fixed, but **your kernel does not write results to the output buffer correctly**.
+Tensor core MMA executes and writes valid results — partly confirmed by some nonzero rows in mismatches.
 
-**Why?**
-- **All elements are zero except potentially a few tile starts.**
-- The debug prints show correct FP4 + scale values for every k, but the output is not accumulated and written to the output buffer for most output rows.
 
-This is a classic sign of either:
-- **Reduction/accumulator bug:** You may not reduce (sum across k) and store results in your output register for all threads.
-- **Output writeback stride/index bug:** You may have incorrect logic for writing the thread/block accumulator back to the output tensor in global memory (e.g., off-by-one, wrong stride, only first warp writes).
-- **Launch config bug:** e.g., blocks-per-row, threads-per-output location, or boundary math.
 
-**In the kernel, check these for every output row:**
-- Are ALL threads properly accumulating the result for each output location (not just tile or warp leaders)?
-- Is EACH thread that computes an output writing its accumulator to the correct place in the output tensor?
-- Is your mapping from grid/blockIdx/threadIdx to row/column correct for full output shape coverage?
+❌ Root Cause of Remaining Mismatch: Scales Are Not Applied Correctly Before MMA
+From kernel debug logs (KERNEL A and KERNEL B printouts), some rows have scale = 0.0, especially when scale_byte = 0x00, which zeroes out all inputs even though fp4_raw is nonzero.
+Example:
+[KERNEL A] batch=0 m=0 k=18,19 | packed=0x03 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,0.000000)
 
-***
+That means values that should have contributed to dot products are being multiplied by 0.0 due to broken scale propagation.
+Same for B:
+[KERNEL B] batch=0 k=18,19 | packed=0x03 scale_byte=0x38 scale=1.000000 ...
+[KERNEL B] batch=0 k=20,21 | packed=0x00 scale_byte=0x38 scale=1.000000 ...
 
-## 4. **How to diagnose:**
-- Print the accumulator immediately before writing to output buffer for EVERY output row.
-- Print the global output index that is being written to for each thread-block.
-- Compare the index calculation and write logic in the naive kernel (which works) with your tensor-core kernel.
+So B is scaled correctly, but A is often scaled with 0.0 due to bad scale_byte for some rows.
 
-***
+🔥 Impact:
 
-## 5. **Summary Table**
 
-| Kernel Stage      | Correction   | Status        | Issue Now                       |
-|-------------------|--------------|--------------|----------------------------------|
-| FP8 scale decode  | Yes          | CORRECT      | -                                |
-| FP4 decode        | Yes          | CORRECT      | -                                |
-| Output reduction and write | No   | BROKEN       | Only some tiles/rows output, rest are zero |
-| Output buffer stride/index | No   | BROKEN       | Accumulated values not written for all locations |
+All scale_byte = 0x00 ⇒ scale = 0.0 ⇒ data zeroed.
 
-***
 
-## **Direct Fix**
-> The next root cause is **incorrect logic in reducing over k and writing the result from PTX MMA accumulator to the output tensor**.
-> Check:
-> - Accumulator initialization per output thread.
-> - k loop reduction.
-> - Each thread's output index math and global write.
-> This must match the reference logic exactly, but in your kernel almost every output element is zero.
+This zeroing leads to many output dot products being completely incorrect or partly computed.
 
-If you paste the output buffer writeback code (last lines of kernel), I can give a concrete diff and correction.
 
-***
+Explains why so many values in the output are exactly 0.0 or heavily off even though output rows are now written properly.
 
-**TL;DR:**
-You fixed the scale bug. Now, most output buffer writes are broken due to output index, reduction, or writeback logic in your kernel—causing output zero everywhere. Fix that kernel block and you will match reference results.
 
-[1](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/83167427/1ef687c6-440f-4ed5-af72-881a827d9355/paste.txt)
+
+✅ submission2.py Works Because:
+
+
+It handles scales correctly across all rows, even for edge tiles.
+
+
+Likely does not reuse stale/invalid scale values.
+
+
+
+🔍 Likely Bug Location:
+Check the kernel where scale_byte is loaded from shared memory:
+uint8_t scale_byte = ...; // loaded per row from sfa_bytes
+float scale = decode_fp8_e4m3(scale_byte);
+
+If some scale_bytes are left uninitialized (e.g., tail rows of shared memory, invalid warps), then scale=0.0 silently kills FP4 contributions.
+
+✅ Fix Recommendation:
+Ensure:
+
+
+All scale_byte values are valid and initialized.
+
+
+No out-of-bounds scale fetches.
+
+
+Shared memory tiles (sfa, sfb) are correctly loaded for every row and column that's used.
+
+
+
+TL;DR
+
+The writeback is fixed, but input scale decoding is still broken, especially for rows using scale_byte = 0x00, leading to massive zeroing in FP4 decode. Fix the shared memory scale fetch or prefetch logic to resolve.
