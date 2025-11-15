@@ -1,18 +1,18 @@
 Benchmarks:
 ❌ k: 16384; l: 1; m: 7168; seed: 1111 failed testing:
 
-mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 7109 ERROR AT (0, 0, 0): 0.0 4668.0 ERROR AT (1, 0, 0): 0.0 4840.0 ERROR AT (2, 0, 0): 4716.0 4756.0 ERROR AT (3, 0, 0): 4716.0 4532.0 ERROR AT (4, 0, 0): 0.0 4812.0 ... and 7104 more mismatched elements.
+mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 7118 ERROR AT (0, 0, 0): 0.0 4668.0 ERROR AT (1, 0, 0): 4716.0 4840.0 ERROR AT (2, 0, 0): 0.0 4756.0 ERROR AT (3, 0, 0): 4584.0 4532.0 ERROR AT (4, 0, 0): 0.0 4812.0 ... and 7113 more mismatched elements.
 
 ❌ k: 7168; l: 8; m: 4096; seed: 1111 failed testing:
 
-mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32605 ERROR AT (0, 0, 0): 0.0 2244.0 ERROR AT (0, 0, 1): 0.0 2168.0 ERROR AT (0, 0, 2): 0.0 1782.0 ERROR AT (0, 0, 3): 0.0 1916.0 ERROR AT (0, 0, 4): 0.0 1786.0 ... and 32600 more mismatched elements.
+mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32591 ERROR AT (0, 0, 0): 0.0 2244.0 ERROR AT (0, 0, 1): 0.0 2168.0 ERROR AT (0, 0, 2): 0.0 1782.0 ERROR AT (0, 0, 3): 0.0 1916.0 ERROR AT (0, 0, 4): 0.0 1786.0 ... and 32586 more mismatched elements.
 
 ❌ k: 2048; l: 4; m: 7168; seed: 1111 failed testing:
 
-mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 28597 ERROR AT (0, 0, 0): 0.0 504.75 ERROR AT (0, 0, 1): 0.0 642.0 ERROR AT (0, 0, 2): 0.0 513.0 ERROR AT (0, 0, 3): 0.0 555.5 ERROR AT (1, 0, 0): 0.0 660.5 ... and 28592 more mismatched elements.
+mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 28604 ERROR AT (0, 0, 0): 0.0 504.75 ERROR AT (0, 0, 1): 0.0 642.0 ERROR AT (0, 0, 2): 0.0 513.0 ERROR AT (0, 0, 3): 0.0 555.5 ERROR AT (1, 0, 0): 547.5 660.5 ... and 28599 more mismatched elements.
 Cluster Bot
 APP
- — 10:44 AM
+ — 11:57 AM
 Program stdout (1/10):
 ================================================================================
 BEFORE PERMUTE:
@@ -35,7 +35,7 @@ AFTER PERMUTE (BEFORE KERNEL):
 ================================================================================
 Program stdout (2/10):
 [1/2] /usr/local/cuda-13.0/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemv_sm100_ptx -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 --use_fast_math -std=c++17 -gencode=arch=compute_100,code=sm_100 --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -DNDEBUG -I/usr/local/cutlass/include -c /home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu -o cuda.cuda.o
-/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(405): warning #177-D: variable "n_col_blocks" was declared but never referenced
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(403): warning #177-D: variable "n_col_blocks" was declared but never referenced
       const int n_col_blocks = K_scales / 4;
                 ^
 
@@ -51,71 +51,71 @@ Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
 
 ptxas info    : Overriding maximum register limit 256 for '_Z18fp4_gemv_naive_onePKhS0_S0_S0_P6__halfiii' with  128 of maxrregcount option
 Program stdout (3/10):
-ptxas warning : Local memory used for function '_Z22fp4_gemv_sm100_ptx_mmaILi64ELi128ELi256EEvPKhS1_S1_S1_P6__halfiii', size of stack frame: 64 bytes
-ptxas info    : 311 bytes gmem
+ptxas warning : Local memory used for function '_Z22fp4_gemv_sm100_ptx_mmaILi64ELi128ELi256EEvPKhS1_S1_S1_P6__halfiii', size of stack frame: 72 bytes
+ptxas info    : 336 bytes gmem
 ptxas info    : Compiling entry function '_Z22fp4_gemv_sm100_ptx_mmaILi64ELi128ELi256EEvPKhS1_S1_S1_P6__halfiii' for 'sm_100'
 ptxas info    : Function properties for _Z22fp4_gemv_sm100_ptx_mmaILi64ELi128ELi256EEvPKhS1_S1_S1_P6__halfiii
-    64 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
-ptxas info    : Used 48 registers, used 1 barriers, 64 bytes cumulative stack size, 19456 bytes smem
-ptxas info    : Compile time = 20.167 ms
+    72 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 48 registers, used 1 barriers, 72 bytes cumulative stack size, 19456 bytes smem
+ptxas info    : Compile time = 20.595 ms
 ptxas info    : Compiling entry function '_Z18fp4_gemv_naive_onePKhS0_S0_S0_P6__halfiii' for 'sm_100'
 ptxas info    : Function properties for _Z18fp4_gemv_naive_onePKhS0_S0_S0_P6__halfiii
     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
 ptxas info    : Used 36 registers, used 0 barriers
-ptxas info    : Compile time = 7.098 ms
+ptxas info    : Compile time = 7.181 ms
 [2/2] c++ main.o cuda.cuda.o -shared -lcuda -L/usr/local/lib/python3.10/dist-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda-13.0/lib64 -lcudart -o nvfp4_gemv_sm100_ptx.so
-[KERNEL A] batch=0 m=1 k=0,1 | packed=0x00 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=1 k=2,3 | packed=0x02 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=1 k=4,5 | packed=0x01 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=1 k=6,7 | packed=0x00 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=1 k=8,9 | packed=0x00 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=0,1 | packed=0x03 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,3.000000)
+[KERNEL B] batch=0 k=2,3 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=4,5 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=6,7 | packed=0x00 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=8,9 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
 Program stdout (4/10):
-[KERNEL A] batch=0 m=1 k=10,11 | packed=0x02 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=1 k=12,13 | packed=0x02 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=1 k=14,15 | packed=0x02 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=1 k=16,17 | packed=0x01 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,0.500000)
-[KERNEL A] batch=0 m=1 k=18,19 | packed=0x01 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,0.500000)
-[KERNEL A] batch=0 m=1 k=20,21 | packed=0x03 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,1.500000)
-[KERNEL A] batch=0 m=1 k=22,23 | packed=0x02 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,1.000000)
-[KERNEL A] batch=0 m=1 k=24,25 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=1 k=26,27 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=1 k=28,29 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=1 k=30,31 | packed=0x02 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,1.000000)
-[KERNEL A] batch=0 m=2 k=0,1 | packed=0x02 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=2 k=2,3 | packed=0x00 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=2 k=4,5 | packed=0x03 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=10,11 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=12,13 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=14,15 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=16,17 | packed=0x02 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=18,19 | packed=0x03 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,1.500000)
+[KERNEL B] batch=0 k=20,21 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=22,23 | packed=0x03 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,1.500000)
+[KERNEL B] batch=0 k=24,25 | packed=0x01 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,0.500000)
+[KERNEL B] batch=0 k=26,27 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=28,29 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=30,31 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=0,1 | packed=0x03 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,3.000000)
+[KERNEL B] batch=0 k=2,3 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=4,5 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
 Program stdout (5/10):
-[KERNEL A] batch=0 m=2 k=6,7 | packed=0x03 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=2 k=8,9 | packed=0x00 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=2 k=10,11 | packed=0x02 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=2 k=12,13 | packed=0x03 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=2 k=14,15 | packed=0x02 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=2 k=16,17 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
-[KERNEL A] batch=0 m=2 k=18,19 | packed=0x00 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=2 k=20,21 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
-[KERNEL A] batch=0 m=2 k=22,23 | packed=0x02 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,2.000000)
-[KERNEL A] batch=0 m=2 k=24,25 | packed=0x02 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,2.000000)
-[KERNEL A] batch=0 m=2 k=26,27 | packed=0x00 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=2 k=28,29 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
-[KERNEL A] batch=0 m=2 k=30,31 | packed=0x02 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,2.000000)
-[KERNEL A] batch=0 m=0 k=0,1 | packed=0x03 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,3.000000)
+[KERNEL B] batch=0 k=6,7 | packed=0x00 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=8,9 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=10,11 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=12,13 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=14,15 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=16,17 | packed=0x02 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=18,19 | packed=0x03 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,1.500000)
+[KERNEL B] batch=0 k=20,21 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=22,23 | packed=0x03 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,1.500000)
+[KERNEL B] batch=0 k=24,25 | packed=0x01 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,0.500000)
+[KERNEL B] batch=0 k=26,27 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=28,29 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=30,31 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=0,1 | packed=0x03 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,3.000000)
 Program stdout (6/10):
-[KERNEL A] batch=0 m=0 k=2,3 | packed=0x00 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=0 k=4,5 | packed=0x00 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=0 k=6,7 | packed=0x03 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,3.000000)
-[KERNEL A] batch=0 m=0 k=8,9 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
-[KERNEL A] batch=0 m=0 k=10,11 | packed=0x02 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,2.000000)
-[KERNEL A] batch=0 m=0 k=12,13 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
-[KERNEL A] batch=0 m=0 k=14,15 | packed=0x03 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,3.000000)
-[KERNEL A] batch=0 m=0 k=16,17 | packed=0x00 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=0 k=18,19 | packed=0x03 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=0 k=20,21 | packed=0x03 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=0 k=22,23 | packed=0x01 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=0 k=24,25 | packed=0x00 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=0 k=26,27 | packed=0x03 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,0.000000)
-[KERNEL A] batch=0 m=0 k=28,29 | packed=0x02 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=2,3 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=4,5 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=6,7 | packed=0x00 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=8,9 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=10,11 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=12,13 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=14,15 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=16,17 | packed=0x02 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,1.000000)
+[KERNEL B] batch=0 k=18,19 | packed=0x03 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,1.500000)
+[KERNEL B] batch=0 k=20,21 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=22,23 | packed=0x03 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,1.500000)
+[KERNEL B] batch=0 k=24,25 | packed=0x01 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,0.500000)
+[KERNEL B] batch=0 k=26,27 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=28,29 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
 Program stdout (7/10):
-[KERNEL A] batch=0 m=0 k=30,31 | packed=0x02 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.000000) scaled=(0.000000,0.000000)
+[KERNEL B] batch=0 k=30,31 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
 [KERNEL B] batch=0 k=0,1 | packed=0x03 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,3.000000)
 [KERNEL B] batch=0 k=2,3 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
 [KERNEL B] batch=0 k=4,5 | packed=0x01 scale_byte=0x40 scale=2.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)
@@ -163,4 +163,6 @@ Program stdout (10/10):
 [KERNEL B] batch=0 k=18,19 | packed=0x03 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,1.500000)
 [KERNEL B] batch=0 k=20,21 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
 [KERNEL B] batch=0 k=22,23 | packed=0x03 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,1.500000)
-[...] 6586 lines omitted
+[KERNEL B] batch=0 k=24,25 | packed=0x01 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.500000) scaled=(0.000000,0.500000)
+[KERNEL B] batch=0 k=26,27 | packed=0x00 scale_byte=0x38 scale=1.000000 | fp4_raw=(0.000000,0.000000) scaled=(0.000000,0.000000)
+[...] 6584 lines omitted

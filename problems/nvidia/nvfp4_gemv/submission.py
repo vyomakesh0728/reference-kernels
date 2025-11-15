@@ -1,8 +1,9 @@
 import os
 
 import torch
-from task import input_t, output_t
 from torch.utils.cpp_extension import load_inline
+
+from task import input_t, output_t
 
 cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
 
