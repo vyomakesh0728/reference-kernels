@@ -163,11 +163,12 @@ fp4_gemv_sm100_ptx_mma(
                 // Compute scale index based on absolute k position (matching naive kernel)
                 int k_abs_first = k_tile + col_packed * 2;  // First FP4 element index
                 int scale_idx = k_abs_first >> 4;  // Divide by 16 (one scale per 16 elements)
+                uint8_t scale_byte = 0;  // Declare and initialize outside the block
                 // Initialize the scale to 1.0f (no scaling)
                 half scale_h = __float2half(1.0f);
                 // Apply the scale if within bounds
                 if (scale_idx < K_scales) {
-                    uint8_t scale_byte = SFA_batch[m_idx * K_scales + scale_idx];
+                    scale_byte = SFA_batch[m_idx * K_scales + scale_idx];
                     float scale_val = decode_fp8_e4m3(scale_byte);
                     scale_h = __float2half(scale_val);
                 }
@@ -215,9 +216,9 @@ fp4_gemv_sm100_ptx_mma(
                 // Compute scale index based on absolute k position (matching naive kernel)
                 int k_abs_first = k_tile + col_packed * 2;  // First FP4 element index
                 int scale_idx = k_abs_first >> 4;  // Divide by 16 (one scale per 16 elements)
-                // Initialize the scale to 1.0f (no scaling) and scale byte to 0.
+                uint8_t scale_byte = 0;  // Declare and initialize outside the block
+                // Initialize the scale to 1.0f (no scaling)
                 half scale_h = __float2half(1.0f);
-                uint8_t scale_byte = 0;
                 if (scale_idx < K_scales) {
                     // Row 0 because GEMV has N=1; SFB_batch is [128, K_scales]
                     scale_byte = SFB_batch[0 * K_scales + scale_idx];
