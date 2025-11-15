@@ -1,74 +1,90 @@
-Even though the row indexing bug in submission.py is fixed, we're still seeing massive mismatches with the reference. Here's the root cause based on the current submission_output.txt and kernel logs:
+Yes — your current implementation *does* apply the updated scale index fix in both A and B tensor loads, but the mismatches with the reference still persist. Here's the root cause based on detailed inspection of `submission_output.txt` and `submission.py`:
 
-✅ What's Already Fixed:
+---
 
+### ✅ **What’s Correct Now**
 
-The row index calculation in the final MMA output scatter is now correct: threads write to global_row0 and global_row1 = global_row0 + 1 — ✔️ good.
+* **Scale indexing logic** for both A and B: you’ve correctly switched from tile-relative to absolute `k >> 4` indexing, matching the naive kernel.
+* **Scale values are now valid** — not just 0x00. Example:
 
+  ```
+  [KERNEL A] batch=0 m=0 k=0,1 | packed=0x03 scale_byte=0x40 scale=2.000000
+  ```
 
-Shared memory loading, decode, and permute logic are intact — ✔️ verified.
+---
 
+### ❌ **What’s Still Broken**
 
-Tensor core MMA executes and writes valid results — partly confirmed by some nonzero rows in mismatches.
+#### **The A scale is applied with incorrect timing**
 
+* Your output shows that the first few tiles (e.g., `k=0..15`) are using:
 
+  ```
+  scale_byte = 0x00 scale = 0.0
+  ```
+* But this is **not valid data** — A’s early columns should **already** be scaled by nonzero values, like in the naive kernel.
 
-❌ Root Cause of Remaining Mismatch: Scales Are Not Applied Correctly Before MMA
-From kernel debug logs (KERNEL A and KERNEL B printouts), some rows have scale = 0.0, especially when scale_byte = 0x00, which zeroes out all inputs even though fp4_raw is nonzero.
-Example:
-[KERNEL A] batch=0 m=0 k=18,19 | packed=0x03 scale_byte=0x00 scale=0.000000 | fp4_raw=(0.000000,1.500000) scaled=(0.000000,0.000000)
+#### 🔍 **What This Implies**
 
-That means values that should have contributed to dot products are being multiplied by 0.0 due to broken scale propagation.
-Same for B:
-[KERNEL B] batch=0 k=18,19 | packed=0x03 scale_byte=0x38 scale=1.000000 ...
-[KERNEL B] batch=0 k=20,21 | packed=0x00 scale_byte=0x38 scale=1.000000 ...
+The tensor core kernel is **accessing stale/uninitialized scale bytes** in A — likely due to a **bad offset or alignment issue** in how `SFA_batch[m_idx * K_scales + scale_idx]` is indexed.
 
-So B is scaled correctly, but A is often scaled with 0.0 due to bad scale_byte for some rows.
+#### Compare This With Naive:
 
-🔥 Impact:
+In `submission2.py`, the logic is:
 
+```cpp
+int scale_idx = k_idx >> 4;
+uint8_t scale_byte = SFA_batch[row * K_scales + scale_idx];
+```
 
-All scale_byte = 0x00 ⇒ scale = 0.0 ⇒ data zeroed.
+In your `submission.py`, you *intend* to mirror this. But the debug output reveals:
 
+* **For `m_idx = 0`**, and **`k = 0..15`**, `scale_byte = 0x00`
+* **Later**, around `k = 16`, it suddenly becomes valid (`0x38`, `0x40`, etc.)
 
-This zeroing leads to many output dot products being completely incorrect or partly computed.
+This strongly suggests:
 
+* Either `k_abs_first` is off by one tile
+* Or the value of `K_scales` is too large, causing indexing to fall into uninitialized padding
 
-Explains why so many values in the output are exactly 0.0 or heavily off even though output rows are now written properly.
+---
 
+### 🔥 Root Cause Hypothesis
 
+#### ➤ You use:
 
-✅ submission2.py Works Because:
+```cpp
+int k_abs_first = k_tile + col_packed * 2;
+int scale_idx = k_abs_first >> 4;
+...
+scale_byte = SFA_batch[m_idx * K_scales + scale_idx];
+```
 
+But `k_tile` and `col_packed` **might not reflect global `k_idx` properly**, especially if `k_tile` is per-thread tile rather than block-wide. The result:
 
-It handles scales correctly across all rows, even for edge tiles.
+* You **under-index** into the scale array for early `k`, reading `0x00`.
 
+---
 
-Likely does not reuse stale/invalid scale values.
+### ✅ **Fix Recommendation**
 
+Instead of:
 
+```cpp
+int k_abs_first = k_tile + col_packed * 2;
+```
 
-🔍 Likely Bug Location:
-Check the kernel where scale_byte is loaded from shared memory:
-uint8_t scale_byte = ...; // loaded per row from sfa_bytes
-float scale = decode_fp8_e4m3(scale_byte);
+Do:
 
-If some scale_bytes are left uninitialized (e.g., tail rows of shared memory, invalid warps), then scale=0.0 silently kills FP4 contributions.
+```cpp
+int k_abs_first = k_idx;  // true global K index
+```
 
-✅ Fix Recommendation:
-Ensure:
+Then:
 
+```cpp
+int scale_idx = k_abs_first >> 4;
+scale_byte = SFA_batch[m_idx * K_scales + scale_idx];
+```
 
-All scale_byte values are valid and initialized.
-
-
-No out-of-bounds scale fetches.
-
-
-Shared memory tiles (sfa, sfb) are correctly loaded for every row and column that's used.
-
-
-
-TL;DR
-
-The writeback is fixed, but input scale decoding is still broken, especially for rows using scale_byte = 0x00, leading to massive zeroing in FP4 decode. Fix the shared memory scale fetch or prefetch logic to resolve.
+This exactly mirrors the naive kernel, removes any ambiguity from tile/block math, and avoids ever falling back to `0x00` scale values unless truly intended.
