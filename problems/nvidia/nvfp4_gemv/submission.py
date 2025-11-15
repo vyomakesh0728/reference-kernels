@@ -348,9 +348,9 @@ fp4_gemv_sm100_ptx_mma(
         int quad = lane_id >> 2;       // 0..7, identifies which pair of rows
         int col_in_quad = lane_id & 3; // 0..3, identifies which pair of columns
         if (col_in_quad == 0) {
-            int r0 = quad;
+            int r0 = quad * 2;  // Each quad handles 2 consecutive rows
             int global_row0 = m_cta + row_offset + r0;
-            int global_row1 = global_row0 + 8;
+            int global_row1 = global_row0 + 1;  // Consecutive row, not +8
             if (global_row0 < M) {
                 D_batch[global_row0] = __float2half(c_frag_0);
             }
