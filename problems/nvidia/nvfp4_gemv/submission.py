@@ -160,9 +160,10 @@ fp4_gemv_sm100_ptx_mma(
             int m_idx = m_cta + row;
             if (m_idx < M && (k_packed_tile + col_packed) < K_packed) {
                 uint8_t packed = A_batch[m_idx * K_packed + k_packed_tile + col_packed];
-                // Compute scale index based on absolute k position (matching naive kernel)
-                int k_abs_first = k_tile + col_packed * 2;  // First FP4 element index
-                int scale_idx = k_abs_first >> 4;  // Divide by 16 (one scale per 16 elements)
+                // Compute global k index (matching naive kernel)
+                int k_idx0 = k_tile + col_packed * 2;  // First FP4 element (true global K index)
+                int k_idx1 = k_idx0 + 1;                // Second FP4 element
+                int scale_idx = k_idx0 >> 4;            // Divide by 16 (one scale per 16 elements)
                 uint8_t scale_byte = 0;  // Declare and initialize outside the block
                 // Initialize the scale to 1.0f (no scaling)
                 half scale_h = __float2half(1.0f);
@@ -185,12 +186,10 @@ fp4_gemv_sm100_ptx_mma(
                 A_smem[row][col_packed * 2 + 1] = v1_scaled;
 
                 // DEBUG: Print for first few elements of first batch
-                int k_idx0 = k_tile + col_packed * 2;
-                int k_idx1 = k_idx0 + 1;
                 if (batch == 0 && m_idx < 3 && k_idx0 < 32 && tid == idx) {
-                    printf("[KERNEL A] batch=%d m=%d k=%d,%d | packed=0x%02x scale_byte=0x%02x scale=%f | "
+                    printf("[KERNEL A] batch=%d m=%d k=%d,%d scale_idx=%d K_scales=%d | packed=0x%02x scale_byte=0x%02x scale=%f | "
                            "fp4_raw=(%f,%f) scaled=(%f,%f)\n",
-                           batch, m_idx, k_idx0, k_idx1,
+                           batch, m_idx, k_idx0, k_idx1, scale_idx, K_scales,
                            packed, scale_byte, __half2float(scale_h),
                            __half2float(v0), __half2float(v1),
                            __half2float(v0_scaled), __half2float(v1_scaled));
@@ -213,9 +212,10 @@ fp4_gemv_sm100_ptx_mma(
             if ((k_packed_tile + col_packed) < K_packed) {
                 // Load the packed FP4 value from the first replica (index 0) of B.
                 const uint8_t packed = B_batch[k_packed_tile + col_packed];
-                // Compute scale index based on absolute k position (matching naive kernel)
-                int k_abs_first = k_tile + col_packed * 2;  // First FP4 element index
-                int scale_idx = k_abs_first >> 4;  // Divide by 16 (one scale per 16 elements)
+                // Compute global k index (matching naive kernel)
+                int k_idx0 = k_tile + col_packed * 2;  // First FP4 element (true global K index)
+                int k_idx1 = k_idx0 + 1;                // Second FP4 element
+                int scale_idx = k_idx0 >> 4;            // Divide by 16 (one scale per 16 elements)
                 uint8_t scale_byte = 0;  // Declare and initialize outside the block
                 // Initialize the scale to 1.0f (no scaling)
                 half scale_h = __float2half(1.0f);
@@ -233,8 +233,6 @@ fp4_gemv_sm100_ptx_mma(
                 half v1_scaled = __hmul(v1, scale_h);
 
                 // DEBUG: Print for first few elements of first batch
-                int k_idx0 = k_tile + col_packed * 2;
-                int k_idx1 = k_idx0 + 1;
                 if (batch == 0 && k_idx0 < 32 && col_packed == tid) {
                     printf("[KERNEL B] batch=%d k=%d,%d | packed=0x%02x scale_byte=0x%02x scale=%f | "
                            "fp4_raw=(%f,%f) scaled=(%f,%f)\n",
