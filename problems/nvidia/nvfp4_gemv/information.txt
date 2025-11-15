@@ -1,52 +1,80 @@
-Here's **precisely what's wrong** in submission.py, not generalized—based on your own debug output and direct code logic differences:
+**Your output is still failing with reference mismatches. Here is why and what is wrong, based on the details in `paste.txt`:**
 
 ***
 
-### **The Failure Is in FP8 Block Scale Factor Handling:**
-#### **Your tensor core kernel (submission.py) uses scale = 0.0 for most elements.**
+## 1. **Your scale decode is now correct**
+*You are getting correct `scalebyte` and `scale` values in the kernel debug prints, e.g.:*
+- `packed=0x03 scalebyte=0x40 scale=2.000000 fp4_raw=(0.000000,1.500000) scaled=(0.000000,3.000000)`
+- `packed=0x01 scalebyte=0x40 scale=2.000000 fp4_raw=(0.000000,0.500000) scaled=(0.000000,1.000000)`
+- ... for different k indices and packed bytes.
 
-- In `[KERNEL A]` and `[KERNEL B]` debug outputs, after a certain K, all scale_bytes and decoded scales become 0, so all scaled values become zero (except some very initial input).
-- The **naive kernel (submission2.py)** always has correct scale decode, multiplying FP4 decode by the correct FP8 scale (both for A and B), for every input element.
-
-***
-
-### **Pinpointed Error: How You Index FP8 Block Scales in the PTX Kernel Setup**
-1. **Your scale array index math** for shared memory decode appears to go out of bounds, or overwrites scale_bytes with zero, especially for batches $$ m \neq 0 $$ and all $$ k \geq 32 $$.
-2. In the tiling loop:
-   - You set up `scaleglobalidx = kscaletile + scaleidx` for A and B.
-   - For all tile sizes after the first, `scaleglobalidx` ends up beyond SFApacked/SFBpacked’s valid length, so any `if scaleglobalidx < Kscales` failure results in scale=1.0 or scale=0.0.
-3. If you PRINT `scaleglobalidx` in your kernel, you'll see only the first tile can read valid scales. You need to wrap/recompute per-row and per-batch stride math.
-
-#### **Compare to submission2.py (Naive kernel):**
-- Indexes `scaleidx = kidx // 16` in a single pass, correctly per-element, never exceeding bounds.
-- Always gets scale factor for the corresponding `kidx`, every element.
+This matches the reference scale decode logic exactly, so the key bug in scale handling is fixed.
 
 ***
 
-### **Output Consequences**
-Because almost all elements are decoded/scaled with `scale=0.0`, the output is zero or random, except for the first tile, first batch, and first column/block.
-
-- **First error example:**
-  ```
-  ERROR AT (0, 0, 0): 0.0 4668.0
-  ```
-  indicates kernel output `0.0` (all scale 0) vs reference `4668.0` (correct decode and scale sum).
+## 2. **But the output still mismatches the reference for all main benchmarks**
+Your output contains blocks like:
+```
+k: 16384; l: 1; m: 7168; seed: 1111 failed testing:
+mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 7118
+ERROR AT (0, 0, 0): 0.0 4668.0
+ERROR AT (1, 0, 0): 0.0 4620.5
+...
+```
+*For every major test shape, EVERY output element is zero except the very first elements of some tiles.*
 
 ***
 
-### **What To Fix:**
-- In shared memory decode (tile loader) of your PTX kernel, correct the calculation and application of fp8 block scale:
-    - **For every row and every block, confirm the shape and stride math matches both kernel and memory layout.**
-    - **NEVER let scaleglobalidx exceed scale array size.**
+## 3. **What is the new root cause?**
+### The scale decode bug is fixed, but **your kernel does not write results to the output buffer correctly**.
 
-##### **Quick check/fix plan:**
-- **Add:**
-  ```cpp
-  if (scaleglobalidx >= Kscales) printf("SCALE IDX OUT OF BOUNDS: %d\n", scaleglobalidx);
-  ```
-- **Fix:**
-  Instead of adding fixed offsets, compute scale index directly per row and k-block like you do in the naive kernel.
+**Why?**
+- **All elements are zero except potentially a few tile starts.**
+- The debug prints show correct FP4 + scale values for every k, but the output is not accumulated and written to the output buffer for most output rows.
 
-### **In summary:**
-> Your shared memory decode and scale math in the tensor-core kernel **does not correctly load the FP8 block scale**, causing your output to be zeroed except for initial elements. Your reference/naive kernel never fails this block scale lookup.
-> **Fix the scale index math in Phase 1/2, and the output will immediately match the reference**.
+This is a classic sign of either:
+- **Reduction/accumulator bug:** You may not reduce (sum across k) and store results in your output register for all threads.
+- **Output writeback stride/index bug:** You may have incorrect logic for writing the thread/block accumulator back to the output tensor in global memory (e.g., off-by-one, wrong stride, only first warp writes).
+- **Launch config bug:** e.g., blocks-per-row, threads-per-output location, or boundary math.
+
+**In the kernel, check these for every output row:**
+- Are ALL threads properly accumulating the result for each output location (not just tile or warp leaders)?
+- Is EACH thread that computes an output writing its accumulator to the correct place in the output tensor?
+- Is your mapping from grid/blockIdx/threadIdx to row/column correct for full output shape coverage?
+
+***
+
+## 4. **How to diagnose:**
+- Print the accumulator immediately before writing to output buffer for EVERY output row.
+- Print the global output index that is being written to for each thread-block.
+- Compare the index calculation and write logic in the naive kernel (which works) with your tensor-core kernel.
+
+***
+
+## 5. **Summary Table**
+
+| Kernel Stage      | Correction   | Status        | Issue Now                       |
+|-------------------|--------------|--------------|----------------------------------|
+| FP8 scale decode  | Yes          | CORRECT      | -                                |
+| FP4 decode        | Yes          | CORRECT      | -                                |
+| Output reduction and write | No   | BROKEN       | Only some tiles/rows output, rest are zero |
+| Output buffer stride/index | No   | BROKEN       | Accumulated values not written for all locations |
+
+***
+
+## **Direct Fix**
+> The next root cause is **incorrect logic in reducing over k and writing the result from PTX MMA accumulator to the output tensor**.
+> Check:
+> - Accumulator initialization per output thread.
+> - k loop reduction.
+> - Each thread's output index math and global write.
+> This must match the reference logic exactly, but in your kernel almost every output element is zero.
+
+If you paste the output buffer writeback code (last lines of kernel), I can give a concrete diff and correction.
+
+***
+
+**TL;DR:**
+You fixed the scale bug. Now, most output buffer writes are broken due to output index, reduction, or writeback logic in your kernel—causing output zero everywhere. Fix that kernel block and you will match reference results.
+
+[1](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/83167427/1ef687c6-440f-4ed5-af72-881a827d9355/paste.txt)
