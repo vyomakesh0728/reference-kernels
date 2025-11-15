@@ -1,59 +1,52 @@
-Even after you have fixed the SFA/SFB (scale factor) indexing, your kernel still fails because the error is not in the decode or per-element scale logic—it’s in the tensor core MMA (mma.sync) computation path or the final scatter/write-back of results. Here’s what’s happening:
+Here's **precisely what's wrong** in submission.py, not generalized—based on your own debug output and direct code logic differences:
 
+***
 
-1. Scale Factors Are Correct
-Your debug output for [KERNEL A] and [KERNEL B] shows that the decoded, scaled FP4 values now match the reference exactly for different rows and columns.
-The prints like scaled=(...) show per-FP4, per-scale multiplication is correct.
-Both your earlier comprehensive analysis and GPT_REVIEW confirmed that SFA/SFB bugs are fixed.
+### **The Failure Is in FP8 Block Scale Factor Handling:**
+#### **Your tensor core kernel (submission.py) uses scale = 0.0 for most elements.**
 
+- In `[KERNEL A]` and `[KERNEL B]` debug outputs, after a certain K, all scale_bytes and decoded scales become 0, so all scaled values become zero (except some very initial input).
+- The **naive kernel (submission2.py)** always has correct scale decode, multiplying FP4 decode by the correct FP8 scale (both for A and B), for every input element.
 
-2. Where the Error Appears
-Output mismatches such as ERROR AT 0, 0, 0 0.0 4668.0 (and high numbers) are observed at the final output buffer, meaning the computed values written by the kernel do NOT match the reference even though decode and scaling are correct.
-Large errors—like 0 vs 4000+—point to either:
-The wrong values are being written for some output rows/columns, or
-The MMA tiles are not being mapped to the output buffer the same way as reference.
+***
 
+### **Pinpointed Error: How You Index FP8 Block Scales in the PTX Kernel Setup**
+1. **Your scale array index math** for shared memory decode appears to go out of bounds, or overwrites scale_bytes with zero, especially for batches $$ m \neq 0 $$ and all $$ k \geq 32 $$.
+2. In the tiling loop:
+   - You set up `scaleglobalidx = kscaletile + scaleidx` for A and B.
+   - For all tile sizes after the first, `scaleglobalidx` ends up beyond SFApacked/SFBpacked’s valid length, so any `if scaleglobalidx < Kscales` failure results in scale=1.0 or scale=0.0.
+3. If you PRINT `scaleglobalidx` in your kernel, you'll see only the first tile can read valid scales. You need to wrap/recompute per-row and per-batch stride math.
 
-3. What Causes This
-Tensor core (mma.sync, ldmatrix, scatters) path is highly sensitive to lane arrangement and warp output mapping.
-The way the MMA fragments are loaded, accumulated, and then written back ("scatter") must exactly match NVIDIA's/CuTe/CUTLASS expected output layout.
-If there is any mismatch in the:
-loading logic for A and B (ldmatrix, .aligned.m8n8, etc.)
-warp lane to output row/column mapping (the “scatter”),
-or if output buffer indices are calculated incorrectly,
-…then huge differences arise, even if the dot products and per-FP4 math are otherwise correct.
+#### **Compare to submission2.py (Naive kernel):**
+- Indexes `scaleidx = kidx // 16` in a single pass, correctly per-element, never exceeding bounds.
+- Always gets scale factor for the corresponding `kidx`, every element.
 
+***
 
-4. Supporting Clues
-Your kernel does an in-kernel debug of a naive sum (i.e., a simple K loop with the decoded FP4 and scale values) alongside the MMA result.
-When you compare [KERNEL NAIVE] to the reference, the naive result matches the reference, but the tensor core result diverges.
-This is rock-solid confirmation: decode+scale are totally correct. The MMA/scatter is the culprit.
+### **Output Consequences**
+Because almost all elements are decoded/scaled with `scale=0.0`, the output is zero or random, except for the first tile, first batch, and first column/block.
 
+- **First error example:**
+  ```
+  ERROR AT (0, 0, 0): 0.0 4668.0
+  ```
+  indicates kernel output `0.0` (all scale 0) vs reference `4668.0` (correct decode and scale sum).
 
-5. What to Do Next
-Don’t change scale decode/indexing again—it’s already fixed.
-Focus on:
-Mapping how the tensor core accumulators are written to C/output: does your logic for “which lane writes which element” match the reference?
-Does each warp always write its output to the correct global row in the matrix C?
-Is the mma.sync, ldmatrix load (row/col order), and scatter block mapping correct, especially for edge cases and padded regions?
-As a debug aid, try running your kernel with the tensor core code temporarily replaced by the naive sum for all outputs. If that matches, it's purely a tiling/scatter bug.
+***
 
+### **What To Fix:**
+- In shared memory decode (tile loader) of your PTX kernel, correct the calculation and application of fp8 block scale:
+    - **For every row and every block, confirm the shape and stride math matches both kernel and memory layout.**
+    - **NEVER let scaleglobalidx exceed scale array size.**
 
-Summary Table:
-StepIs It Correct?Where To Check Next
-SFA/SFB Indexing
-✅ Fixed, matches reference
-FP4+Scale Decode
-✅ Matches reference debug
-Naive Kernel Output
-✅ Matches reference
-MMA Kernel Output
-❌ Wrong, value/row mismatches
-MMA/scatter/ldmatrix/warp mapping
+##### **Quick check/fix plan:**
+- **Add:**
+  ```cpp
+  if (scaleglobalidx >= Kscales) printf("SCALE IDX OUT OF BOUNDS: %d\n", scaleglobalidx);
+  ```
+- **Fix:**
+  Instead of adding fixed offsets, compute scale index directly per row and k-block like you do in the naive kernel.
 
-
-Bottom Line:
-The only reason your kernel still fails is due to the tensor core output tile mapping—not decode, not scale, not SFA/SFB.
-Fix or further debug your mma.sync, ldmatrix loads, and the output writeback/scatter logic to match reference.
-Use naive computation (+print debug) to validate that decode/scaling are correct.
-If you want advice on how to debug or visualize where your scatter is going wrong, just ask!
+### **In summary:**
+> Your shared memory decode and scale math in the tensor-core kernel **does not correctly load the FP8 block scale**, causing your output to be zeroed except for initial elements. Your reference/naive kernel never fails this block scale lookup.
+> **Fix the scale index math in Phase 1/2, and the output will immediately match the reference**.
