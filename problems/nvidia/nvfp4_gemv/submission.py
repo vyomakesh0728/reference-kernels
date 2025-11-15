@@ -160,15 +160,14 @@ fp4_gemv_sm100_ptx_mma(
             int m_idx = m_cta + row;
             if (m_idx < M && (k_packed_tile + col_packed) < K_packed) {
                 uint8_t packed = A_batch[m_idx * K_packed + k_packed_tile + col_packed];
-                int scale_idx = col_packed / 8;
-                // Initialize the scale to 1.0f (no scaling) and scale byte to 0.
+                // Compute scale index based on absolute k position (matching naive kernel)
+                int k_abs_first = k_tile + col_packed * 2;  // First FP4 element index
+                int scale_idx = k_abs_first >> 4;  // Divide by 16 (one scale per 16 elements)
+                // Initialize the scale to 1.0f (no scaling)
                 half scale_h = __float2half(1.0f);
-                uint8_t scale_byte = 0;
-                // Compute global scale index for A: one scale per 16 FP4 values
-                int scale_global_idx = k_scale_tile + scale_idx;
                 // Apply the scale if within bounds
-                if (scale_global_idx < K_scales) {
-                    scale_byte = SFA_batch[m_idx * K_scales + scale_global_idx];
+                if (scale_idx < K_scales) {
+                    uint8_t scale_byte = SFA_batch[m_idx * K_scales + scale_idx];
                     float scale_val = decode_fp8_e4m3(scale_byte);
                     scale_h = __float2half(scale_val);
                 }
@@ -213,14 +212,15 @@ fp4_gemv_sm100_ptx_mma(
             if ((k_packed_tile + col_packed) < K_packed) {
                 // Load the packed FP4 value from the first replica (index 0) of B.
                 const uint8_t packed = B_batch[k_packed_tile + col_packed];
-                const int scale_idx = col_packed / 8;
+                // Compute scale index based on absolute k position (matching naive kernel)
+                int k_abs_first = k_tile + col_packed * 2;  // First FP4 element index
+                int scale_idx = k_abs_first >> 4;  // Divide by 16 (one scale per 16 elements)
                 // Initialize the scale to 1.0f (no scaling) and scale byte to 0.
                 half scale_h = __float2half(1.0f);
                 uint8_t scale_byte = 0;
-                if ((k_scale_tile + scale_idx) < K_scales) {
-                    int scale_global_idx = k_scale_tile + scale_idx;
+                if (scale_idx < K_scales) {
                     // Row 0 because GEMV has N=1; SFB_batch is [128, K_scales]
-                    scale_byte = SFB_batch[0 * K_scales + scale_global_idx];
+                    scale_byte = SFB_batch[0 * K_scales + scale_idx];
                     float scale_val = decode_fp8_e4m3(scale_byte);
                     scale_h = __float2half(scale_val);
                 }
@@ -608,7 +608,7 @@ def custom_kernel(data: input_t) -> output_t:
 
     Target: <55µs geometric mean, >70% TC utilization
     """
-    a, b, sfa_ref_cpu, sfb_ref_cpu, _, _, c = data
+    a, b, sfa_ref_cpu, sfb_ref_cpu, sfa_permuted, sfb_permuted, c = data
 
     M, _, L = c.shape
     K = a.shape[1] * 2
