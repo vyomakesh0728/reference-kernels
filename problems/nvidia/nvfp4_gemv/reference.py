@@ -32,15 +32,61 @@ def ref_kernel(
     PyTorch reference implementation of NVFP4 block-scaled GEMV.
     """
     a_ref, b_ref, sfa_ref_cpu, sfb_ref_cpu, _, _, c_ref = data
-    
+
     # Get dimensions from MxNxL layout
-    _, _, l = c_ref.shape
+    m, _, l = c_ref.shape
+    k = a_ref.shape[1] * 2
+    k_scales = k // 16
+
+    # ========== DEBUG PRINTS ==========
+    print("\n" + "="*60)
+    print("DEBUG: reference.py ref_kernel")
+    print("="*60)
+
+    print(f"\nInput tensor shapes:")
+    print(f"  a_ref: {a_ref.shape} dtype={a_ref.dtype}")
+    print(f"  b_ref: {b_ref.shape} dtype={b_ref.dtype}")
+    print(f"  sfa_ref_cpu: {sfa_ref_cpu.shape} dtype={sfa_ref_cpu.dtype}")
+    print(f"  sfb_ref_cpu: {sfb_ref_cpu.shape} dtype={sfb_ref_cpu.dtype}")
+    print(f"  c_ref: {c_ref.shape} dtype={c_ref.dtype}")
+    print(f"  M={m}, K={k}, L={l}, K_scales={k_scales}")
+
+    # Print raw bytes for comparison (view as uint8)
+    a_bytes = a_ref.view(torch.uint8)
+    b_bytes = b_ref.view(torch.uint8)
+    sfa_bytes = sfa_ref_cpu.view(torch.uint8)
+    sfb_bytes = sfb_ref_cpu.view(torch.uint8)
+
+    print(f"\nFirst 8 bytes of tensors (batch 0, i.e. [:,:,0]):")
+    print(f"  a_bytes[0,:8,0]: {a_bytes[0, :min(8, a_bytes.shape[1]), 0].tolist()}")
+    print(f"  b_bytes[0,:8,0]: {b_bytes[0, :min(8, b_bytes.shape[1]), 0].tolist()}")
+    print(f"  sfa_bytes[0,:8,0]: {sfa_bytes[0, :min(8, sfa_bytes.shape[1]), 0].tolist()}")
+    print(f"  sfb_bytes[0,:8,0]: {sfb_bytes[0, :min(8, sfb_bytes.shape[1]), 0].tolist()}")
+
+    # Decode first FP4 value manually to verify nibble order
+    if a_bytes.numel() > 0:
+        packed_val = a_bytes[0, 0, 0].item()
+        hi_nibble = (packed_val >> 4) & 0x0F
+        lo_nibble = packed_val & 0x0F
+        fp4_lut = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+                   -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+        print(f"\nFP4 decoding check (byte={packed_val:#04x}):")
+        print(f"  High nibble (bits 7-4) = {hi_nibble:#x} -> FP4 value = {fp4_lut[hi_nibble]} (element 0)")
+        print(f"  Low nibble (bits 3-0)  = {lo_nibble:#x} -> FP4 value = {fp4_lut[lo_nibble]} (element 1)")
 
     # Call torch._scaled_mm to compute the GEMV result
     for l_idx in range(l):
         # Convert the scale factor tensor to blocked format
         scale_a = to_blocked(sfa_ref_cpu[:, :, l_idx])
         scale_b = to_blocked(sfb_ref_cpu[:, :, l_idx])
+
+        if l_idx == 0:
+            print(f"\nBlocked scale factor shapes (batch 0):")
+            print(f"  scale_a (blocked): {scale_a.shape}")
+            print(f"  scale_b (blocked): {scale_b.shape}")
+            print(f"  scale_a[:8]: {scale_a[:8].view(torch.uint8).tolist()}")
+            print(f"  scale_b[:8]: {scale_b[:8].view(torch.uint8).tolist()}")
+
         # (m, k) @ (n, k).T -> (m, n)
         res = torch._scaled_mm(
             a_ref[:, :, l_idx],
@@ -51,6 +97,11 @@ def ref_kernel(
             out_dtype=torch.float16,
         )
         c_ref[:, 0, l_idx] = res[:, 0]
+
+    print(f"\nOutput c_ref: {c_ref.shape}")
+    print(f"  c_ref[:5,0,0] (first 5 elements): {c_ref[:min(5, c_ref.shape[0]), 0, 0].tolist()}")
+    print("="*60 + "\n")
+
     return c_ref
 
 
