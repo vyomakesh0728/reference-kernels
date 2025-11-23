@@ -688,6 +688,8 @@ void launch_fp4_gemv_optimized(
         tma_ok = tma_ok && (resSFB == CUDA_SUCCESS);
     }
 
+    // TEMPORARY: Disable TMA to test cp.async path
+    tma_ok = false;
     if (tma_ok) {
         check_cuda(cudaMalloc(&d_map_A, sizeof(CUtensorMap)), "cudaMalloc d_map_A");
         check_cuda(cudaMalloc(&d_map_B, sizeof(CUtensorMap)), "cudaMalloc d_map_B");
