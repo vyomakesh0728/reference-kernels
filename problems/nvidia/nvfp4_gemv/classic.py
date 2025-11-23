@@ -677,15 +677,15 @@ void launch_fp4_gemv_optimized(
 
         cuuint64_t dims_B[2] = {static_cast<cuuint64_t>(K_packed), static_cast<cuuint64_t>(L) * 128ull};
         cuuint64_t strides_B[1] = {static_cast<cuuint64_t>(K_packed)};
-        // Box loads one batch: [K_packed, 128] not entire tensor
-        cuuint32_t box_B[2] = {static_cast<cuuint32_t>(K_packed), 128u};
+        // GEMV only needs row 0 of each batch (N=1), not all 128 rows
+        cuuint32_t box_B[2] = {static_cast<cuuint32_t>(K_packed), 1u};
         CUresult resB = encode_tma(map_B, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, B_ptr, dims_B, strides_B, box_B);
         tma_ok = tma_ok && (resB == CUDA_SUCCESS);
 
         cuuint64_t dims_SFB[2] = {static_cast<cuuint64_t>(K_scales), static_cast<cuuint64_t>(L) * 128ull};
         cuuint64_t strides_SFB[1] = {static_cast<cuuint64_t>(K_scales)};
-        // Box loads one batch: [K_scales, 128] not entire tensor
-        cuuint32_t box_SFB[2] = {static_cast<cuuint32_t>(K_scales), 128u};
+        // GEMV only needs row 0 of each batch (N=1), not all 128 rows
+        cuuint32_t box_SFB[2] = {static_cast<cuuint32_t>(K_scales), 1u};
         CUresult resSFB = encode_tma(map_SFB, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, SFB_ptr, dims_SFB, strides_SFB, box_SFB);
         tma_ok = tma_ok && (resSFB == CUDA_SUCCESS);
     }
