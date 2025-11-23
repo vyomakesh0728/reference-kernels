@@ -308,9 +308,10 @@ fp4_gemv_streaming(
     auto prefetch_tile = [&](int stage, int k_tile_base) {
         if (use_tma_a) {
             if (warp_id == 0 && lane_id == 0) {
-                uint32_t c0 = static_cast<uint32_t>(k_tile_base >> 1);
+                // Coordinates match dims order [L, M, K_packed]
+                uint32_t c0 = static_cast<uint32_t>(batch);
                 uint32_t c1 = static_cast<uint32_t>(m_tile);
-                uint32_t c2 = static_cast<uint32_t>(batch);
+                uint32_t c2 = static_cast<uint32_t>(k_tile_base >> 1);
                 tma_load_3d(
                     a_packed_stage[stage],
                     desc_A,
@@ -627,22 +628,24 @@ void launch_fp4_gemv_optimized(
     };
 
     if (tma_ok) {
-        cuuint64_t dims_A[3] = {static_cast<cuuint64_t>(K_packed), static_cast<cuuint64_t>(M), static_cast<cuuint64_t>(L)};
+        // Tensor layout after permute(2,0,1).contiguous() is [L, M, K_packed]
+        cuuint64_t dims_A[3] = {static_cast<cuuint64_t>(L), static_cast<cuuint64_t>(M), static_cast<cuuint64_t>(K_packed)};
 
         // Ensure box dimensions don't exceed TMA hardware limit (256) or tensor dimensions
         cuuint32_t box_k = static_cast<cuuint32_t>(std::min({(uint64_t)kTileKPacked, K_packed, (uint64_t)kTMABoxLimit}));
         cuuint32_t box_m = static_cast<cuuint32_t>(std::min({(uint64_t)kTileM, (uint64_t)M, (uint64_t)kTMABoxLimit}));
-        cuuint32_t box_A[3] = {box_k, box_m, 1u};
+        // Box order matches dims order [L, M, K_packed]
+        cuuint32_t box_A[3] = {1u, box_m, box_k};
 
         // 4. Print debug info before encoding
         printf("TMA Debug: A_ptr = %p, map_A_ptr = %p\n", A_ptr, (void*)map_A_ptr);
-        printf("TMA Debug: dims = [%llu, %llu, %llu], box = [%u, %u, %u]\n",
+        printf("TMA Debug: dims = [L=%llu, M=%llu, K_packed=%llu], box = [%u, %u, %u]\n",
                (unsigned long long)dims_A[0], (unsigned long long)dims_A[1], (unsigned long long)dims_A[2],
                box_A[0], box_A[1], box_A[2]);
         printf("TMA Debug: kTileKPacked=%d, kTileM=%d, kTMABoxLimit=%d\n", kTileKPacked, kTileM, kTMABoxLimit);
 
-        // Validate box dimensions
-        if (box_A[0] > 256 || box_A[1] > 256) {
+        // Validate box dimensions (all three must be <= 256)
+        if (box_A[0] > 256 || box_A[1] > 256 || box_A[2] > 256) {
             printf("ERROR: TMA box dimension exceeds 256 limit! box=[%u, %u, %u]\n",
                    box_A[0], box_A[1], box_A[2]);
             tma_ok = false;
@@ -768,6 +771,10 @@ def custom_kernel(data: input_t) -> output_t:
     # Reinterpret as raw bytes
     a_bytes = a.view(torch.uint8)
     b_bytes = b.view(torch.uint8)
+
+    # Debug: Print tensor shape and stride for TMA verification
+    print(f"TMA Debug (Python): a shape={a.shape}, stride={a.stride()}")
+    print(f"TMA Debug (Python): a_bytes shape={a_bytes.shape}, stride={a_bytes.stride()}")
 
     # Scale factors: prefer pre-permuted tensors if provided
     # sfa_permuted should already be [L, M, K_scales], and sfb_permuted [L, 128, K_scales]
