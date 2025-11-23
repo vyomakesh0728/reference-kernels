@@ -477,20 +477,20 @@ fp4_gemv_streaming(
         int curr_cols = (curr_k + 1) >> 1;
         int scale_count = (curr_k + 15) >> 4;
 
-        if (is_consumer) {
-            for (int idx = tid; idx < tile_rows * scale_count; idx += Threads) {
-                int row = idx / scale_count;
-                int s = idx - row * scale_count;
-                half scale_h = __float2half(0.0f);
-                if (row < tile_rows) {
-                    scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][row * TileScaleCount + s]));
-                }
-                a_scale_smem[row * TileScaleCount + s] = scale_h;
+        // ALL threads decode scales (not just consumers) to cover all indices
+        for (int idx = tid; idx < tile_rows * scale_count; idx += Threads) {
+            int row = idx / scale_count;
+            int s = idx - row * scale_count;
+            half scale_h = __float2half(0.0f);
+            if (row < tile_rows) {
+                scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][row * TileScaleCount + s]));
             }
+            a_scale_smem[row * TileScaleCount + s] = scale_h;
         }
         __syncthreads();
 
-        if (is_consumer) {
+        // ALL threads decode A tile (not just consumers) to cover all indices
+        {
             uint8_t* a_stage = a_packed_stage[stage];
             for (int idx = tid; idx < tile_rows * curr_cols; idx += Threads) {
                 int row = idx / curr_cols;
