@@ -683,16 +683,10 @@ void launch_fp4_gemv_optimized(
 
             cuuint32_t box_A[2] = {box_m, box_k};
 
-            // For rank=2, strides has (rank-1) = 1 element
-            cuuint64_t strides_A[1] = {
-                static_cast<cuuint64_t>(K_packed)  // byte stride for M dimension
-            };
-
             printf("TMA Debug: Using RANK=2 for L=1\n");
             printf("TMA Debug: dims = [M=%llu, K_packed=%llu], box = [%u, %u]\n",
                    (unsigned long long)dims_A[0], (unsigned long long)dims_A[1],
                    box_A[0], box_A[1]);
-            printf("TMA Debug: strides_A = [%llu]\n", (unsigned long long)strides_A[0]);
 
             // Validate box dimensions
             if (box_A[0] > 256 || box_A[1] > 256) {
@@ -702,12 +696,13 @@ void launch_fp4_gemv_optimized(
             }
 
             if (tma_ok) {
+                // For contiguous 2D row-major, pass nullptr for globalStrides
                 CUresult resA = encode_tma(map_A_ptr,
                                            CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                            2,  // rank=2 for 2D access
                                            A_ptr,
                                            dims_A,
-                                           strides_A,
+                                           nullptr,  // nullptr for contiguous row-major layout
                                            box_A);
 
                 printf("TMA Encode A Result: %d\n", (int)resA);
