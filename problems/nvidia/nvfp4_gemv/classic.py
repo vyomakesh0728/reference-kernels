@@ -572,17 +572,24 @@ fp4_gemv_streaming(
 
     int active_warps_total = (tile_rows + 15) / 16;
     if (is_consumer && (warp_id - 2) < active_warps_total) {
-        // For m16n8k16 MMA, thread t holds rows (t % 8) and (t % 8) + 8
-        // Use threads 0-7 which have column 0 results for GEMV
-        if (lane_id < 8) {
-            int row0 = (warp_id - 2) * 16 + lane_id;
-            int row1 = row0 + 8;
-            int global_row0 = m_tile + row0;
-            int global_row1 = m_tile + row1;
-            if (row0 < tile_rows && global_row0 < M) {
+        // For m16n8k16 MMA: row = thread_id / 4, col = (thread_id % 4) * 2
+        // Column 0 threads are 0, 4, 8, 12, 16, 20, 24, 28 (col_in_quad == 0)
+        // Their rows are quad = lane_id / 4 = 0, 1, 2, 3, 4, 5, 6, 7
+        int quad = lane_id >> 2;
+        int col_in_quad = lane_id & 3;
+
+        if (col_in_quad == 0) {
+            int warp_row_offset = (warp_id - 2) * 16;
+            int row0 = quad;
+            int row1 = quad + 8;
+
+            int global_row0 = m_tile + warp_row_offset + row0;
+            int global_row1 = m_tile + warp_row_offset + row1;
+
+            if (global_row0 < M) {
                 D_batch[global_row0] = __float2half(c_frag_0);
             }
-            if (row1 < tile_rows && global_row1 < M) {
+            if (global_row1 < M) {
                 D_batch[global_row1] = __float2half(c_frag_2);
             }
         }
