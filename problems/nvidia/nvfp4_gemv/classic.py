@@ -554,9 +554,10 @@ fp4_gemv_streaming(
 
     int active_warps_total = (tile_rows + 15) / 16;
     if (is_consumer && (warp_id - 2) < active_warps_total) {
-        if ((lane_id & 3) == 0) {
-            int group = lane_id >> 2;
-            int row0 = (warp_id - 2) * 16 + group;
+        // For m16n8k16 MMA, thread t holds rows (t % 8) and (t % 8) + 8
+        // Threads 0-7 have column 0 results, which we need for GEMV
+        if (lane_id < 8) {
+            int row0 = (warp_id - 2) * 16 + lane_id;
             int row1 = row0 + 8;
             int global_row0 = m_tile + row0;
             int global_row1 = m_tile + row1;
