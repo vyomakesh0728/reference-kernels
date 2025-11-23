@@ -575,6 +575,7 @@ void launch_fp4_gemv_optimized(
     const uint64_t K_packed = static_cast<uint64_t>(K / 2);
     const uint64_t K_scales = static_cast<uint64_t>(K / 16);
 
+    // 1. Use heap-aligned allocation for CUtensorMap descriptor
     std::vector<uint8_t> map_buf(sizeof(CUtensorMap) + 64);
     void* raw_ptr = map_buf.data();
     size_t space = map_buf.size();
@@ -590,22 +591,28 @@ void launch_fp4_gemv_optimized(
     CUtensorMap* d_map_SFB = nullptr;
     bool tma_ok = true;
 
+    // 2. Ensure tensor's device pointer is 64-byte aligned
+    if ((uintptr_t)A_ptr % 16 != 0) {
+        printf("WARNING: A_ptr is not 16-byte aligned: %p\n", A_ptr);
+        tma_ok = false;
+    }
+
     auto encode_tma = [&](CUtensorMap* out,
                           CUtensorMapDataType type,
                           cuuint32_t rank,
                           const void* base,
                           const cuuint64_t* dims,
-                          const cuuint64_t* strides,
                           const cuuint32_t* box) {
+        // 3. Pass nullptr for globalStrides (contiguous tensor)
         return cuTensorMapEncodeTiled(
             out,
             type,
             rank,
             const_cast<void*>(base),
             dims,
-            strides,
+            nullptr,  // globalStrides - nullptr for contiguous standard layout
             box,
-            nullptr, // elementStrides must be nullptr for contiguous standard layout
+            nullptr,  // elementStrides - nullptr for contiguous standard layout
             CU_TENSOR_MAP_INTERLEAVE_NONE,
             CU_TENSOR_MAP_SWIZZLE_NONE,
             CU_TENSOR_MAP_L2_PROMOTION_NONE,
@@ -617,13 +624,20 @@ void launch_fp4_gemv_optimized(
         cuuint64_t dims_A[3] = {static_cast<cuuint64_t>(K_packed), static_cast<cuuint64_t>(M), static_cast<cuuint64_t>(L)};
         cuuint32_t box_A[3] = {static_cast<cuuint32_t>(kTileKPacked), static_cast<cuuint32_t>(kTileM), 1u};
 
-        // Pass nullptr for strides since tensor is contiguous
-        CUresult resA = encode_tma(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, A_ptr, dims_A, nullptr, box_A);
+        // 4. Print debug info before encoding
+        printf("TMA Debug: A_ptr = %p, map_A_ptr = %p\n", A_ptr, (void*)map_A_ptr);
+        printf("TMA Debug: dims = [%llu, %llu, %llu], box = [%u, %u, %u]\n",
+               (unsigned long long)dims_A[0], (unsigned long long)dims_A[1], (unsigned long long)dims_A[2],
+               box_A[0], box_A[1], box_A[2]);
+
+        CUresult resA = encode_tma(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, A_ptr, dims_A, box_A);
+        printf("TMA Encode A Result: %d\n", (int)resA);
         if (resA != CUDA_SUCCESS) {
-            if ((uintptr_t)A_ptr % 16 != 0) printf("A_ptr not 16-byte aligned: %p\n", A_ptr);
+            const char* err_str = nullptr;
+            cuGetErrorString(resA, &err_str);
+            printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
             tma_ok = false;
         }
-        printf("TMA Encode A Result: %d\n", (int)resA);
     }
 
     if (tma_ok) {
