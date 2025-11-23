@@ -572,18 +572,21 @@ fp4_gemv_streaming(
 
     int active_warps_total = (tile_rows + 15) / 16;
     if (is_consumer && (warp_id - 2) < active_warps_total) {
-        // For m16n8k16 MMA, thread t holds rows (t % 8) and (t % 8) + 8
-        // Threads 0-7 have column 0 results, which we need for GEMV
-        if (lane_id < 8) {
-            int row0 = (warp_id - 2) * 16 + lane_id;
-            int row1 = row0 + 8;
+        int quad = lane_id >> 2;        // 0-7 for lanes 0-31
+        int col_in_quad = lane_id & 3;  // 0-3
+
+        if (col_in_quad == 0) {  // ✅ Lanes 0, 4, 8, 12, 16, 20, 24, 28
+            int row0 = ((warp_id - 2) * 16) + quad;     // Base row
+            int row1 = row0 + 8;                         // +8 stride
+
             int global_row0 = m_tile + row0;
             int global_row1 = m_tile + row1;
+
             if (row0 < tile_rows && global_row0 < M) {
-                D_batch[global_row0] = __float2half(c_frag_0);
+                D_batch[global_row0] = __float2half(c_frag_0);  // Use c_frag_0 or c_frag0
             }
             if (row1 < tile_rows && global_row1 < M) {
-                D_batch[global_row1] = __float2half(c_frag_2);
+                D_batch[global_row1] = __float2half(c_frag_2);  // Use c_frag_2 or c_frag2
             }
         }
     }
@@ -819,9 +822,9 @@ def custom_kernel(data: input_t) -> output_t:
     K_scales = K // 16
 
     # ========== DEBUG PRINTS ==========
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("DEBUG: classic.py custom_kernel")
-    print("="*60)
+    print("=" * 60)
 
     # Input shapes from generate_input
     print(f"\nInput tensor shapes (from generate_input):")
@@ -841,8 +844,8 @@ def custom_kernel(data: input_t) -> output_t:
     c = c.clone().permute(2, 0, 1).contiguous().cuda()
 
     print(f"\nAfter permute(2, 0, 1):")
-    print(f"  a: {a.shape} (expected [{L}, {M}, {K//2}])")
-    print(f"  b: {b.shape} (expected [{L}, 128, {K//2}])")
+    print(f"  a: {a.shape} (expected [{L}, {M}, {K // 2}])")
+    print(f"  b: {b.shape} (expected [{L}, 128, {K // 2}])")
     print(f"  c: {c.shape} (expected [{L}, {M}, 1])")
 
     # Shape assertions to catch corruption early
@@ -870,7 +873,9 @@ def custom_kernel(data: input_t) -> output_t:
         sfa_bytes = (
             sfa_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda().view(torch.uint8)
         )
-        print(f"\nUsing sfa_ref_cpu.permute(2, 0, 1): {sfa_ref_cpu.shape} -> {(L, M, K_scales)}")
+        print(
+            f"\nUsing sfa_ref_cpu.permute(2, 0, 1): {sfa_ref_cpu.shape} -> {(L, M, K_scales)}"
+        )
     if sfb_permuted is not None and list(sfb_permuted.shape) == [L, 128, K_scales]:
         sfb_bytes = sfb_permuted.contiguous().cuda().view(torch.uint8)
         print(f"Using pre-permuted sfb_permuted")
@@ -878,7 +883,9 @@ def custom_kernel(data: input_t) -> output_t:
         sfb_bytes = (
             sfb_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda().view(torch.uint8)
         )
-        print(f"Using sfb_ref_cpu.permute(2, 0, 1): {sfb_ref_cpu.shape} -> {(L, 128, K_scales)}")
+        print(
+            f"Using sfb_ref_cpu.permute(2, 0, 1): {sfb_ref_cpu.shape} -> {(L, 128, K_scales)}"
+        )
 
     print(f"\nScale bytes shapes:")
     print(f"  sfa_bytes: {sfa_bytes.shape}")
@@ -886,21 +893,45 @@ def custom_kernel(data: input_t) -> output_t:
 
     # Print first few raw values for debugging
     print(f"\nFirst 8 bytes of tensors (batch 0):")
-    print(f"  a_bytes[0,0,:8]: {a_bytes[0, 0, :min(8, a_bytes.shape[2])].tolist()}")
-    print(f"  b_bytes[0,0,:8]: {b_bytes[0, 0, :min(8, b_bytes.shape[2])].tolist()}")
-    print(f"  sfa_bytes[0,0,:8]: {sfa_bytes[0, 0, :min(8, sfa_bytes.shape[2])].tolist()}")
-    print(f"  sfb_bytes[0,0,:8]: {sfb_bytes[0, 0, :min(8, sfb_bytes.shape[2])].tolist()}")
+    print(f"  a_bytes[0,0,:8]: {a_bytes[0, 0, : min(8, a_bytes.shape[2])].tolist()}")
+    print(f"  b_bytes[0,0,:8]: {b_bytes[0, 0, : min(8, b_bytes.shape[2])].tolist()}")
+    print(
+        f"  sfa_bytes[0,0,:8]: {sfa_bytes[0, 0, : min(8, sfa_bytes.shape[2])].tolist()}"
+    )
+    print(
+        f"  sfb_bytes[0,0,:8]: {sfb_bytes[0, 0, : min(8, sfb_bytes.shape[2])].tolist()}"
+    )
 
     # Decode first FP4 value manually to verify nibble order
     if a_bytes.numel() > 0:
         packed_val = a_bytes[0, 0, 0].item()
         hi_nibble = (packed_val >> 4) & 0x0F
         lo_nibble = packed_val & 0x0F
-        fp4_lut = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-                   -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+        fp4_lut = [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ]
         print(f"\nFP4 decoding check (byte={packed_val:#04x}):")
-        print(f"  High nibble (bits 7-4) = {hi_nibble:#x} -> FP4 value = {fp4_lut[hi_nibble]} (element 0)")
-        print(f"  Low nibble (bits 3-0)  = {lo_nibble:#x} -> FP4 value = {fp4_lut[lo_nibble]} (element 1)")
+        print(
+            f"  High nibble (bits 7-4) = {hi_nibble:#x} -> FP4 value = {fp4_lut[hi_nibble]} (element 0)"
+        )
+        print(
+            f"  Low nibble (bits 3-0)  = {lo_nibble:#x} -> FP4 value = {fp4_lut[lo_nibble]} (element 1)"
+        )
 
     # Launch SM100 tensor core kernel
     mod = get_module()
@@ -908,13 +939,15 @@ def custom_kernel(data: input_t) -> output_t:
 
     # Print output before permute back
     print(f"\nOutput c before permute back: {c.shape}")
-    print(f"  c[0,:5,0] (first 5 rows of batch 0): {c[0, :min(5, c.shape[1]), 0].tolist()}")
+    print(
+        f"  c[0,:5,0] (first 5 rows of batch 0): {c[0, : min(5, c.shape[1]), 0].tolist()}"
+    )
 
     # Permute output back
     c = c.permute(1, 2, 0).contiguous()  # [M, 1, L]
 
     print(f"\nOutput c after permute: {c.shape}")
-    print(f"  c[:5,0,0] (first 5 elements): {c[:min(5, c.shape[0]), 0, 0].tolist()}")
-    print("="*60 + "\n")
+    print(f"  c[:5,0,0] (first 5 elements): {c[: min(5, c.shape[0]), 0, 0].tolist()}")
+    print("=" * 60 + "\n")
 
     return c
