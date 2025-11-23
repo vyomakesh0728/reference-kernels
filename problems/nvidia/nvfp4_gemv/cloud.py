@@ -21,7 +21,6 @@ cuda_source = r"""
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
-
 __constant__ float fp4_e2m1_lut_float[16] = {
     0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
     -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
@@ -116,15 +115,17 @@ __device__ __forceinline__ void tma_load_2d(void* smem_ptr,
     uint32_t mbar_addr = cvta_to_shared_u32(mbar);
     mbarrier_arrive_expect_tx(mbar, bytes);
 
-    // Coordinate order: c0 (Rank 0/K), c1 (Rank 1/M)
+    uint32_t c0 = coord0;
+    uint32_t c1 = coord1;
+
     asm volatile(
         "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes "
         "[%0], [%1, {%2, %3}], [%4];\n"
         :
         : "r"(smem_addr),
           "l"(desc),
-          "r"(coord0),
-          "r"(coord1),
+          "r"(c0),
+          "r"(c1),
           "r"(mbar_addr)
     );
 }
@@ -140,16 +141,19 @@ __device__ __forceinline__ void tma_load_3d(void* smem_ptr,
     uint32_t mbar_addr = cvta_to_shared_u32(mbar);
     mbarrier_arrive_expect_tx(mbar, bytes);
 
-    // Coordinate order: c0 (Rank 0/K), c1 (Rank 1/M), c2 (Rank 2/L)
+    uint32_t c0 = coord0;
+    uint32_t c1 = coord1;
+    uint32_t c2 = coord2;
+
     asm volatile(
         "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes "
         "[%0], [%1, {%2, %3, %4}], [%5];\n"
         :
         : "r"(smem_addr),
           "l"(desc),
-          "r"(coord0),
-          "r"(coord1),
-          "r"(coord2),
+          "r"(c0),
+          "r"(c1),
+          "r"(c2),
           "r"(mbar_addr)
     );
 }
@@ -205,9 +209,11 @@ fp4_gemv_streaming(
     uint64_t* mbar_a = reinterpret_cast<uint64_t*>(smem + offset);
     offset += StageCount * sizeof(uint64_t);
     offset = align_up(offset, 16);
-
-    // Skip unused mbar space
-    offset += 2 * sizeof(uint64_t);
+    uint64_t* mbar_b = reinterpret_cast<uint64_t*>(smem + offset);
+    offset += sizeof(uint64_t);
+    offset = align_up(offset, 16);
+    uint64_t* mbar_sfb = reinterpret_cast<uint64_t*>(smem + offset);
+    offset += sizeof(uint64_t);
     offset = align_up(offset, 16);
 
     uint8_t* smem_base = smem;
@@ -314,7 +320,7 @@ fp4_gemv_streaming(
     }
     __syncthreads();
 
-    // Decode B
+    // Decode B vector
     for (int idx = tid; idx < K_packed; idx += Threads) {
         int k_base = idx * 2;
         int scale_idx = idx >> 3;
@@ -333,25 +339,29 @@ fp4_gemv_streaming(
     auto prefetch_tile = [&](int stage, int k_tile_base) {
         if (use_tma_a) {
             if (warp_id == 0 && lane_id == 0) {
-                // Coordinate order must match Descriptor: (Fastest/K, Slowest/M, [Batch/L])
-                // k_tile_base is in elements, convert to packed coordinates
-                uint32_t c_k = static_cast<uint32_t>(k_tile_base >> 1); // Rank 0 (Fast)
-                uint32_t c_m = static_cast<uint32_t>(m_tile);          // Rank 1 (Slow)
-
                 if (L == 1) {
+                    // For rank=2: coordinates are (m_tile, k_tile_coord)
+                    uint32_t c0 = static_cast<uint32_t>(m_tile);
+                    uint32_t c1 = static_cast<uint32_t>(k_tile_base >> 1);
                     tma_load_2d(
                         a_packed_stage[stage],
                         desc_A,
-                        c_k, c_m,
+                        c0,
+                        c1,
                         static_cast<uint32_t>(TileM * TileKPacked),
                         &mbar_a[stage]
                     );
                 } else {
-                    uint32_t c_l = static_cast<uint32_t>(batch);       // Rank 2
+                    // For rank=3: coordinates are (batch, m_tile, k_tile_coord)
+                    uint32_t c0 = static_cast<uint32_t>(batch);
+                    uint32_t c1 = static_cast<uint32_t>(m_tile);
+                    uint32_t c2 = static_cast<uint32_t>(k_tile_base >> 1);
                     tma_load_3d(
                         a_packed_stage[stage],
                         desc_A,
-                        c_k, c_m, c_l,
+                        c0,
+                        c1,
+                        c2,
                         static_cast<uint32_t>(TileM * TileKPacked),
                         &mbar_a[stage]
                     );
@@ -572,7 +582,11 @@ void launch_fp4_gemv_optimized(
     constexpr int kTileScaleCount = kTileK / 16;
     constexpr int kStageCount = 3;
     constexpr int kAStride = kTileK + 8;
+
+    // TMA hardware constraint: box dimensions must be <= 256 elements per dimension
     constexpr int kTMABoxLimit = 256;
+    static_assert(kTileM <= kTMABoxLimit, "kTileM exceeds TMA box limit of 256");
+    static_assert(kTileKPacked <= kTMABoxLimit, "kTileKPacked exceeds TMA box limit of 256");
 
     auto align_up = [](size_t x, size_t align) {
         return (x + align - 1) & ~(align - 1);
@@ -611,21 +625,31 @@ void launch_fp4_gemv_optimized(
     };
 
     const uint64_t K_packed = static_cast<uint64_t>(K / 2);
-    (void)sizeof(K / 16);
+    const uint64_t K_scales = static_cast<uint64_t>(K / 16);
 
+    bool use_tma_a = true;
+
+    // 1. Use heap-aligned allocation for CUtensorMap descriptor
     std::vector<uint8_t> map_buf(sizeof(CUtensorMap) + 64);
     void* raw_ptr = map_buf.data();
     size_t space = map_buf.size();
     void* aligned_ptr = std::align(64, sizeof(CUtensorMap), raw_ptr, space);
     if (!aligned_ptr) throw std::runtime_error("Failed to align CUtensorMap");
+
+    // Zero-initialize the memory to prevent garbage values
     std::memset(aligned_ptr, 0, sizeof(CUtensorMap));
     CUtensorMap* map_A_ptr = reinterpret_cast<CUtensorMap*>(aligned_ptr);
+
     CUtensorMap* d_map_A = nullptr;
     CUtensorMap* d_map_B = nullptr;
     CUtensorMap* d_map_SFB = nullptr;
     bool tma_ok = true;
 
-    if ((uintptr_t)A_ptr % 16 != 0) tma_ok = false;
+    // 2. Ensure tensor's device pointer is 64-byte aligned
+    if ((uintptr_t)A_ptr % 16 != 0) {
+        printf("WARNING: A_ptr is not 16-byte aligned: %p\n", A_ptr);
+        tma_ok = false;
+    }
 
     auto encode_tma = [&](CUtensorMap* out,
                           CUtensorMapDataType type,
@@ -642,7 +666,7 @@ void launch_fp4_gemv_optimized(
             dims,
             globalStrides,
             box,
-            nullptr,
+            elementStrides,
             CU_TENSOR_MAP_INTERLEAVE_NONE,
             CU_TENSOR_MAP_SWIZZLE_NONE,
             CU_TENSOR_MAP_L2_PROMOTION_NONE,
@@ -651,46 +675,106 @@ void launch_fp4_gemv_optimized(
     };
 
     if (tma_ok) {
+        // Ensure box dimensions don't exceed TMA hardware limit (256) or tensor dimensions
         cuuint32_t box_k = static_cast<cuuint32_t>(std::min({(uint64_t)kTileKPacked, K_packed, (uint64_t)kTMABoxLimit}));
         cuuint32_t box_m = static_cast<cuuint32_t>(std::min({(uint64_t)kTileM, (uint64_t)M, (uint64_t)kTMABoxLimit}));
 
+        printf("TMA Debug: A_ptr = %p, map_A_ptr = %p\n", A_ptr, (void*)map_A_ptr);
+
         if (L == 1) {
-            // Rank 2: (K, M). Rank 0 (K) is contiguous.
+            // Use 2D descriptor when no batching (L=1)
             cuuint64_t dims_A[2] = {
-                static_cast<cuuint64_t>(K_packed),
-                static_cast<cuuint64_t>(M)
-            };
-            cuuint32_t box_A[2] = {box_k, box_m};
-            cuuint64_t strides_A[1] = {
-                static_cast<cuuint64_t>(K_packed) // Stride for Dim 1 (M)
+                static_cast<cuuint64_t>(M),
+                static_cast<cuuint64_t>(K_packed)
             };
 
-            if (box_A[0] > 256 || box_A[1] > 256) tma_ok = false;
+            cuuint32_t box_A[2] = {box_m, box_k};
+
+            // For 2D, globalStrides has 1 element: stride between rows (in bytes)
+            cuuint64_t strides_A[1] = {
+                static_cast<cuuint64_t>(K_packed)  // Row stride in bytes
+            };
+
+            printf("TMA Debug: Using RANK=2 for L=1\n");
+            printf("TMA Debug: dims = [M=%llu, K_packed=%llu], box = [%u, %u]\n",
+                   (unsigned long long)dims_A[0], (unsigned long long)dims_A[1],
+                   box_A[0], box_A[1]);
+            printf("TMA Debug: strides_A[0] = %llu bytes\n", (unsigned long long)strides_A[0]);
+
+            // Validate box dimensions
+            if (box_A[0] > 256 || box_A[1] > 256) {
+                printf("ERROR: TMA box dimension exceeds 256 limit! box=[%u, %u]\n",
+                       box_A[0], box_A[1]);
+                tma_ok = false;
+            }
 
             if (tma_ok) {
-                CUresult resA = encode_tma(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, A_ptr, dims_A, strides_A, box_A);
+                CUresult resA = encode_tma(map_A_ptr,
+                                           CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                           2,  // rank=2 for 2D access
+                                           A_ptr,
+                                           dims_A,
+                                           strides_A,  // Explicit stride, NOT nullptr
+                                           box_A);
+
+                printf("TMA Encode A Result: %d\n", (int)resA);
                 if (resA != CUDA_SUCCESS) {
+                    const char* err_str = nullptr;
+                    cuGetErrorString(resA, &err_str);
+                    printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
                     tma_ok = false;
+                } else {
+                    printf("✓ TMA Encode A (rank=2) SUCCESS!\n");
                 }
             }
-        } else {
-            // Rank 3: (K, M, L).
+        }
+        else {
+            // Use 3D descriptor when batching (L > 1)
             cuuint64_t dims_A[3] = {
-                static_cast<cuuint64_t>(K_packed),
+                static_cast<cuuint64_t>(L),
                 static_cast<cuuint64_t>(M),
-                static_cast<cuuint64_t>(L)
-            };
-            cuuint32_t box_A[3] = {box_k, box_m, 1u};
-            cuuint64_t strides_A[2] = {
-                static_cast<cuuint64_t>(K_packed),    // Stride for Dim 1 (M)
-                static_cast<cuuint64_t>(M * K_packed) // Stride for Dim 2 (L)
+                static_cast<cuuint64_t>(K_packed)
             };
 
-            if (box_A[0] > 256 || box_A[1] > 256 || box_A[2] > 256) tma_ok = false;
+            cuuint32_t box_A[3] = {1u, box_m, box_k};
+
+            cuuint64_t strides_A[2] = {
+                static_cast<cuuint64_t>(M) * K_packed,
+                static_cast<cuuint64_t>(K_packed)
+            };
+
+            printf("TMA Debug: Using RANK=3 for L=%lld\n", (long long)L);
+            printf("TMA Debug: dims = [L=%llu, M=%llu, K_packed=%llu], box = [%u, %u, %u]\n",
+                   (unsigned long long)dims_A[0], (unsigned long long)dims_A[1], (unsigned long long)dims_A[2],
+                   box_A[0], box_A[1], box_A[2]);
+            printf("TMA Debug: strides_A = [%llu, %llu]\n",
+                   (unsigned long long)strides_A[0], (unsigned long long)strides_A[1]);
+
+            // Validate box dimensions
+            if (box_A[0] > 256 || box_A[1] > 256 || box_A[2] > 256) {
+                printf("ERROR: TMA box dimension exceeds 256 limit! box=[%u, %u, %u]\n",
+                       box_A[0], box_A[1], box_A[2]);
+                tma_ok = false;
+            }
 
             if (tma_ok) {
-                CUresult resA = encode_tma(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, A_ptr, dims_A, strides_A, box_A);
-                if (resA != CUDA_SUCCESS) tma_ok = false;
+                CUresult resA = encode_tma(map_A_ptr,
+                                           CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                           3,
+                                           A_ptr,
+                                           dims_A,
+                                           strides_A,
+                                           box_A);
+
+                printf("TMA Encode A Result: %d\n", (int)resA);
+                if (resA != CUDA_SUCCESS) {
+                    const char* err_str = nullptr;
+                    cuGetErrorString(resA, &err_str);
+                    printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
+                    tma_ok = false;
+                } else {
+                    printf("✓ TMA Encode A (rank=3) SUCCESS!\n");
+                }
             }
         }
     }
@@ -803,6 +887,12 @@ def custom_kernel(data: input_t) -> output_t:
     # Reinterpret as raw bytes
     a_bytes = a.view(torch.uint8)
     b_bytes = b.view(torch.uint8)
+
+    # Debug: Print tensor shape and stride for TMA verification
+    print(f"TMA Debug (Python): a shape={a.shape}, stride={a.stride()}")
+    print(
+        f"TMA Debug (Python): a_bytes shape={a_bytes.shape}, stride={a_bytes.stride()}"
+    )
 
     # Scale factors: prefer pre-permuted tensors if provided
     # sfa_permuted should already be [L, M, K_scales], and sfb_permuted [L, 128, K_scales]
