@@ -12,6 +12,11 @@ cuda_source = r"""
 #include <cuda_fp16.h>
 #include <cuda.h>
 #include <cuda/pipeline>
+#include <cstdio>
+#include <cstdint>
+#include <vector>
+#include <memory>
+#include <cstring>
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
@@ -93,52 +98,6 @@ __device__ __forceinline__ void mbarrier_wait_parity(uint64_t* mbar, uint32_t ph
     );
 }
 
-__device__ __forceinline__ void tma_load_1d(void* dst,
-                                            const CUtensorMap* desc,
-                                            uint32_t coord0,
-                                            uint32_t bytes,
-                                            uint64_t* mbar) {
-    uint64_t smem_addr = cvta_to_shared_u64(dst);
-    uint64_t mbar_addr = cvta_to_shared_u64(mbar);
-
-    mbarrier_arrive_expect_tx(mbar, bytes);
-
-    asm volatile(
-        "cp.async.bulk.tensor.1d.shared::cluster.global.mbarrier::complete_tx::bytes "
-        "[%0], [%1, {%2}], [%3];\n"
-        :
-        : "l"(smem_addr),
-          "l"(desc),
-          "r"(coord0),
-          "l"(mbar_addr)
-    );
-}
-
-__device__ __forceinline__ void tma_load_2d(void* smem_ptr,
-                                            const CUtensorMap* desc,
-                                            uint32_t coord0,
-                                            uint32_t coord1,
-                                            uint32_t bytes,
-                                            uint64_t* mbar) {
-    uint64_t smem_addr = cvta_to_shared_u64(smem_ptr);
-    uint64_t mbar_addr = cvta_to_shared_u64(mbar);
-    mbarrier_arrive_expect_tx(mbar, bytes);
-
-    uint32_t c0 = coord0;
-    uint32_t c1 = coord1;
-
-    asm volatile(
-        "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes "
-        "[%0], [%1, {%2, %3}], [%4];\n"
-        :
-        : "l"(smem_addr),
-          "l"(desc),
-          "r"(c0),
-          "r"(c1),
-          "l"(mbar_addr)
-    );
-}
-
 __device__ __forceinline__ void tma_load_3d(void* smem_ptr,
                                             const CUtensorMap* desc,
                                             uint32_t coord0,
@@ -186,7 +145,6 @@ fp4_gemv_streaming(
     constexpr int TileScaleCount = TileK / 16;
     constexpr int StageCount = 3;
     constexpr int a_stride = TileK + 8;
-    // We have 2 producer warps = 64 threads
     constexpr int ProducerThreads = 64;
 
     const int tid = threadIdx.x;
@@ -267,62 +225,30 @@ fp4_gemv_streaming(
     (void)offset;
 
 #if __CUDA_ARCH__ >= 900
-    const bool use_tma = (desc_A != nullptr) && (desc_B != nullptr);
+    const bool use_tma_a = (desc_A != nullptr);
 #else
-    const bool use_tma = false;
+    const bool use_tma_a = false;
 #endif
 
-    // Phase tracking in shared memory so all threads see same values
     __shared__ uint32_t stage_phase_smem[StageCount];
-    __shared__ uint32_t b_phase_smem;
-    __shared__ uint32_t sfb_phase_smem;
 
     if (tid == 0) {
         for (int s = 0; s < StageCount; ++s) {
             stage_phase_smem[s] = 0;
         }
-        b_phase_smem = 0;
-        sfb_phase_smem = 0;
     }
 
 #if __CUDA_ARCH__ >= 900
-    if (use_tma && tid == 0) {
+    if (tid == 0 && use_tma_a) {
         for (int s = 0; s < StageCount; ++s) {
             mbarrier_init(&mbar_a[s]);
         }
-        mbarrier_init(mbar_b);
-        mbarrier_init(mbar_sfb);
     }
 #endif
     __syncthreads();
 
-    // Cache B and SFB once using TMA (fallback cp.async when unavailable)
-    if (use_tma) {
-        if (warp_id == 0 && lane_id == 0) {
-            // Coordinates match dims [K_packed, L*128]
-            uint32_t coord0 = 0u;
-            uint32_t coord1 = static_cast<uint32_t>(batch * 128u);
-            tma_load_2d(b_packed_smem, desc_B, coord0, coord1, static_cast<uint32_t>(K_packed), mbar_b);
-        }
-        if (warp_id == 0 && lane_id == 0) {
-            const CUtensorMap* desc_sfb_local = desc_SFB ? desc_SFB : desc_B;
-            // Coordinates match dims [K_scales, L*128]
-            uint32_t coord0 = 0u;
-            uint32_t coord1 = static_cast<uint32_t>(batch * 128u);
-            tma_load_2d(sfb_smem, desc_sfb_local, coord0, coord1, static_cast<uint32_t>(K_scales), mbar_sfb);
-        }
-#if __CUDA_ARCH__ >= 900
-        // Wait with current phase, then flip for next use
-        mbarrier_wait_parity(mbar_b, b_phase_smem);
-        mbarrier_wait_parity(mbar_sfb, sfb_phase_smem);
-        __syncthreads();
-        if (tid == 0) {
-            b_phase_smem ^= 1;
-            sfb_phase_smem ^= 1;
-        }
-        __syncthreads();
-#endif
-    } else {
+    // Robust fallback: Always use software path for B and SFB
+    {
         int b_segments = (K_packed + 15) / 16;
         for (int idx = tid; idx < b_segments; idx += Threads) {
             int byte_idx = idx * 16;
@@ -362,7 +288,7 @@ fp4_gemv_streaming(
     }
     __syncthreads();
 
-    // Decode B vector once: FP4 -> FP16 with FP8 block scale
+    // Decode B vector
     for (int idx = tid; idx < K_packed; idx += Threads) {
         int k_base = idx * 2;
         int scale_idx = idx >> 3;
@@ -371,7 +297,6 @@ fp4_gemv_streaming(
         if (scale_idx < K_scales) {
             scale_h = __float2half(decode_fp8_e4m3(sfb_smem[scale_idx]));
         }
-        // FP4 nibble order: high nibble is first element (even), low nibble is second (odd)
         half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
         half v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
         if (k_base < K) b_vec_smem[k_base] = v0;
@@ -380,9 +305,8 @@ fp4_gemv_streaming(
     __syncthreads();
 
     auto prefetch_tile = [&](int stage, int k_tile_base) {
-        if (use_tma) {
+        if (use_tma_a) {
             if (warp_id == 0 && lane_id == 0) {
-                // Coordinates match dims [K_packed, M, L]
                 uint32_t c0 = static_cast<uint32_t>(k_tile_base >> 1);
                 uint32_t c1 = static_cast<uint32_t>(m_tile);
                 uint32_t c2 = static_cast<uint32_t>(batch);
@@ -401,8 +325,6 @@ fp4_gemv_streaming(
             int segments = static_cast<int>((bytes + 15) / 16);
             const uint8_t* src_base = A_batch + static_cast<size_t>(m_tile) * K_packed + (k_tile_base >> 1);
             uint8_t* dst_base = a_packed_stage[stage];
-            // CRITICAL FIX: Use ProducerThreads (64) as stride because only producer threads enter here.
-            // Using 'Threads' (320) causes data skipping.
             for (int idx = tid; idx < segments; idx += ProducerThreads) {
                 size_t linear = static_cast<size_t>(idx) * 16;
                 int row = linear / TileKPacked;
@@ -426,7 +348,6 @@ fp4_gemv_streaming(
             cp_async_commit();
         }
 
-        // Prefetch SFA scales for this tile (producer warp 1)
         if (is_producer && warp_id == 1) {
             int scale_offset = k_tile_base >> 4;
             int total = TileM * TileScaleCount;
@@ -464,7 +385,7 @@ fp4_gemv_streaming(
             prefetch_tile(next_stage, next_k);
         }
 
-        if (use_tma) {
+        if (use_tma_a) {
 #if __CUDA_ARCH__ >= 900
             mbarrier_wait_parity(&mbar_a[stage], stage_phase_smem[stage]);
             __syncthreads();
@@ -481,7 +402,6 @@ fp4_gemv_streaming(
         int curr_cols = (curr_k + 1) >> 1;
         int scale_count = (curr_k + 15) >> 4;
 
-        // ALL threads decode scales (not just consumers) to cover all indices
         for (int idx = tid; idx < tile_rows * scale_count; idx += Threads) {
             int row = idx / scale_count;
             int s = idx - row * scale_count;
@@ -493,7 +413,6 @@ fp4_gemv_streaming(
         }
         __syncthreads();
 
-        // ALL threads decode A tile (not just consumers) to cover all indices
         {
             uint8_t* a_stage = a_packed_stage[stage];
             for (int idx = tid; idx < tile_rows * curr_cols; idx += Threads) {
@@ -504,7 +423,6 @@ fp4_gemv_streaming(
                 half scale_h = a_scale_smem[row * TileScaleCount + (col_packed >> 3)];
                 half v0 = __float2half(0.0f);
                 half v1 = __float2half(0.0f);
-                // FP4 nibble order: high nibble is first element (even), low nibble is second (odd)
                 if (row < tile_rows && k_base < K) {
                     v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
                 }
@@ -576,9 +494,6 @@ fp4_gemv_streaming(
 
     int active_warps_total = (tile_rows + 15) / 16;
     if (is_consumer && (warp_id - 2) < active_warps_total) {
-        // For m16n8k16 MMA: row = thread_id / 4, col = (thread_id % 4) * 2
-        // Column 0 threads are 0, 4, 8, 12, 16, 20, 24, 28 (col_in_quad == 0)
-        // Their rows are quad = lane_id / 4 = 0, 1, 2, 3, 4, 5, 6, 7
         int quad = lane_id >> 2;
         int col_in_quad = lane_id & 3;
 
@@ -601,10 +516,6 @@ fp4_gemv_streaming(
 #endif
 }
 
-
-// ============================================================================
-// Launcher
-// ============================================================================
 void launch_fp4_gemv_optimized(
     torch::Tensor A, torch::Tensor B,
     torch::Tensor SFA, torch::Tensor SFB,
@@ -619,8 +530,6 @@ void launch_fp4_gemv_optimized(
 
     constexpr int kTileM = 128;
     constexpr int kTileK = 128;
-    // Increase threads from 256 to 320 to support 8 consumer warps (covering 128 rows)
-    // plus 2 producer warps. 10 warps * 32 threads = 320 threads.
     constexpr int kThreads = 320;
     constexpr int kTileKPacked = kTileK / 2;
     constexpr int kTileScaleCount = kTileK / 16;
@@ -632,30 +541,30 @@ void launch_fp4_gemv_optimized(
     };
 
     size_t shared_bytes = 0;
-    shared_bytes = align_up(shared_bytes, 16);                  // mbar alignment
-    shared_bytes += kStageCount * sizeof(uint64_t);             // mbarriers for A stages
     shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += 2 * sizeof(uint64_t);                       // mbar for B + SFB
+    shared_bytes += kStageCount * sizeof(uint64_t);
     shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += static_cast<size_t>(K) / 2;                 // B packed
+    shared_bytes += 2 * sizeof(uint64_t);
     shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += static_cast<size_t>(K) / 16;                // SFB packed
+    shared_bytes += static_cast<size_t>(K) / 2;
     shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += static_cast<size_t>(K) * sizeof(__half);    // B decoded
+    shared_bytes += static_cast<size_t>(K) / 16;
+    shared_bytes = align_up(shared_bytes, 16);
+    shared_bytes += static_cast<size_t>(K) * sizeof(__half);
     shared_bytes = align_up(shared_bytes, 16);
     for (int s = 0; s < kStageCount; ++s) {
-        shared_bytes += static_cast<size_t>(kTileM) * kTileKPacked; // A packed stage
+        shared_bytes += static_cast<size_t>(kTileM) * kTileKPacked;
         shared_bytes = align_up(shared_bytes, 128);
     }
     for (int s = 0; s < kStageCount; ++s) {
-        shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount; // SFA stage
+        shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount;
         shared_bytes = align_up(shared_bytes, 16);
     }
-    shared_bytes += static_cast<size_t>(kTileM) * kAStride * sizeof(__half); // decoded A
+    shared_bytes += static_cast<size_t>(kTileM) * kAStride * sizeof(__half);
     shared_bytes = align_up(shared_bytes, 64);
-    shared_bytes += static_cast<size_t>(kTileK) * 8 * sizeof(__half); // B tile
+    shared_bytes += static_cast<size_t>(kTileK) * 8 * sizeof(__half);
     shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount * sizeof(__half); // decoded scales
+    shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount * sizeof(__half);
 
     auto check_cuda = [](cudaError_t err, const char* msg) {
         if (err != cudaSuccess) {
@@ -666,15 +575,22 @@ void launch_fp4_gemv_optimized(
     const uint64_t K_packed = static_cast<uint64_t>(K / 2);
     const uint64_t K_scales = static_cast<uint64_t>(K / 16);
 
-    CUtensorMap map_A{};
-    CUtensorMap map_B{};
-    CUtensorMap map_SFB{};
+    std::vector<uint8_t> map_buf(sizeof(CUtensorMap) + 64);
+    void* raw_ptr = map_buf.data();
+    size_t space = map_buf.size();
+    void* aligned_ptr = std::align(64, sizeof(CUtensorMap), raw_ptr, space);
+    if (!aligned_ptr) throw std::runtime_error("Failed to align CUtensorMap");
+
+    // Zero-initialize the memory to prevent garbage values
+    std::memset(aligned_ptr, 0, sizeof(CUtensorMap));
+    CUtensorMap* map_A_ptr = reinterpret_cast<CUtensorMap*>(aligned_ptr);
+
     CUtensorMap* d_map_A = nullptr;
     CUtensorMap* d_map_B = nullptr;
     CUtensorMap* d_map_SFB = nullptr;
     bool tma_ok = true;
 
-    auto encode_tma = [&](CUtensorMap& out,
+    auto encode_tma = [&](CUtensorMap* out,
                           CUtensorMapDataType type,
                           cuuint32_t rank,
                           const void* base,
@@ -682,7 +598,7 @@ void launch_fp4_gemv_optimized(
                           const cuuint64_t* strides,
                           const cuuint32_t* box) {
         return cuTensorMapEncodeTiled(
-            &out,
+            out,
             type,
             rank,
             const_cast<void*>(base),
@@ -697,63 +613,34 @@ void launch_fp4_gemv_optimized(
         );
     };
 
-
     if (tma_ok) {
-        // TMA strides array should have rank-1 elements (innermost stride is implicit)
         cuuint64_t dims_A[3] = {static_cast<cuuint64_t>(K_packed), static_cast<cuuint64_t>(M), static_cast<cuuint64_t>(L)};
-        cuuint64_t strides_A[2] = {static_cast<cuuint64_t>(K_packed), static_cast<cuuint64_t>(M) * static_cast<cuuint64_t>(K_packed)};
         cuuint32_t box_A[3] = {static_cast<cuuint32_t>(kTileKPacked), static_cast<cuuint32_t>(kTileM), 1u};
-        CUresult resA = encode_tma(map_A, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, A_ptr, dims_A, strides_A, box_A);
-        tma_ok = tma_ok && (resA == CUDA_SUCCESS);
 
-        cuuint64_t dims_B[2] = {static_cast<cuuint64_t>(K_packed), static_cast<cuuint64_t>(L) * 128ull};
-        cuuint64_t strides_B[1] = {static_cast<cuuint64_t>(K_packed)};
-        // GEMV only needs row 0 of each batch (N=1), not all 128 rows
-        cuuint32_t box_B[2] = {static_cast<cuuint32_t>(K_packed), 1u};
-        CUresult resB = encode_tma(map_B, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, B_ptr, dims_B, strides_B, box_B);
-        tma_ok = tma_ok && (resB == CUDA_SUCCESS);
-
-        cuuint64_t dims_SFB[2] = {static_cast<cuuint64_t>(K_scales), static_cast<cuuint64_t>(L) * 128ull};
-        cuuint64_t strides_SFB[1] = {static_cast<cuuint64_t>(K_scales)};
-        // GEMV only needs row 0 of each batch (N=1), not all 128 rows
-        cuuint32_t box_SFB[2] = {static_cast<cuuint32_t>(K_scales), 1u};
-        CUresult resSFB = encode_tma(map_SFB, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, SFB_ptr, dims_SFB, strides_SFB, box_SFB);
-        tma_ok = tma_ok && (resSFB == CUDA_SUCCESS);
+        // Pass nullptr for strides since tensor is contiguous
+        CUresult resA = encode_tma(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, A_ptr, dims_A, nullptr, box_A);
+        if (resA != CUDA_SUCCESS) {
+            if ((uintptr_t)A_ptr % 16 != 0) printf("A_ptr not 16-byte aligned: %p\n", A_ptr);
+            tma_ok = false;
+        }
+        printf("TMA Encode A Result: %d\n", (int)resA);
     }
 
     if (tma_ok) {
         check_cuda(cudaMalloc(&d_map_A, sizeof(CUtensorMap)), "cudaMalloc d_map_A");
-        check_cuda(cudaMalloc(&d_map_B, sizeof(CUtensorMap)), "cudaMalloc d_map_B");
-        check_cuda(cudaMalloc(&d_map_SFB, sizeof(CUtensorMap)), "cudaMalloc d_map_SFB");
-        check_cuda(cudaMemcpy(d_map_A, &map_A, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_A");
-        check_cuda(cudaMemcpy(d_map_B, &map_B, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_B");
-        check_cuda(cudaMemcpy(d_map_SFB, &map_SFB, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFB");
+        check_cuda(cudaMemcpy(d_map_A, map_A_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_A");
     }
 
-    // Enable >48KB dynamic shared memory on Hopper/Blackwell.
     cudaFuncAttributes attr;
-    cudaError_t attr_err = cudaFuncGetAttributes(
-        &attr,
-        fp4_gemv_streaming<kTileM, kTileK, kThreads>
-    );
-    if (attr_err != cudaSuccess) {
-        throw std::runtime_error(
-            std::string("cudaFuncGetAttributes failed: ") +
-            cudaGetErrorString(attr_err)
-        );
-    }
+    cudaError_t attr_err = cudaFuncGetAttributes(&attr, fp4_gemv_streaming<kTileM, kTileK, kThreads>);
+    if (attr_err != cudaSuccess) throw std::runtime_error(std::string("cudaFuncGetAttributes failed"));
 
     cudaError_t set_err = cudaFuncSetAttribute(
         fp4_gemv_streaming<kTileM, kTileK, kThreads>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         static_cast<int>(shared_bytes)
     );
-    if (set_err != cudaSuccess) {
-        throw std::runtime_error(
-            std::string("cudaFuncSetAttribute failed: ") +
-            cudaGetErrorString(set_err)
-        );
-    }
+    if (set_err != cudaSuccess) throw std::runtime_error(std::string("cudaFuncSetAttribute failed"));
 
     int num_blocks = static_cast<int>((M + kTileM - 1) / kTileM);
     dim3 grid(num_blocks, static_cast<int>(L));
@@ -855,13 +742,11 @@ def custom_kernel(data: input_t) -> output_t:
     # So we'll always use the fallback path for now
     if sfa_permuted is not None and list(sfa_permuted.shape) == [L, M, K_scales]:
         sfa_bytes = sfa_permuted.contiguous().cuda().view(torch.uint8)
-
     else:
         # Fall back to permuting sfa_ref_cpu on the fly
         sfa_bytes = (
             sfa_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda().view(torch.uint8)
         )
-
     if sfb_permuted is not None and list(sfb_permuted.shape) == [L, 128, K_scales]:
         sfb_bytes = sfb_permuted.contiguous().cuda().view(torch.uint8)
     else:

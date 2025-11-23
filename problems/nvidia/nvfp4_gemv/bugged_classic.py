@@ -186,8 +186,6 @@ fp4_gemv_streaming(
     constexpr int TileScaleCount = TileK / 16;
     constexpr int StageCount = 3;
     constexpr int a_stride = TileK + 8;
-    // We have 2 producer warps = 64 threads
-    constexpr int ProducerThreads = 64;
 
     const int tid = threadIdx.x;
     const int warp_id = tid >> 5;
@@ -401,9 +399,7 @@ fp4_gemv_streaming(
             int segments = static_cast<int>((bytes + 15) / 16);
             const uint8_t* src_base = A_batch + static_cast<size_t>(m_tile) * K_packed + (k_tile_base >> 1);
             uint8_t* dst_base = a_packed_stage[stage];
-            // CRITICAL FIX: Use ProducerThreads (64) as stride because only producer threads enter here.
-            // Using 'Threads' (320) causes data skipping.
-            for (int idx = tid; idx < segments; idx += ProducerThreads) {
+            for (int idx = tid; idx < segments; idx += Threads) {
                 size_t linear = static_cast<size_t>(idx) * 16;
                 int row = linear / TileKPacked;
                 int col = linear - row * TileKPacked;
@@ -619,9 +615,7 @@ void launch_fp4_gemv_optimized(
 
     constexpr int kTileM = 128;
     constexpr int kTileK = 128;
-    // Increase threads from 256 to 320 to support 8 consumer warps (covering 128 rows)
-    // plus 2 producer warps. 10 warps * 32 threads = 320 threads.
-    constexpr int kThreads = 320;
+    constexpr int kThreads = 256;
     constexpr int kTileKPacked = kTileK / 2;
     constexpr int kTileScaleCount = kTileK / 16;
     constexpr int kStageCount = 3;
@@ -681,6 +675,7 @@ void launch_fp4_gemv_optimized(
                           const cuuint64_t* dims,
                           const cuuint64_t* strides,
                           const cuuint32_t* box) {
+        cuuint32_t elem_strides[4] = {1, 1, 1, 1};
         return cuTensorMapEncodeTiled(
             &out,
             type,
@@ -689,7 +684,7 @@ void launch_fp4_gemv_optimized(
             dims,
             strides,
             box,
-            nullptr, // elementStrides must be nullptr for contiguous standard layout
+            elem_strides,
             CU_TENSOR_MAP_INTERLEAVE_NONE,
             CU_TENSOR_MAP_SWIZZLE_NONE,
             CU_TENSOR_MAP_L2_PROMOTION_NONE,
@@ -830,11 +825,32 @@ def custom_kernel(data: input_t) -> output_t:
     K = a.shape[1] * 2
     K_scales = K // 16
 
+    # ========== DEBUG PRINTS ==========
+    print("\n" + "=" * 60)
+    print("DEBUG: classic.py custom_kernel")
+    print("=" * 60)
+
+    # Input shapes from generate_input
+    print(f"\nInput tensor shapes (from generate_input):")
+    print(f"  a (original): {a.shape} dtype={a.dtype}")
+    print(f"  b (original): {b.shape} dtype={b.dtype}")
+    print(f"  sfa_ref_cpu: {sfa_ref_cpu.shape} dtype={sfa_ref_cpu.dtype}")
+    print(f"  sfb_ref_cpu: {sfb_ref_cpu.shape} dtype={sfb_ref_cpu.dtype}")
+    print(f"  sfa_permuted: {sfa_permuted.shape if sfa_permuted is not None else None}")
+    print(f"  sfb_permuted: {sfb_permuted.shape if sfb_permuted is not None else None}")
+    print(f"  c (original): {c.shape} dtype={c.dtype}")
+    print(f"  M={M}, K={K}, L={L}, K_scales={K_scales}")
+
     # Permute to [L, M, K/2] layout
     # CRITICAL: Clone first to avoid tensor aliasing/reuse between test calls
     a = a.clone().permute(2, 0, 1).contiguous().cuda()
     b = b.clone().permute(2, 0, 1).contiguous().cuda()
     c = c.clone().permute(2, 0, 1).contiguous().cuda()
+
+    print(f"\nAfter permute(2, 0, 1):")
+    print(f"  a: {a.shape} (expected [{L}, {M}, {K // 2}])")
+    print(f"  b: {b.shape} (expected [{L}, 128, {K // 2}])")
+    print(f"  c: {c.shape} (expected [{L}, {M}, 1])")
 
     # Shape assertions to catch corruption early
     assert a.shape == (L, M, K // 2), (
@@ -855,25 +871,87 @@ def custom_kernel(data: input_t) -> output_t:
     # So we'll always use the fallback path for now
     if sfa_permuted is not None and list(sfa_permuted.shape) == [L, M, K_scales]:
         sfa_bytes = sfa_permuted.contiguous().cuda().view(torch.uint8)
-
+        print(f"\nUsing pre-permuted sfa_permuted")
     else:
         # Fall back to permuting sfa_ref_cpu on the fly
         sfa_bytes = (
             sfa_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda().view(torch.uint8)
         )
-
+        print(
+            f"\nUsing sfa_ref_cpu.permute(2, 0, 1): {sfa_ref_cpu.shape} -> {(L, M, K_scales)}"
+        )
     if sfb_permuted is not None and list(sfb_permuted.shape) == [L, 128, K_scales]:
         sfb_bytes = sfb_permuted.contiguous().cuda().view(torch.uint8)
+        print(f"Using pre-permuted sfb_permuted")
     else:
         sfb_bytes = (
             sfb_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda().view(torch.uint8)
+        )
+        print(
+            f"Using sfb_ref_cpu.permute(2, 0, 1): {sfb_ref_cpu.shape} -> {(L, 128, K_scales)}"
+        )
+
+    print(f"\nScale bytes shapes:")
+    print(f"  sfa_bytes: {sfa_bytes.shape}")
+    print(f"  sfb_bytes: {sfb_bytes.shape}")
+
+    # Print first few raw values for debugging
+    print(f"\nFirst 8 bytes of tensors (batch 0):")
+    print(f"  a_bytes[0,0,:8]: {a_bytes[0, 0, : min(8, a_bytes.shape[2])].tolist()}")
+    print(f"  b_bytes[0,0,:8]: {b_bytes[0, 0, : min(8, b_bytes.shape[2])].tolist()}")
+    print(
+        f"  sfa_bytes[0,0,:8]: {sfa_bytes[0, 0, : min(8, sfa_bytes.shape[2])].tolist()}"
+    )
+    print(
+        f"  sfb_bytes[0,0,:8]: {sfb_bytes[0, 0, : min(8, sfb_bytes.shape[2])].tolist()}"
+    )
+
+    # Decode first FP4 value manually to verify nibble order
+    if a_bytes.numel() > 0:
+        packed_val = a_bytes[0, 0, 0].item()
+        hi_nibble = (packed_val >> 4) & 0x0F
+        lo_nibble = packed_val & 0x0F
+        fp4_lut = [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ]
+        print(f"\nFP4 decoding check (byte={packed_val:#04x}):")
+        print(
+            f"  High nibble (bits 7-4) = {hi_nibble:#x} -> FP4 value = {fp4_lut[hi_nibble]} (element 0)"
+        )
+        print(
+            f"  Low nibble (bits 3-0)  = {lo_nibble:#x} -> FP4 value = {fp4_lut[lo_nibble]} (element 1)"
         )
 
     # Launch SM100 tensor core kernel
     mod = get_module()
     mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L)
 
+    # Print output before permute back
+    print(f"\nOutput c before permute back: {c.shape}")
+    print(
+        f"  c[0,:5,0] (first 5 rows of batch 0): {c[0, : min(5, c.shape[1]), 0].tolist()}"
+    )
+
     # Permute output back
     c = c.permute(1, 2, 0).contiguous()  # [M, 1, L]
+
+    print(f"\nOutput c after permute: {c.shape}")
+    print(f"  c[:5,0,0] (first 5 elements): {c[: min(5, c.shape[0]), 0, 0].tolist()}")
+    print("=" * 60 + "\n")
 
     return c
