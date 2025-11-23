@@ -17,6 +17,7 @@ cuda_source = r"""
 #include <vector>
 #include <memory>
 #include <cstring>
+#include <algorithm>
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
@@ -536,6 +537,11 @@ void launch_fp4_gemv_optimized(
     constexpr int kStageCount = 3;
     constexpr int kAStride = kTileK + 8;
 
+    // TMA hardware constraint: box dimensions must be <= 256 elements per dimension
+    constexpr int kTMABoxLimit = 256;
+    static_assert(kTileM <= kTMABoxLimit, "kTileM exceeds TMA box limit of 256");
+    static_assert(kTileKPacked <= kTMABoxLimit, "kTileKPacked exceeds TMA box limit of 256");
+
     auto align_up = [](size_t x, size_t align) {
         return (x + align - 1) & ~(align - 1);
     };
@@ -622,21 +628,35 @@ void launch_fp4_gemv_optimized(
 
     if (tma_ok) {
         cuuint64_t dims_A[3] = {static_cast<cuuint64_t>(K_packed), static_cast<cuuint64_t>(M), static_cast<cuuint64_t>(L)};
-        cuuint32_t box_A[3] = {static_cast<cuuint32_t>(kTileKPacked), static_cast<cuuint32_t>(kTileM), 1u};
+
+        // Ensure box dimensions don't exceed TMA hardware limit (256) or tensor dimensions
+        cuuint32_t box_k = static_cast<cuuint32_t>(std::min({(uint64_t)kTileKPacked, K_packed, (uint64_t)kTMABoxLimit}));
+        cuuint32_t box_m = static_cast<cuuint32_t>(std::min({(uint64_t)kTileM, (uint64_t)M, (uint64_t)kTMABoxLimit}));
+        cuuint32_t box_A[3] = {box_k, box_m, 1u};
 
         // 4. Print debug info before encoding
         printf("TMA Debug: A_ptr = %p, map_A_ptr = %p\n", A_ptr, (void*)map_A_ptr);
         printf("TMA Debug: dims = [%llu, %llu, %llu], box = [%u, %u, %u]\n",
                (unsigned long long)dims_A[0], (unsigned long long)dims_A[1], (unsigned long long)dims_A[2],
                box_A[0], box_A[1], box_A[2]);
+        printf("TMA Debug: kTileKPacked=%d, kTileM=%d, kTMABoxLimit=%d\n", kTileKPacked, kTileM, kTMABoxLimit);
 
-        CUresult resA = encode_tma(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, A_ptr, dims_A, box_A);
-        printf("TMA Encode A Result: %d\n", (int)resA);
-        if (resA != CUDA_SUCCESS) {
-            const char* err_str = nullptr;
-            cuGetErrorString(resA, &err_str);
-            printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
+        // Validate box dimensions
+        if (box_A[0] > 256 || box_A[1] > 256) {
+            printf("ERROR: TMA box dimension exceeds 256 limit! box=[%u, %u, %u]\n",
+                   box_A[0], box_A[1], box_A[2]);
             tma_ok = false;
+        }
+
+        if (tma_ok) {
+            CUresult resA = encode_tma(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, A_ptr, dims_A, box_A);
+            printf("TMA Encode A Result: %d\n", (int)resA);
+            if (resA != CUDA_SUCCESS) {
+                const char* err_str = nullptr;
+                cuGetErrorString(resA, &err_str);
+                printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
+                tma_ok = false;
+            }
         }
     }
 
