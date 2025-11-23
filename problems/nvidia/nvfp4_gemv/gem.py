@@ -609,17 +609,17 @@ void launch_fp4_gemv_optimized(
                           cuuint32_t rank,
                           const void* base,
                           const cuuint64_t* dims,
+                          const cuuint64_t* globalStrides,
                           const cuuint32_t* box) {
-        // 3. Pass nullptr for globalStrides (contiguous tensor)
         return cuTensorMapEncodeTiled(
             out,
             type,
             rank,
             const_cast<void*>(base),
             dims,
-            nullptr,  // globalStrides - nullptr for contiguous standard layout
+            globalStrides,
             box,
-            nullptr,  // elementStrides - nullptr for contiguous standard layout
+            nullptr,  // elementStrides
             CU_TENSOR_MAP_INTERLEAVE_NONE,
             CU_TENSOR_MAP_SWIZZLE_NONE,
             CU_TENSOR_MAP_L2_PROMOTION_NONE,
@@ -637,11 +637,20 @@ void launch_fp4_gemv_optimized(
         // Box order matches dims order [L, M, K_packed]
         cuuint32_t box_A[3] = {1u, box_m, box_k};
 
+        // Strides for [L, M, K_packed] layout (in bytes)
+        // For contiguous layout: stride[0] = M * K_packed, stride[1] = K_packed
+        cuuint64_t strides_A[2] = {
+            static_cast<cuuint64_t>(M) * K_packed,
+            static_cast<cuuint64_t>(K_packed)
+        };
+
         // 4. Print debug info before encoding
         printf("TMA Debug: A_ptr = %p, map_A_ptr = %p\n", A_ptr, (void*)map_A_ptr);
         printf("TMA Debug: dims = [L=%llu, M=%llu, K_packed=%llu], box = [%u, %u, %u]\n",
                (unsigned long long)dims_A[0], (unsigned long long)dims_A[1], (unsigned long long)dims_A[2],
                box_A[0], box_A[1], box_A[2]);
+        printf("TMA Debug: strides_A = [%llu, %llu]\n",
+               (unsigned long long)strides_A[0], (unsigned long long)strides_A[1]);
         printf("TMA Debug: kTileKPacked=%d, kTileM=%d, kTMABoxLimit=%d\n", kTileKPacked, kTileM, kTMABoxLimit);
 
         // Validate box dimensions (all three must be <= 256)
@@ -652,7 +661,7 @@ void launch_fp4_gemv_optimized(
         }
 
         if (tma_ok) {
-            CUresult resA = encode_tma(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, A_ptr, dims_A, box_A);
+            CUresult resA = encode_tma(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, A_ptr, dims_A, strides_A, box_A);
             printf("TMA Encode A Result: %d\n", (int)resA);
             if (resA != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
