@@ -572,21 +572,18 @@ fp4_gemv_streaming(
 
     int active_warps_total = (tile_rows + 15) / 16;
     if (is_consumer && (warp_id - 2) < active_warps_total) {
-        int quad = lane_id >> 2;        // 0-7 for lanes 0-31
-        int col_in_quad = lane_id & 3;  // 0-3
-
-        if (col_in_quad == 0) {  // ✅ Lanes 0, 4, 8, 12, 16, 20, 24, 28
-            int row0 = ((warp_id - 2) * 16) + quad;     // Base row
-            int row1 = row0 + 8;                         // +8 stride
-
+        // For m16n8k16 MMA, thread t holds rows (t % 8) and (t % 8) + 8
+        // Use threads 0-7 which have column 0 results for GEMV
+        if (lane_id < 8) {
+            int row0 = (warp_id - 2) * 16 + lane_id;
+            int row1 = row0 + 8;
             int global_row0 = m_tile + row0;
             int global_row1 = m_tile + row1;
-
             if (row0 < tile_rows && global_row0 < M) {
-                D_batch[global_row0] = __float2half(c_frag_0);  // Use c_frag_0 or c_frag0
+                D_batch[global_row0] = __float2half(c_frag_0);
             }
             if (row1 < tile_rows && global_row1 < M) {
-                D_batch[global_row1] = __float2half(c_frag_2);  // Use c_frag_2 or c_frag2
+                D_batch[global_row1] = __float2half(c_frag_2);
             }
         }
     }
