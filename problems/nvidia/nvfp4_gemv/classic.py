@@ -269,9 +269,19 @@ fp4_gemv_streaming(
 #else
     const bool use_tma = false;
 #endif
-    uint32_t stage_phase[StageCount] = {0, 0, 0};
-    uint32_t b_phase = 0;
-    uint32_t sfb_phase = 0;
+
+    // Phase tracking in shared memory so all threads see same values
+    __shared__ uint32_t stage_phase_smem[StageCount];
+    __shared__ uint32_t b_phase_smem;
+    __shared__ uint32_t sfb_phase_smem;
+
+    if (tid == 0) {
+        for (int s = 0; s < StageCount; ++s) {
+            stage_phase_smem[s] = 0;
+        }
+        b_phase_smem = 0;
+        sfb_phase_smem = 0;
+    }
 
 #if __CUDA_ARCH__ >= 900
     if (use_tma && tid == 0) {
@@ -291,7 +301,6 @@ fp4_gemv_streaming(
             uint32_t coord0 = 0u;
             uint32_t coord1 = static_cast<uint32_t>(batch * 128u);
             tma_load_2d(b_packed_smem, desc_B, coord0, coord1, static_cast<uint32_t>(K_packed), mbar_b);
-            b_phase ^= 1;
         }
         if (warp_id == 0 && lane_id == 0) {
             const CUtensorMap* desc_sfb_local = desc_SFB ? desc_SFB : desc_B;
@@ -299,11 +308,17 @@ fp4_gemv_streaming(
             uint32_t coord0 = 0u;
             uint32_t coord1 = static_cast<uint32_t>(batch * 128u);
             tma_load_2d(sfb_smem, desc_sfb_local, coord0, coord1, static_cast<uint32_t>(K_scales), mbar_sfb);
-            sfb_phase ^= 1;
         }
 #if __CUDA_ARCH__ >= 900
-        mbarrier_wait_parity(mbar_b, b_phase);
-        mbarrier_wait_parity(mbar_sfb, sfb_phase);
+        // Wait with current phase, then flip for next use
+        mbarrier_wait_parity(mbar_b, b_phase_smem);
+        mbarrier_wait_parity(mbar_sfb, sfb_phase_smem);
+        __syncthreads();
+        if (tid == 0) {
+            b_phase_smem ^= 1;
+            sfb_phase_smem ^= 1;
+        }
+        __syncthreads();
 #endif
     } else {
         int b_segments = (K_packed + 15) / 16;
@@ -378,7 +393,6 @@ fp4_gemv_streaming(
                     static_cast<uint32_t>(TileM * TileKPacked),
                     &mbar_a[stage]
                 );
-                stage_phase[stage] ^= 1;
             }
         } else if (is_producer) {
             size_t bytes = static_cast<size_t>(TileM) * TileKPacked;
@@ -448,7 +462,11 @@ fp4_gemv_streaming(
 
         if (use_tma) {
 #if __CUDA_ARCH__ >= 900
-            mbarrier_wait_parity(&mbar_a[stage], stage_phase[stage]);
+            mbarrier_wait_parity(&mbar_a[stage], stage_phase_smem[stage]);
+            __syncthreads();
+            if (tid == 0) {
+                stage_phase_smem[stage] ^= 1;
+            }
 #endif
         } else {
             cp_async_wait();
