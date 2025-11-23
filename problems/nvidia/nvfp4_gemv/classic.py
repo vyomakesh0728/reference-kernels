@@ -797,8 +797,23 @@ def custom_kernel(data: input_t) -> output_t:
 
     M, _, L = c.shape
     K = a.shape[1] * 2
+    K_scales = K // 16
 
-    # No debug printing in production
+    # ========== DEBUG PRINTS ==========
+    print("\n" + "="*60)
+    print("DEBUG: classic.py custom_kernel")
+    print("="*60)
+
+    # Input shapes from generate_input
+    print(f"\nInput tensor shapes (from generate_input):")
+    print(f"  a (original): {a.shape} dtype={a.dtype}")
+    print(f"  b (original): {b.shape} dtype={b.dtype}")
+    print(f"  sfa_ref_cpu: {sfa_ref_cpu.shape} dtype={sfa_ref_cpu.dtype}")
+    print(f"  sfb_ref_cpu: {sfb_ref_cpu.shape} dtype={sfb_ref_cpu.dtype}")
+    print(f"  sfa_permuted: {sfa_permuted.shape if sfa_permuted is not None else None}")
+    print(f"  sfb_permuted: {sfb_permuted.shape if sfb_permuted is not None else None}")
+    print(f"  c (original): {c.shape} dtype={c.dtype}")
+    print(f"  M={M}, K={K}, L={L}, K_scales={K_scales}")
 
     # Permute to [L, M, K/2] layout
     # CRITICAL: Clone first to avoid tensor aliasing/reuse between test calls
@@ -806,7 +821,10 @@ def custom_kernel(data: input_t) -> output_t:
     b = b.clone().permute(2, 0, 1).contiguous().cuda()
     c = c.clone().permute(2, 0, 1).contiguous().cuda()
 
-    #
+    print(f"\nAfter permute(2, 0, 1):")
+    print(f"  a: {a.shape} (expected [{L}, {M}, {K//2}])")
+    print(f"  b: {b.shape} (expected [{L}, 128, {K//2}])")
+    print(f"  c: {c.shape} (expected [{L}, {M}, 1])")
 
     # Shape assertions to catch corruption early
     assert a.shape == (L, M, K // 2), (
@@ -823,28 +841,61 @@ def custom_kernel(data: input_t) -> output_t:
     # Scale factors: prefer pre-permuted tensors if provided
     # sfa_permuted should already be [L, M, K_scales], and sfb_permuted [L, 128, K_scales]
     # Use these directly when available to avoid re-permuting on every call
-    K_scales = K // 16
+    # NOTE: sfa_permuted from reference.py is actually [32, 4, rest_m, 4, rest_k, L] which is NOT [L, M, K_scales]
+    # So we'll always use the fallback path for now
     if sfa_permuted is not None and list(sfa_permuted.shape) == [L, M, K_scales]:
         sfa_bytes = sfa_permuted.contiguous().cuda().view(torch.uint8)
+        print(f"\nUsing pre-permuted sfa_permuted")
     else:
         # Fall back to permuting sfa_ref_cpu on the fly
         sfa_bytes = (
             sfa_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda().view(torch.uint8)
         )
+        print(f"\nUsing sfa_ref_cpu.permute(2, 0, 1): {sfa_ref_cpu.shape} -> {(L, M, K_scales)}")
     if sfb_permuted is not None and list(sfb_permuted.shape) == [L, 128, K_scales]:
         sfb_bytes = sfb_permuted.contiguous().cuda().view(torch.uint8)
+        print(f"Using pre-permuted sfb_permuted")
     else:
         sfb_bytes = (
             sfb_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda().view(torch.uint8)
         )
+        print(f"Using sfb_ref_cpu.permute(2, 0, 1): {sfb_ref_cpu.shape} -> {(L, 128, K_scales)}")
 
-    #
+    print(f"\nScale bytes shapes:")
+    print(f"  sfa_bytes: {sfa_bytes.shape}")
+    print(f"  sfb_bytes: {sfb_bytes.shape}")
+
+    # Print first few raw values for debugging
+    print(f"\nFirst 8 bytes of tensors (batch 0):")
+    print(f"  a_bytes[0,0,:8]: {a_bytes[0, 0, :min(8, a_bytes.shape[2])].tolist()}")
+    print(f"  b_bytes[0,0,:8]: {b_bytes[0, 0, :min(8, b_bytes.shape[2])].tolist()}")
+    print(f"  sfa_bytes[0,0,:8]: {sfa_bytes[0, 0, :min(8, sfa_bytes.shape[2])].tolist()}")
+    print(f"  sfb_bytes[0,0,:8]: {sfb_bytes[0, 0, :min(8, sfb_bytes.shape[2])].tolist()}")
+
+    # Decode first FP4 value manually to verify nibble order
+    if a_bytes.numel() > 0:
+        packed_val = a_bytes[0, 0, 0].item()
+        hi_nibble = (packed_val >> 4) & 0x0F
+        lo_nibble = packed_val & 0x0F
+        fp4_lut = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+                   -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+        print(f"\nFP4 decoding check (byte={packed_val:#04x}):")
+        print(f"  High nibble (bits 7-4) = {hi_nibble:#x} -> FP4 value = {fp4_lut[hi_nibble]} (element 0)")
+        print(f"  Low nibble (bits 3-0)  = {lo_nibble:#x} -> FP4 value = {fp4_lut[lo_nibble]} (element 1)")
 
     # Launch SM100 tensor core kernel
     mod = get_module()
     mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L)
 
+    # Print output before permute back
+    print(f"\nOutput c before permute back: {c.shape}")
+    print(f"  c[0,:5,0] (first 5 rows of batch 0): {c[0, :min(5, c.shape[1]), 0].tolist()}")
+
     # Permute output back
     c = c.permute(1, 2, 0).contiguous()  # [M, 1, L]
+
+    print(f"\nOutput c after permute: {c.shape}")
+    print(f"  c[:5,0,0] (first 5 elements): {c[:min(5, c.shape[0]), 0, 0].tolist()}")
+    print("="*60 + "\n")
 
     return c
