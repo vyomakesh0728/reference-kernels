@@ -354,9 +354,9 @@ fp4_gemv_streaming(
         if (scale_idx < K_scales) {
             scale_h = __float2half(decode_fp8_e4m3(sfb_smem[scale_idx]));
         }
-        // FP4 nibble order: low nibble is first element, high nibble is second
-        half v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
-        half v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+        // FP4 nibble order: high nibble is first element (even), low nibble is second (odd)
+        half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+        half v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
         if (k_base < K) b_vec_smem[k_base] = v0;
         if (k_base + 1 < K) b_vec_smem[k_base + 1] = v1;
     }
@@ -482,12 +482,12 @@ fp4_gemv_streaming(
                 half scale_h = a_scale_smem[row * TileScaleCount + (col_packed >> 3)];
                 half v0 = __float2half(0.0f);
                 half v1 = __float2half(0.0f);
-                // FP4 nibble order: low nibble is first element, high nibble is second
+                // FP4 nibble order: high nibble is first element (even), low nibble is second (odd)
                 if (row < tile_rows && k_base < K) {
-                    v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+                    v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
                 }
                 if (row < tile_rows && (k_base + 1) < K) {
-                    v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+                    v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
                 }
                 half* a_dst = a_f16_smem + row * a_stride;
                 a_dst[col_packed * 2] = v0;
