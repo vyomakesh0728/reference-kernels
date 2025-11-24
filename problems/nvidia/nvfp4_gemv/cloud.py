@@ -157,6 +157,11 @@ __device__ __forceinline__ void tma_load_3d(void* smem_ptr,
           "r"(mbar_addr)
     );
 }
+
+__device__ __forceinline__ uint64_t* mbar_stage(uint64_t* base, int stage) {
+    // Each mbarrier occupies 16 bytes (two uint64_t slots)
+    return base + stage * 2;
+}
 #endif
 
 template<int TileM, int TileK, int Threads>
@@ -200,60 +205,61 @@ fp4_gemv_streaming(
     half* D_batch = D + static_cast<size_t>(batch) * M;
 
     extern __shared__ uint8_t smem[];
+
     auto align_up = [] __device__(size_t x, size_t align) {
         return (x + align - 1) & ~(align - 1);
     };
 
     size_t offset = 0;
-    offset = align_up(offset, 16);
-    uint64_t* mbar_a = reinterpret_cast<uint64_t*>(smem + offset);
-    offset += StageCount * sizeof(uint64_t);
-    offset = align_up(offset, 16);
-    uint64_t* mbar_b = reinterpret_cast<uint64_t*>(smem + offset);
-    offset += sizeof(uint64_t);
-    offset = align_up(offset, 16);
-    uint64_t* mbar_sfb = reinterpret_cast<uint64_t*>(smem + offset);
-    offset += sizeof(uint64_t);
+
+    auto alloc_mbar_array = [&] __device__(int count) -> uint64_t* {
+        offset = align_up(offset, 16);
+        uint8_t* base = smem + offset;
+        offset += static_cast<size_t>(count) * 2 * sizeof(uint64_t);
+        return reinterpret_cast<uint64_t*>(base);
+    };
+
+    uint64_t* mbar_a = alloc_mbar_array(StageCount);
+    uint64_t* mbar_b = alloc_mbar_array(1);
+    uint64_t* mbar_sfb = alloc_mbar_array(1);
+
     offset = align_up(offset, 16);
 
-    uint8_t* smem_base = smem;
-    uint8_t* b_packed_smem = smem_base + offset;
+    uint8_t* b_packed_smem = smem + offset;
     offset += K_packed;
     offset = align_up(offset, 16);
 
-    uint8_t* sfb_smem = smem_base + offset;
+    uint8_t* sfb_smem = smem + offset;
     offset += K_scales;
     offset = align_up(offset, 16);
 
-    offset = align_up(offset, 16);
-    half* b_vec_smem = reinterpret_cast<half*>(smem_base + offset);
+    half* b_vec_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(K) * sizeof(half);
     offset = align_up(offset, 16);
 
     uint8_t* a_packed_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
-        a_packed_stage[s] = smem_base + offset;
+        a_packed_stage[s] = smem + offset;
         offset += TileM * TileKPacked;
-        offset = align_up(offset, 128);
     }
 
     uint8_t* sfa_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
-        sfa_stage[s] = smem_base + offset;
+        sfa_stage[s] = smem + offset;
         offset += TileM * TileScaleCount;
-        offset = align_up(offset, 16);
     }
 
-    half* a_f16_smem = reinterpret_cast<half*>(smem_base + offset);
+    half* a_f16_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(TileM) * a_stride * sizeof(half);
     offset = align_up(offset, 64);
 
-    half* b_tile_smem = reinterpret_cast<half*>(smem_base + offset);
+    half* b_tile_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(TileK) * 8 * sizeof(half);
     offset = align_up(offset, 16);
 
-    half* a_scale_smem = reinterpret_cast<half*>(smem_base + offset);
+    half* a_scale_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(TileM) * TileScaleCount * sizeof(half);
+
     (void)offset;
 
 #if __CUDA_ARCH__ >= 900
@@ -273,7 +279,7 @@ fp4_gemv_streaming(
 #if __CUDA_ARCH__ >= 900
     if (tid == 0 && use_tma_a) {
         for (int s = 0; s < StageCount; ++s) {
-            mbarrier_init(&mbar_a[s]);
+            mbarrier_init(mbar_stage(mbar_a, s));
         }
     }
 #endif
@@ -339,23 +345,32 @@ fp4_gemv_streaming(
     auto prefetch_tile = [&](int stage, int k_tile_base) {
         if (use_tma_a) {
             if (warp_id == 0 && lane_id == 0) {
+
+                // Element-space coordinates: row and packed-K index
+                uint32_t c_m = static_cast<uint32_t>(m_tile);            // row in [0, M)
+                uint32_t c_k_packed = static_cast<uint32_t>(k_tile_base >> 1); // packed K index in [0, K/2)
+
                 if (L == 1) {
-                    // For rank=2: coordinates are (m_tile, k_tile_coord)
-                    uint32_t c0 = static_cast<uint32_t>(m_tile);
-                    uint32_t c1 = static_cast<uint32_t>(k_tile_base >> 1);
+                    // rank = 2: (m, k_packed)
+                    uint32_t c0 = c_m;
+                    uint32_t c1 = c_k_packed;
+
+
+
                     tma_load_2d(
                         a_packed_stage[stage],
                         desc_A,
                         c0,
                         c1,
                         static_cast<uint32_t>(TileM * TileKPacked),
-                        &mbar_a[stage]
+                        mbar_stage(mbar_a, stage)
                     );
                 } else {
-                    // For rank=3: coordinates are (batch, m_tile, k_tile_coord)
+                    // For rank=3: coordinates are (batch, m, k_packed)
                     uint32_t c0 = static_cast<uint32_t>(batch);
-                    uint32_t c1 = static_cast<uint32_t>(m_tile);
-                    uint32_t c2 = static_cast<uint32_t>(k_tile_base >> 1);
+                    uint32_t c1 = c_m;
+                    uint32_t c2 = c_k_packed;
+
                     tma_load_3d(
                         a_packed_stage[stage],
                         desc_A,
@@ -363,7 +378,7 @@ fp4_gemv_streaming(
                         c1,
                         c2,
                         static_cast<uint32_t>(TileM * TileKPacked),
-                        &mbar_a[stage]
+                        mbar_stage(mbar_a, stage)
                     );
                 }
             }
@@ -434,7 +449,7 @@ fp4_gemv_streaming(
 
         if (use_tma_a) {
 #if __CUDA_ARCH__ >= 900
-            mbarrier_wait_parity(&mbar_a[stage], stage_phase_smem[stage]);
+            mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
             __syncthreads();
             if (tid == 0) {
                 stage_phase_smem[stage] ^= 1;
@@ -592,31 +607,40 @@ void launch_fp4_gemv_optimized(
         return (x + align - 1) & ~(align - 1);
     };
 
+    constexpr size_t kMbarBytes = 16;
+
     size_t shared_bytes = 0;
-    shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += kStageCount * sizeof(uint64_t);
-    shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += 2 * sizeof(uint64_t);
-    shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += static_cast<size_t>(K) / 2;
-    shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += static_cast<size_t>(K) / 16;
-    shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += static_cast<size_t>(K) * sizeof(__half);
-    shared_bytes = align_up(shared_bytes, 16);
-    for (int s = 0; s < kStageCount; ++s) {
-        shared_bytes += static_cast<size_t>(kTileM) * kTileKPacked;
-        shared_bytes = align_up(shared_bytes, 128);
-    }
-    for (int s = 0; s < kStageCount; ++s) {
-        shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount;
+
+    auto alloc_mbar_array = [&](int count) {
         shared_bytes = align_up(shared_bytes, 16);
-    }
-    shared_bytes += static_cast<size_t>(kTileM) * kAStride * sizeof(__half);
-    shared_bytes = align_up(shared_bytes, 64);
-    shared_bytes += static_cast<size_t>(kTileK) * 8 * sizeof(__half);
+        shared_bytes += static_cast<size_t>(count) * kMbarBytes;
+    };
+
+    alloc_mbar_array(kStageCount); // mbar_a
+    alloc_mbar_array(1);           // mbar_b
+    alloc_mbar_array(1);           // mbar_sfb
+
     shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount * sizeof(__half);
+    shared_bytes += static_cast<size_t>(K) / 2;    // b_packed_smem
+    shared_bytes = align_up(shared_bytes, 16);
+    shared_bytes += static_cast<size_t>(K) / 16;   // sfb_smem
+    shared_bytes = align_up(shared_bytes, 16);
+    shared_bytes += static_cast<size_t>(K) * sizeof(__half); // b_vec_smem
+    shared_bytes = align_up(shared_bytes, 16);
+
+    for (int s = 0; s < kStageCount; ++s) {
+        shared_bytes += static_cast<size_t>(kTileM) * kTileKPacked; // a_packed_stage[s]
+    }
+
+    for (int s = 0; s < kStageCount; ++s) {
+        shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount; // sfa_stage[s]
+    }
+
+    shared_bytes += static_cast<size_t>(kTileM) * kAStride * sizeof(__half); // a_f16_smem
+    shared_bytes = align_up(shared_bytes, 64);
+    shared_bytes += static_cast<size_t>(kTileK) * 8 * sizeof(__half); // b_tile_smem
+    shared_bytes = align_up(shared_bytes, 16);
+    shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount * sizeof(__half); // a_scale_smem
 
     auto check_cuda = [](cudaError_t err, const char* msg) {
         if (err != cudaSuccess) {
@@ -645,10 +669,23 @@ void launch_fp4_gemv_optimized(
     CUtensorMap* d_map_SFB = nullptr;
     bool tma_ok = true;
 
-    // 2. Ensure tensor's device pointer is 64-byte aligned
-    if ((uintptr_t)A_ptr % 16 != 0) {
-        printf("WARNING: A_ptr is not 16-byte aligned: %p\n", A_ptr);
+    // 2. Ensure tensor's device pointer is 16-byte aligned for TMA
+    uintptr_t base_addr = reinterpret_cast<uintptr_t>(A_ptr);
+    if ((base_addr % 16) != 0) {
+        printf("ERROR: base pointer A not 16-byte aligned: %p (mod16=%llu)\n",
+               A_ptr, (unsigned long long)(base_addr % 16));
         tma_ok = false;
+    } else {
+        printf("✓ A_ptr alignment check passed: %p\n", A_ptr);
+    }
+
+    // 3. Check that strides are properly aligned
+    if (K_packed % 16 != 0) {
+        printf("WARNING: K_packed (%llu) is not 16-byte aligned, may cause TMA issues\n",
+               (unsigned long long)K_packed);
+    } else {
+        printf("✓ K_packed stride alignment check passed: %llu bytes\n",
+               (unsigned long long)K_packed);
     }
 
     auto encode_tma = [&](CUtensorMap* out,
@@ -657,7 +694,9 @@ void launch_fp4_gemv_optimized(
                           const void* base,
                           const cuuint64_t* dims,
                           const cuuint64_t* globalStrides,
-                          const cuuint32_t* box) {
+                          const cuuint32_t* box) -> CUresult {
+
+        cuuint32_t elementStrides[5] = {1, 1, 1, 1, 1};
         return cuTensorMapEncodeTiled(
             out,
             type,
@@ -680,6 +719,21 @@ void launch_fp4_gemv_optimized(
         cuuint32_t box_m = static_cast<cuuint32_t>(std::min({(uint64_t)kTileM, (uint64_t)M, (uint64_t)kTMABoxLimit}));
 
         printf("TMA Debug: A_ptr = %p, map_A_ptr = %p\n", A_ptr, (void*)map_A_ptr);
+
+        // 4. Check box dimensions are multiples of 16 bytes for alignment
+        // TMA requires tile loads to be aligned to hardware vector width
+        if (box_k % 16 != 0) {
+            printf("WARNING: box_k (%u) is not a multiple of 16, may cause alignment issues\n", box_k);
+        }
+        // box_m doesn't need to be 16-aligned since it's the number of rows, not bytes
+
+        // 5. Check that tile sizes result in 16-byte aligned transfers
+        uint32_t tile_bytes = box_m * box_k;
+        if (tile_bytes % 16 != 0) {
+            printf("WARNING: tile_bytes (%u) is not 16-byte aligned\n", tile_bytes);
+        } else {
+            printf("✓ Tile size alignment check passed: %u bytes\n", tile_bytes);
+        }
 
         if (L == 1) {
             // Use 2D descriptor when no batching (L=1)
@@ -893,6 +947,20 @@ def custom_kernel(data: input_t) -> output_t:
     print(
         f"TMA Debug (Python): a_bytes shape={a_bytes.shape}, stride={a_bytes.stride()}"
     )
+
+    # Verify tensor alignment for TMA
+    a_ptr = a_bytes.data_ptr()
+    if a_ptr % 16 != 0:
+        print(
+            f"WARNING (Python): a_bytes data_ptr {hex(a_ptr)} is not 16-byte aligned (mod16={a_ptr % 16})"
+        )
+    else:
+        print(f"✓ (Python) a_bytes data_ptr alignment check passed: {hex(a_ptr)}")
+
+    # Check stride alignment
+    K_packed_val = K // 2
+    if K_packed_val % 16 != 0:
+        print(f"WARNING (Python): K_packed ({K_packed_val}) is not 16-byte aligned")
 
     # Scale factors: prefer pre-permuted tensors if provided
     # sfa_permuted should already be [L, M, K_scales], and sfb_permuted [L, 128, K_scales]
