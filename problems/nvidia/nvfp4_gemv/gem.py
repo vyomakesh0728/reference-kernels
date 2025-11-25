@@ -21,7 +21,6 @@ cuda_source = r"""
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
-
 __constant__ float fp4_e2m1_lut_float[16] = {
     0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
     -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
@@ -116,15 +115,17 @@ __device__ __forceinline__ void tma_load_2d(void* smem_ptr,
     uint32_t mbar_addr = cvta_to_shared_u32(mbar);
     mbarrier_arrive_expect_tx(mbar, bytes);
 
-    // Coordinate order: c0 (Rank 0/K), c1 (Rank 1/M)
+    uint32_t c0 = coord0;
+    uint32_t c1 = coord1;
+
     asm volatile(
-        "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes "
+        "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
         "[%0], [%1, {%2, %3}], [%4];\n"
         :
         : "r"(smem_addr),
           "l"(desc),
-          "r"(coord0),
-          "r"(coord1),
+          "r"(c0),
+          "r"(c1),
           "r"(mbar_addr)
     );
 }
@@ -140,18 +141,25 @@ __device__ __forceinline__ void tma_load_3d(void* smem_ptr,
     uint32_t mbar_addr = cvta_to_shared_u32(mbar);
     mbarrier_arrive_expect_tx(mbar, bytes);
 
-    // Coordinate order: c0 (Rank 0/K), c1 (Rank 1/M), c2 (Rank 2/L)
+    uint32_t c0 = coord0;
+    uint32_t c1 = coord1;
+    uint32_t c2 = coord2;
+
     asm volatile(
-        "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes "
+        "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::bytes "
         "[%0], [%1, {%2, %3, %4}], [%5];\n"
         :
         : "r"(smem_addr),
           "l"(desc),
-          "r"(coord0),
-          "r"(coord1),
-          "r"(coord2),
+          "r"(c0),
+          "r"(c1),
+          "r"(c2),
           "r"(mbar_addr)
     );
+}
+
+__device__ __forceinline__ uint64_t* mbar_stage(uint64_t* base, int stage) {
+    return base + stage * 2;
 }
 #endif
 
@@ -183,7 +191,9 @@ fp4_gemv_streaming(
 
     const int batch = blockIdx.y;
     const int m_tile = blockIdx.x * TileM;
-    if (batch >= L || m_tile >= M) return;
+
+    // We expect M to be padded, so m_tile is always valid for TMA.
+    if (batch >= L) return;
 
     const int K_packed = K >> 1;
     const int K_scales = K >> 4;
@@ -196,58 +206,70 @@ fp4_gemv_streaming(
     half* D_batch = D + static_cast<size_t>(batch) * M;
 
     extern __shared__ uint8_t smem[];
+
     auto align_up = [] __device__(size_t x, size_t align) {
         return (x + align - 1) & ~(align - 1);
     };
 
     size_t offset = 0;
-    offset = align_up(offset, 16);
-    uint64_t* mbar_a = reinterpret_cast<uint64_t*>(smem + offset);
-    offset += StageCount * sizeof(uint64_t);
+
+    auto alloc_mbar_array = [&] __device__(int count) -> uint64_t* {
+        offset = align_up(offset, 16);
+        uint8_t* base = smem + offset;
+        offset += static_cast<size_t>(count) * 2 * sizeof(uint64_t);
+        return reinterpret_cast<uint64_t*>(base);
+    };
+
+    uint64_t* mbar_a = alloc_mbar_array(StageCount);
+    uint64_t* mbar_b = alloc_mbar_array(1);
+    uint64_t* mbar_sfb = alloc_mbar_array(1);
+
     offset = align_up(offset, 16);
 
-    // Skip unused mbar space
-    offset += 2 * sizeof(uint64_t);
-    offset = align_up(offset, 16);
-
-    uint8_t* smem_base = smem;
-    uint8_t* b_packed_smem = smem_base + offset;
+    uint8_t* b_packed_smem = smem + offset;
     offset += K_packed;
     offset = align_up(offset, 16);
 
-    uint8_t* sfb_smem = smem_base + offset;
+    uint8_t* sfb_smem = smem + offset;
     offset += K_scales;
     offset = align_up(offset, 16);
 
-    offset = align_up(offset, 16);
-    half* b_vec_smem = reinterpret_cast<half*>(smem_base + offset);
+    half* b_vec_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(K) * sizeof(half);
-    offset = align_up(offset, 16);
+
+    // Force 128-byte alignment for TMA destination buffers
+    {
+        uintptr_t current_ptr = (uintptr_t)(smem + offset);
+        uintptr_t aligned_ptr = (current_ptr + 127) & ~127ULL;
+        size_t padding = aligned_ptr - current_ptr;
+        offset += padding;
+    }
 
     uint8_t* a_packed_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
-        a_packed_stage[s] = smem_base + offset;
+        a_packed_stage[s] = smem + offset;
         offset += TileM * TileKPacked;
-        offset = align_up(offset, 128);
     }
+
+    offset = align_up(offset, 16);
 
     uint8_t* sfa_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
-        sfa_stage[s] = smem_base + offset;
+        sfa_stage[s] = smem + offset;
         offset += TileM * TileScaleCount;
-        offset = align_up(offset, 16);
     }
 
-    half* a_f16_smem = reinterpret_cast<half*>(smem_base + offset);
+    half* a_f16_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(TileM) * a_stride * sizeof(half);
     offset = align_up(offset, 64);
 
-    half* b_tile_smem = reinterpret_cast<half*>(smem_base + offset);
+    half* b_tile_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(TileK) * 8 * sizeof(half);
     offset = align_up(offset, 16);
 
-    half* a_scale_smem = reinterpret_cast<half*>(smem_base + offset);
+    half* a_scale_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(TileM) * TileScaleCount * sizeof(half);
+
     (void)offset;
 
 #if __CUDA_ARCH__ >= 900
@@ -267,13 +289,14 @@ fp4_gemv_streaming(
 #if __CUDA_ARCH__ >= 900
     if (tid == 0 && use_tma_a) {
         for (int s = 0; s < StageCount; ++s) {
-            mbarrier_init(&mbar_a[s]);
+            mbarrier_init(mbar_stage(mbar_a, s));
         }
     }
 #endif
     __syncthreads();
 
-    // Robust fallback: Always use software path for B and SFB
+    // Load B and SFB (Full B is loaded since K is assumed to fit in Shared Memory budget for this benchmark)
+    // NOTE: This assumes K is relatively small (e.g. 8192).
     {
         int b_segments = (K_packed + 15) / 16;
         for (int idx = tid; idx < b_segments; idx += Threads) {
@@ -333,27 +356,27 @@ fp4_gemv_streaming(
     auto prefetch_tile = [&](int stage, int k_tile_base) {
         if (use_tma_a) {
             if (warp_id == 0 && lane_id == 0) {
-                // Coordinate order must match Descriptor: (Fastest/K, Slowest/M, [Batch/L])
-                // k_tile_base is in elements, convert to packed coordinates
-                uint32_t c_k = static_cast<uint32_t>(k_tile_base >> 1); // Rank 0 (Fast)
-                uint32_t c_m = static_cast<uint32_t>(m_tile);          // Rank 1 (Slow)
+                uint32_t c_m = static_cast<uint32_t>(m_tile);
+                uint32_t c_k_packed = static_cast<uint32_t>(k_tile_base >> 1);
 
                 if (L == 1) {
                     tma_load_2d(
                         a_packed_stage[stage],
                         desc_A,
-                        c_k, c_m,
-                        static_cast<uint32_t>(TileM * TileKPacked),
-                        &mbar_a[stage]
+                        c_m,
+                        c_k_packed,
+                        static_cast<uint32_t>((TileM * TileKPacked + 15) & ~15),
+                        mbar_stage(mbar_a, stage)
                     );
                 } else {
-                    uint32_t c_l = static_cast<uint32_t>(batch);       // Rank 2
                     tma_load_3d(
                         a_packed_stage[stage],
                         desc_A,
-                        c_k, c_m, c_l,
+                        static_cast<uint32_t>(batch),
+                        c_m,
+                        c_k_packed,
                         static_cast<uint32_t>(TileM * TileKPacked),
-                        &mbar_a[stage]
+                        mbar_stage(mbar_a, stage)
                     );
                 }
             }
@@ -368,17 +391,14 @@ fp4_gemv_streaming(
                 int col = linear - row * TileKPacked;
                 const uint8_t* src = src_base + row * K_packed + col;
                 uint8_t* dst = dst_base + row * TileKPacked + col;
-                bool valid_row = row < tile_rows;
+                bool valid_row = (row < TileM);
                 bool full = (col + 16) <= TileKPacked;
-                bool valid_col = (k_tile_base + col * 2) < K;
-                cp_async_16b(dst, src, valid_row && full && valid_col);
-                if (valid_row && !full && col < TileKPacked && valid_col) {
+                cp_async_16b(dst, src, valid_row && full);
+                if (valid_row && !full && col < TileKPacked) {
 #pragma unroll
                     for (int i = 0; i < 16; ++i) {
                         int g = col + i;
-                        if (g < TileKPacked && (k_tile_base + g * 2) < K) {
-                            dst[i] = src[i];
-                        }
+                        if (g < TileKPacked) dst[i] = src[i];
                     }
                 }
             }
@@ -393,7 +413,7 @@ fp4_gemv_streaming(
                 int col = idx - row * TileScaleCount;
                 int global_scale = scale_offset + col;
                 uint8_t val = 0;
-                if (row < tile_rows && global_scale < K_scales) {
+                if (row < TileM && global_scale < K_scales) {
                     val = SFA_batch[(static_cast<size_t>(m_tile + row) * K_scales) + global_scale];
                 }
                 sfa_stage[stage][row * TileScaleCount + col] = val;
@@ -411,10 +431,10 @@ fp4_gemv_streaming(
     float c_frag_2 = 0.0f;
     float c_frag_3 = 0.0f;
 
-    int k_tiles = (K + TileK - 1) / TileK;
-    for (int tile_idx = 0; tile_idx < k_tiles; ++tile_idx) {
-        int k_tile = tile_idx * TileK;
+    for (int k_tile = 0; k_tile < K; k_tile += TileK) {
+        int tile_idx = k_tile / TileK;
         int stage = tile_idx % StageCount;
+
         int next_stage = (stage + 2) % StageCount;
         int next_k = k_tile + 2 * TileK;
 
@@ -424,7 +444,7 @@ fp4_gemv_streaming(
 
         if (use_tma_a) {
 #if __CUDA_ARCH__ >= 900
-            mbarrier_wait_parity(&mbar_a[stage], stage_phase_smem[stage]);
+            mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
             __syncthreads();
             if (tid == 0) {
                 stage_phase_smem[stage] ^= 1;
@@ -455,17 +475,11 @@ fp4_gemv_streaming(
             for (int idx = tid; idx < tile_rows * curr_cols; idx += Threads) {
                 int row = idx / curr_cols;
                 int col_packed = idx - row * curr_cols;
-                int k_base = k_tile + col_packed * 2;
                 uint8_t packed = a_stage[row * TileKPacked + col_packed];
                 half scale_h = a_scale_smem[row * TileScaleCount + (col_packed >> 3)];
-                half v0 = __float2half(0.0f);
-                half v1 = __float2half(0.0f);
-                if (row < tile_rows && k_base < K) {
-                    v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
-                }
-                if (row < tile_rows && (k_base + 1) < K) {
-                    v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
-                }
+                half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+                half v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+
                 half* a_dst = a_f16_smem + row * a_stride;
                 a_dst[col_packed * 2] = v0;
                 a_dst[col_packed * 2 + 1] = v1;
@@ -525,7 +539,6 @@ fp4_gemv_streaming(
                 );
             }
         }
-
         __syncthreads();
     }
 
@@ -574,30 +587,28 @@ void launch_fp4_gemv_optimized(
     constexpr int kAStride = kTileK + 8;
     constexpr int kTMABoxLimit = 256;
 
-    auto align_up = [](size_t x, size_t align) {
-        return (x + align - 1) & ~(align - 1);
-    };
-
     size_t shared_bytes = 0;
+    auto align_up = [](size_t x, size_t align) { return (x + align - 1) & ~(align - 1); };
+
+    // Alloc calculation
     shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += kStageCount * sizeof(uint64_t);
+    shared_bytes += static_cast<size_t>(kStageCount) * 16; // mbar_a
+    shared_bytes += 16; // mbar_b
+    shared_bytes += 16; // mbar_sfb
+
     shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += 2 * sizeof(uint64_t);
+    shared_bytes += static_cast<size_t>(K) / 2;    // b_packed_smem
     shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += static_cast<size_t>(K) / 2;
+    shared_bytes += static_cast<size_t>(K) / 16;   // sfb_smem
     shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += static_cast<size_t>(K) / 16;
-    shared_bytes = align_up(shared_bytes, 16);
-    shared_bytes += static_cast<size_t>(K) * sizeof(__half);
-    shared_bytes = align_up(shared_bytes, 16);
-    for (int s = 0; s < kStageCount; ++s) {
-        shared_bytes += static_cast<size_t>(kTileM) * kTileKPacked;
-        shared_bytes = align_up(shared_bytes, 128);
-    }
-    for (int s = 0; s < kStageCount; ++s) {
-        shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount;
-        shared_bytes = align_up(shared_bytes, 16);
-    }
+    shared_bytes += static_cast<size_t>(K) * sizeof(__half); // b_vec_smem
+
+    // Add extra padding for 128-byte alignment
+    shared_bytes += 256;
+
+    for (int s = 0; s < kStageCount; ++s) shared_bytes += static_cast<size_t>(kTileM) * kTileKPacked;
+    for (int s = 0; s < kStageCount; ++s) shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount;
+
     shared_bytes += static_cast<size_t>(kTileM) * kAStride * sizeof(__half);
     shared_bytes = align_up(shared_bytes, 64);
     shared_bytes += static_cast<size_t>(kTileK) * 8 * sizeof(__half);
@@ -605,111 +616,72 @@ void launch_fp4_gemv_optimized(
     shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount * sizeof(__half);
 
     auto check_cuda = [](cudaError_t err, const char* msg) {
-        if (err != cudaSuccess) {
-            throw std::runtime_error(std::string(msg) + ": " + cudaGetErrorString(err));
-        }
+        if (err != cudaSuccess) throw std::runtime_error(std::string(msg) + ": " + cudaGetErrorString(err));
     };
 
     const uint64_t K_packed = static_cast<uint64_t>(K / 2);
-    (void)sizeof(K / 16);
+    bool use_tma_a = true;
 
+    // Use heap-aligned allocation for CUtensorMap
     std::vector<uint8_t> map_buf(sizeof(CUtensorMap) + 64);
-    void* raw_ptr = map_buf.data();
+    void* ptr = map_buf.data();
     size_t space = map_buf.size();
-    void* aligned_ptr = std::align(64, sizeof(CUtensorMap), raw_ptr, space);
+    void* aligned_ptr = std::align(64, sizeof(CUtensorMap), ptr, space);
     if (!aligned_ptr) throw std::runtime_error("Failed to align CUtensorMap");
+
     std::memset(aligned_ptr, 0, sizeof(CUtensorMap));
     CUtensorMap* map_A_ptr = reinterpret_cast<CUtensorMap*>(aligned_ptr);
     CUtensorMap* d_map_A = nullptr;
-    CUtensorMap* d_map_B = nullptr;
-    CUtensorMap* d_map_SFB = nullptr;
-    bool tma_ok = true;
 
-    if ((uintptr_t)A_ptr % 16 != 0) tma_ok = false;
+    uintptr_t base_addr = reinterpret_cast<uintptr_t>(A_ptr);
+    if ((base_addr % 16) != 0) use_tma_a = false;
 
-    auto encode_tma = [&](CUtensorMap* out,
-                          CUtensorMapDataType type,
-                          cuuint32_t rank,
-                          const void* base,
-                          const cuuint64_t* dims,
-                          const cuuint64_t* globalStrides,
-                          const cuuint32_t* box) {
-        return cuTensorMapEncodeTiled(
-            out,
-            type,
-            rank,
-            const_cast<void*>(base),
-            dims,
-            globalStrides,
-            box,
-            nullptr,
-            CU_TENSOR_MAP_INTERLEAVE_NONE,
-            CU_TENSOR_MAP_SWIZZLE_NONE,
-            CU_TENSOR_MAP_L2_PROMOTION_NONE,
-            CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
-        );
-    };
-
-    if (tma_ok) {
+    if (use_tma_a) {
         cuuint32_t box_k = static_cast<cuuint32_t>(std::min({(uint64_t)kTileKPacked, K_packed, (uint64_t)kTMABoxLimit}));
         cuuint32_t box_m = static_cast<cuuint32_t>(std::min({(uint64_t)kTileM, (uint64_t)M, (uint64_t)kTMABoxLimit}));
 
+        // Element strides
+        cuuint32_t elementStrides[5] = {1, 1, 1, 1, 1};
+        CUresult res;
+
         if (L == 1) {
-            // Rank 2: (K, M). Rank 0 (K) is contiguous.
-            cuuint64_t dims_A[2] = {
-                static_cast<cuuint64_t>(K_packed),
-                static_cast<cuuint64_t>(M)
-            };
-            cuuint32_t box_A[2] = {box_k, box_m};
-            cuuint64_t strides_A[1] = {
-                static_cast<cuuint64_t>(K_packed) // Stride for Dim 1 (M)
-            };
-
-            if (box_A[0] > 256 || box_A[1] > 256) tma_ok = false;
-
-            if (tma_ok) {
-                CUresult resA = encode_tma(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, A_ptr, dims_A, strides_A, box_A);
-                if (resA != CUDA_SUCCESS) {
-                    tma_ok = false;
-                }
-            }
+            cuuint64_t dims_A[2] = {static_cast<cuuint64_t>(M), static_cast<cuuint64_t>(K_packed)};
+            cuuint32_t box_A[2] = {box_m, box_k};
+            cuuint64_t strides_A[1] = {static_cast<cuuint64_t>(K_packed)};
+            res = cuTensorMapEncodeTiled(
+                map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, const_cast<void*>((void*)A_ptr),
+                dims_A, strides_A, box_A, elementStrides,
+                CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE,
+                CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+            );
         } else {
-            // Rank 3: (K, M, L).
-            cuuint64_t dims_A[3] = {
-                static_cast<cuuint64_t>(K_packed),
-                static_cast<cuuint64_t>(M),
-                static_cast<cuuint64_t>(L)
-            };
-            cuuint32_t box_A[3] = {box_k, box_m, 1u};
-            cuuint64_t strides_A[2] = {
-                static_cast<cuuint64_t>(K_packed),    // Stride for Dim 1 (M)
-                static_cast<cuuint64_t>(M * K_packed) // Stride for Dim 2 (L)
-            };
-
-            if (box_A[0] > 256 || box_A[1] > 256 || box_A[2] > 256) tma_ok = false;
-
-            if (tma_ok) {
-                CUresult resA = encode_tma(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, A_ptr, dims_A, strides_A, box_A);
-                if (resA != CUDA_SUCCESS) tma_ok = false;
-            }
+            cuuint64_t dims_A[3] = {static_cast<cuuint64_t>(L), static_cast<cuuint64_t>(M), static_cast<cuuint64_t>(K_packed)};
+            cuuint32_t box_A[3] = {1u, box_m, box_k};
+            cuuint64_t strides_A[2] = {static_cast<cuuint64_t>(M) * K_packed, static_cast<cuuint64_t>(K_packed)};
+            res = cuTensorMapEncodeTiled(
+                map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, const_cast<void*>((void*)A_ptr),
+                dims_A, strides_A, box_A, elementStrides,
+                CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE,
+                CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+            );
         }
-    }
 
-    if (tma_ok) {
+        if (res != CUDA_SUCCESS) {
+            const char* err_str = nullptr;
+            cuGetErrorString(res, &err_str);
+            throw std::runtime_error(std::string("TMA Encode failed: ") + (err_str ? err_str : "unknown"));
+        }
+
         check_cuda(cudaMalloc(&d_map_A, sizeof(CUtensorMap)), "cudaMalloc d_map_A");
         check_cuda(cudaMemcpy(d_map_A, map_A_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_A");
     }
 
     cudaFuncAttributes attr;
     cudaError_t attr_err = cudaFuncGetAttributes(&attr, fp4_gemv_streaming<kTileM, kTileK, kThreads>);
-    if (attr_err != cudaSuccess) throw std::runtime_error(std::string("cudaFuncGetAttributes failed"));
+    if (attr_err != cudaSuccess) throw std::runtime_error("cudaFuncGetAttributes failed");
 
-    cudaError_t set_err = cudaFuncSetAttribute(
-        fp4_gemv_streaming<kTileM, kTileK, kThreads>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        static_cast<int>(shared_bytes)
-    );
-    if (set_err != cudaSuccess) throw std::runtime_error(std::string("cudaFuncSetAttribute failed"));
+    cudaError_t set_err = cudaFuncSetAttribute(fp4_gemv_streaming<kTileM, kTileK, kThreads>, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shared_bytes));
+    if (set_err != cudaSuccess) throw std::runtime_error("cudaFuncSetAttribute failed");
 
     int num_blocks = static_cast<int>((M + kTileM - 1) / kTileM);
     dim3 grid(num_blocks, static_cast<int>(L));
@@ -717,17 +689,13 @@ void launch_fp4_gemv_optimized(
 
     fp4_gemv_streaming<kTileM, kTileK, kThreads><<<grid, block, shared_bytes>>>(
         A_ptr, B_ptr, SFA_ptr, SFB_ptr,
-        d_map_A, d_map_B, d_map_SFB,
+        d_map_A, nullptr, nullptr,
         D_ptr, static_cast<int>(M), static_cast<int>(K), static_cast<int>(L)
     );
 
     cudaError_t err = cudaDeviceSynchronize();
     if (d_map_A) cudaFree(d_map_A);
-    if (d_map_B) cudaFree(d_map_B);
-    if (d_map_SFB) cudaFree(d_map_SFB);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err));
-    }
+    if (err != cudaSuccess) check_cuda(err, "Kernel execution failed");
 }
 """
 
@@ -750,9 +718,7 @@ def get_module():
             name="nvfp4_gemv_sm100_ptx",
             cpp_sources=cpp_source,
             cuda_sources=cuda_source,
-            functions=[
-                "launch_fp4_gemv_optimized",
-            ],
+            functions=["launch_fp4_gemv_optimized"],
             verbose=True,
             extra_cuda_cflags=[
                 "-O3",
@@ -775,59 +741,82 @@ def get_module():
 
 
 def custom_kernel(data: input_t) -> output_t:
-    """
-    SM100 FP4 GEMV with tensor cores: CUTLASS + CuTe + PTX only (NO WMMA)
-
-
-    """
     a, b, sfa_ref_cpu, sfb_ref_cpu, sfa_permuted, sfb_permuted, c = data
-
     M, _, L = c.shape
     K = a.shape[1] * 2
     K_scales = K // 16
 
-    # Permute to [L, M, K/2] layout
-    # CRITICAL: Clone first to avoid tensor aliasing/reuse between test calls
-    a = a.clone().permute(2, 0, 1).contiguous().cuda()
-    b = b.clone().permute(2, 0, 1).contiguous().cuda()
-    c = c.clone().permute(2, 0, 1).contiguous().cuda()
+    # 1. Pad dimensions to multiples of 128
+    pad_m = (128 - M % 128) % 128
+    pad_k = (128 - K % 128) % 128  # Logical K padding
 
-    # Shape assertions to catch corruption early
-    assert a.shape == (L, M, K // 2), (
-        f"Shape mismatch: a.shape={a.shape}, expected=({L}, {M}, {K // 2})"
-    )
-    assert b.shape[0] == L and b.shape[2] == K // 2, (
-        f"Shape mismatch: b.shape={b.shape}"
-    )
+    # K is in units of FP4 elements.
+    # a is [L, M, K/2]. We need to pad K dimension of a (dim 2) by pad_k/2.
+    # We must also pad M dimension (dim 1).
 
-    # Reinterpret as raw bytes
-    a_bytes = a.view(torch.uint8)
-    b_bytes = b.view(torch.uint8)
+    a_in = a.clone().permute(2, 0, 1).contiguous()  # [L, M, K/2]
 
-    # Scale factors: prefer pre-permuted tensors if provided
-    # sfa_permuted should already be [L, M, K_scales], and sfb_permuted [L, 128, K_scales]
-    # Use these directly when available to avoid re-permuting on every call
-    # NOTE: sfa_permuted from reference.py is actually [32, 4, rest_m, 4, rest_k, L] which is NOT [L, M, K_scales]
-    # So we'll always use the fallback path for now
+    if pad_m > 0 or pad_k > 0:
+        a_in = torch.nn.functional.pad(a_in, (0, pad_k // 2, 0, pad_m), value=0)
+
+    a_bytes = a_in.contiguous().cuda().view(torch.uint8)
+
+    # 2. Pad and Broadcast B
+    # b is [L, 1, K/2] ideally.
+    # We need to pad K, and broadcast to 128 rows for the kernel.
+    b_in = (
+        b.clone().permute(2, 0, 1).contiguous()
+    )  # [L, 1, K/2] assuming input b matches
+
+    if pad_k > 0:
+        b_in = torch.nn.functional.pad(b_in, (0, pad_k // 2), value=0)
+
+    # Broadcast to [L, 128, K_padded/2]
+    b_expanded = b_in.expand(-1, 128, -1).contiguous()
+    b_bytes = b_expanded.cuda().view(torch.uint8)
+
+    # 3. SFA padding
     if sfa_permuted is not None and list(sfa_permuted.shape) == [L, M, K_scales]:
-        sfa_bytes = sfa_permuted.contiguous().cuda().view(torch.uint8)
+        sfa_in = sfa_permuted.contiguous()
     else:
-        # Fall back to permuting sfa_ref_cpu on the fly
-        sfa_bytes = (
-            sfa_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda().view(torch.uint8)
-        )
+        sfa_in = sfa_ref_cpu.clone().permute(2, 0, 1).contiguous()
+
+    # SFA is [L, M, K_scales]. Pad M and K_scales.
+    # K_scales padding corresponds to pad_k / 16.
+    pad_scales = pad_k // 16
+    if pad_m > 0 or pad_scales > 0:
+        sfa_in = torch.nn.functional.pad(sfa_in, (0, pad_scales, 0, pad_m), value=0)
+
+    sfa_bytes = sfa_in.cuda().view(torch.uint8)
+
+    # 4. SFB padding and broadcast
     if sfb_permuted is not None and list(sfb_permuted.shape) == [L, 128, K_scales]:
-        sfb_bytes = sfb_permuted.contiguous().cuda().view(torch.uint8)
+        sfb_in = sfb_permuted.contiguous()
     else:
-        sfb_bytes = (
-            sfb_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda().view(torch.uint8)
-        )
+        sfb_in = sfb_ref_cpu.clone().permute(2, 0, 1).contiguous()
+        # Ensure sfb has 128 dim if ref is [L, 1, K]
+        if sfb_in.size(1) == 1:
+            sfb_in = sfb_in.expand(-1, 128, -1).contiguous()
 
-    # Launch SM100 tensor core kernel
+    # Pad scales
+    if pad_scales > 0:
+        sfb_in = torch.nn.functional.pad(sfb_in, (0, pad_scales), value=0)
+
+    sfb_bytes = sfb_in.cuda().view(torch.uint8)
+
+    M_padded = M + pad_m
+    K_padded = K + pad_k
+
+    # Allocate output with padded M
+    d_out = torch.empty((L, M_padded), dtype=torch.float16, device="cuda")
+
     mod = get_module()
-    mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L)
+    mod.launch_fp4_gemv_optimized(
+        a_bytes, b_bytes, sfa_bytes, sfb_bytes, d_out, M_padded, K_padded, L
+    )
 
-    # Permute output back
-    c = c.permute(1, 2, 0).contiguous()  # [M, 1, L]
+    # Slice and permute back to [M, 1, L]
+    d_sliced = d_out[:, :M]  # [L, M]
+    c_out = d_sliced.permute(1, 0).unsqueeze(1).contiguous()  # [M, 1, L]
 
-    return c
+    return c_out

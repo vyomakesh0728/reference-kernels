@@ -86,6 +86,116 @@ def ref_kernel(
             print(f"  scale_b (blocked): {scale_b.shape}")
             print(f"  scale_a[:8]: {scale_a[:8].view(torch.uint8).tolist()}")
             print(f"  scale_b[:8]: {scale_b[:8].view(torch.uint8).tolist()}")
+            
+            # DEBUG: Match kernel debug output format
+            print("\n=== REFERENCE DEBUG (batch 0) ===")
+            
+            # SFB: row 0, first 4 scale columns (before blocking)
+            sfb_row0 = sfb_ref_cpu[0, :4, l_idx].view(torch.uint8)
+            print(f"SFB raw bytes [row=0, 0-3] (pre-block): 0x{sfb_row0[0].item():02x} 0x{sfb_row0[1].item():02x} 0x{sfb_row0[2].item():02x} 0x{sfb_row0[3].item():02x}")
+            
+            # Decode FP8 values
+            sfb_fp8 = sfb_ref_cpu[0, :4, l_idx].float()
+            print(f"SFB decoded FP8 [row=0, 0-3]: {sfb_fp8[0].item():.6f} {sfb_fp8[1].item():.6f} {sfb_fp8[2].item():.6f} {sfb_fp8[3].item():.6f}")
+            
+            # B packed bytes: row 0, first 4 bytes
+            b_row0 = b_ref[0, :4, l_idx].view(torch.uint8)
+            print(f"B packed bytes [row=0, 0-3]: 0x{b_row0[0].item():02x} 0x{b_row0[1].item():02x} 0x{b_row0[2].item():02x} 0x{b_row0[3].item():02x}")
+            
+            # Decode B vector manually (first 8 elements)
+            fp4_lut = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+                       -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+            b_decoded = []
+            for i in range(4):
+                packed = b_ref[0, i, l_idx].view(torch.uint8).item()
+                scale_idx = i // 8  # same scale for 16 elements
+                scale_val = sfb_ref_cpu[0, scale_idx, l_idx].float().item()
+                lo = packed & 0x0F
+                hi = (packed >> 4) & 0x0F
+                b_decoded.append(fp4_lut[lo] * scale_val)
+                b_decoded.append(fp4_lut[hi] * scale_val)
+            print(f"B decoded [row=0, 0-7]: {b_decoded[0]:.6f} {b_decoded[1]:.6f} {b_decoded[2]:.6f} {b_decoded[3]:.6f} {b_decoded[4]:.6f} {b_decoded[5]:.6f} {b_decoded[6]:.6f} {b_decoded[7]:.6f}")
+            
+            # SFA: row 0, first 4 scale columns (before blocking)
+            sfa_row0 = sfa_ref_cpu[0, :4, l_idx].view(torch.uint8)
+            print(f"SFA raw bytes [row=0, 0-3] (pre-block): 0x{sfa_row0[0].item():02x} 0x{sfa_row0[1].item():02x} 0x{sfa_row0[2].item():02x} 0x{sfa_row0[3].item():02x}")
+            
+            # Decode SFA FP8
+            sfa_fp8 = sfa_ref_cpu[0, :4, l_idx].float()
+            print(f"SFA decoded FP8 [row=0, 0-3]: {sfa_fp8[0].item():.6f} {sfa_fp8[1].item():.6f} {sfa_fp8[2].item():.6f} {sfa_fp8[3].item():.6f}")
+            
+            # A packed bytes: row 0, first 4 bytes
+            a_row0 = a_ref[0, :4, l_idx].view(torch.uint8)
+            print(f"A packed bytes [row=0, 0-3]: 0x{a_row0[0].item():02x} 0x{a_row0[1].item():02x} 0x{a_row0[2].item():02x} 0x{a_row0[3].item():02x}")
+            
+            # Decode A[row=0] manually (first 8 elements)
+            a_decoded = []
+            for i in range(4):
+                packed = a_ref[0, i, l_idx].view(torch.uint8).item()
+                scale_idx = i // 8  # same scale for 16 elements
+                scale_val = sfa_ref_cpu[0, scale_idx, l_idx].float().item()
+                lo = packed & 0x0F
+                hi = (packed >> 4) & 0x0F
+                a_decoded.append(fp4_lut[lo] * scale_val)
+                a_decoded.append(fp4_lut[hi] * scale_val)
+            print(f"A decoded [row=0, 0-7]: {a_decoded[0]:.6f} {a_decoded[1]:.6f} {a_decoded[2]:.6f} {a_decoded[3]:.6f} {a_decoded[4]:.6f} {a_decoded[5]:.6f} {a_decoded[6]:.6f} {a_decoded[7]:.6f}")
+            
+            # Compute expected cute_scale_idx values for comparison
+            # CuTe MMA layout: [32, 4, n_m_blocks, 4, n_k_blocks, L]
+            # For element at (row, scale_col, batch):
+            #   mm32 = row % 32
+            #   mm4  = (row % 128) // 32
+            #   mm   = row // 128
+            #   kk4  = scale_col % 4
+            #   kk   = scale_col // 4
+            n_m_blocks = ceil_div(m, 128)
+            n_k_blocks_ref = ceil_div(k_scales, 4)
+            
+            def compute_cute_idx(row, scale_col, batch_idx, n_m_blk, n_k_blk, L_val):
+                mm32 = row % 32
+                mm4 = (row % 128) // 32
+                mm = row // 128
+                kk4 = scale_col % 4
+                kk = scale_col // 4
+                idx = (mm32 * (4 * n_m_blk * 4 * n_k_blk * L_val)
+                     + mm4 * (n_m_blk * 4 * n_k_blk * L_val)
+                     + mm * (4 * n_k_blk * L_val)
+                     + kk4 * (n_k_blk * L_val)
+                     + kk * L_val
+                     + batch_idx)
+                return idx
+            
+            # Test indices for rows 1, 32, 128
+            idx_r1 = compute_cute_idx(1, 0, l_idx, n_m_blocks, n_k_blocks_ref, l)
+            idx_r32 = compute_cute_idx(32, 0, l_idx, n_m_blocks, n_k_blocks_ref, l)
+            idx_r128 = compute_cute_idx(128, 0, l_idx, n_m_blocks, n_k_blocks_ref, l)
+            print(f"REFERENCE cute_idx row test: r1={idx_r1} r32={idx_r32} r128={idx_r128}")
+            print(f"  (n_m_blocks={n_m_blocks}, n_k_blocks={n_k_blocks_ref}, L={l})")
+            
+            print("=== END REFERENCE DEBUG ===")
+            
+            # Compute expected dot product for row 0 manually
+            row0_sum = 0.0
+            for k_idx in range(k // 2):
+                packed_a = a_ref[0, k_idx, l_idx].view(torch.uint8).item()
+                packed_b = b_ref[0, k_idx, l_idx].view(torch.uint8).item()
+                scale_a_idx = k_idx // 8
+                scale_b_idx = k_idx // 8
+                scale_a_val = sfa_ref_cpu[0, scale_a_idx, l_idx].float().item()
+                scale_b_val = sfb_ref_cpu[0, scale_b_idx, l_idx].float().item()
+                
+                a_lo = packed_a & 0x0F
+                a_hi = (packed_a >> 4) & 0x0F
+                b_lo = packed_b & 0x0F
+                b_hi = (packed_b >> 4) & 0x0F
+                
+                a0 = fp4_lut[a_lo] * scale_a_val
+                a1 = fp4_lut[a_hi] * scale_a_val
+                b0 = fp4_lut[b_lo] * scale_b_val
+                b1 = fp4_lut[b_hi] * scale_b_val
+                
+                row0_sum += a0 * b0 + a1 * b1
+            print(f"REFERENCE row 0 expected dot product: {row0_sum:.4f}")
 
         # (m, k) @ (n, k).T -> (m, n)
         res = torch._scaled_mm(
