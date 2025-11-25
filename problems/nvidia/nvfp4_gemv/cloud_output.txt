@@ -1,0 +1,218 @@
+Running on:
+GPU: NVIDIA B200
+CPU: INTEL(R) XEON(R) PLATINUM 8570
+Runtime: CUDA
+Platform: Linux-6.8.0-51-generic-x86_64-with-glibc2.35
+Torch: 2.9.1+cu130
+
+
+Benchmarks:
+❌ k: 16384; l: 1; m: 7168; seed: 1111 failed testing:
+
+mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 6937 ERROR AT (0, 0, 0): 4632.0 4668.0 ERROR AT (1, 0, 0): 4776.0 4840.0 ERROR AT (2, 0, 0): 4648.0 4756.0 ERROR AT (3, 0, 0): 4524.0 4532.0 ERROR AT (4, 0, 0): 4572.0 4812.0 ... and 6932 more mismatched elements.
+
+❌ k: 7168; l: 8; m: 4096; seed: 1111 failed testing:
+
+mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32107 ERROR AT (0, 0, 0): 2158.0 2244.0 ERROR AT (0, 0, 1): 2010.0 2168.0 ERROR AT (0, 0, 2): 1897.0 1782.0 ERROR AT (0, 0, 3): 1846.0 1916.0 ERROR AT (0, 0, 4): 1789.0 1786.0 ... and 32102 more mismatched elements.
+
+❌ k: 2048; l: 4; m: 7168; seed: 1111 failed testing:
+
+mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 28375 ERROR AT (0, 0, 0): 649.0 504.75 ERROR AT (0, 0, 1): 601.0 642.0 ERROR AT (0, 0, 2): 549.5 513.0 ERROR AT (0, 0, 3): 471.75 555.5 ERROR AT (1, 0, 0): 657.0 660.5 ... and 28370 more mismatched elements.
+Cluster Bot
+APP
+ — 2:22 PM
+Program stdout (1/9):
+[SCALE DEBUG] sfa_ref_cpu shape=torch.Size([7168, 1024, 1]), device=cuda:0
+[SCALE DEBUG] sfb_ref_cpu shape=torch.Size([128, 1024, 1]), device=cuda:0
+[DEBUG] a_bytes: shape=(1, 7168, 8192), stride=(58720256, 8192, 1), elem_size=1, numel=58720256, bytes=58720256, data_ptr=0x7ffc72000000
+[DEBUG] b_bytes: shape=(1, 128, 8192), stride=(1048576, 8192, 1), elem_size=1, numel=1048576, bytes=1048576, data_ptr=0x7ffcaf800000
+[DEBUG] sfa_bytes: shape=(1, 7168, 1024), stride=(7340032, 1024, 1), elem_size=1, numel=7340032, bytes=7340032, data_ptr=0x7ffcae000000
+[DEBUG] sfb_bytes: shape=(1, 128, 1024), stride=(131072, 1024, 1), elem_size=1, numel=131072, bytes=131072, data_ptr=0x7ffcabb87000
+[DEBUG] a_bytes range: [0x7ffc72000000, 0x7ffc75800000) (58720256 bytes)
+[DEBUG] b_bytes range: [0x7ffcaf800000, 0x7ffcaf900000) (1048576 bytes)
+[DEBUG] sfa_bytes range: [0x7ffcae000000, 0x7ffcae700000) (7340032 bytes)
+[DEBUG] sfb_bytes range: [0x7ffcabb87000, 0x7ffcabba7000) (131072 bytes)
+[DEBUG] a shape=(1, 7168, 8192), stride=(58720256, 8192, 1), data_ptr=0x7ffc72000000
+[DEBUG] b shape=(1, 128, 8192), stride=(1048576, 8192, 1), data_ptr=0x7ffcaf800000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ (Python) a_bytes 128-byte alignment check passed: 0x7ffc72000000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ (Python) b_bytes 128-byte alignment check passed: 0x7ffcaf800000
+Program stdout (2/9):
+[1/2] /usr/local/cuda-13.0/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemv_sm100_ptx -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 --use_fast_math -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -c /home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu -o cuda.cuda.o
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(1079): warning #177-D: variable "K_scales" was declared but never referenced
+      const uint64_t K_scales = static_cast<uint64_t>(K / 16);
+                     ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(1081): warning #177-D: variable "use_tma_a" was declared but never referenced
+      bool use_tma_a = true;
+           ^
+
+ptxas warning : Local memory used for function '_Z18fp4_gemv_streamingILi128ELi128ELi320EEvPKhS1_S1_S1_PK14CUtensorMap_stS4_S4_P6__halfiii', size of stack frame: 696 bytes
+ptxas info    : 7064 bytes gmem
+ptxas info    : Compiling entry function '_Z18fp4_gemv_streamingILi128ELi128ELi320EEvPKhS1_S1_S1_PK14CUtensorMap_stS4_S4_P6__halfiii' for 'sm_100a'
+Program stdout (3/9):
+ptxas info    : Function properties for _Z18fp4_gemv_streamingILi128ELi128ELi320EEvPKhS1_S1_S1_PK14CUtensorMap_stS4_S4_P6__halfiii
+    696 bytes stack frame, 492 bytes spill stores, 540 bytes spill loads
+ptxas info    : Used 96 registers, used 1 barriers, 696 bytes cumulative stack size, 16 bytes smem
+ptxas info    : Compile time = 591.112 ms
+[2/2] c++ main.o cuda.cuda.o -shared -lcuda -L/usr/local/lib/python3.10/dist-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda-13.0/lib64 -lcudart -o nvfp4_gemv_sm100_ptx.so
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ A_ptr 128-byte alignment check passed: 0x7ffc72000000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ K_packed 128-byte stride alignment check passed: 8192 bytes
+TMA Debug: A_ptr = 0x7ffc72000000, map_A_ptr = 0x5555622fbe00
+WARNING: box_k (64) is not a multiple of 128 elements, may reduce TMA efficiency
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ Tile size 128-byte alignment check passed: 8192 bytes
+TMA Debug: Using RANK=2 for L=1
+TMA Debug: dims = [K_packed=8192, M=7168], box = [64, 128]
+TMA Debug: strides_A[0] = 8192 bytes
+TMA Encode A Result: 0
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ TMA Encode A (rank=2) SUCCESS!
+DEBUG launch grid=(56,1) blockDim.x=320 shared_bytes=108672 M=7168 K=16384 L=1
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=1
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=2
+KERNEL STARTING: grid=(56,1,1) blockDim.x=320 M=7168 K=16384 L=1
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=160
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=161
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=162
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=163
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=164
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=165
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=166
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=167
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=168
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=169
+Program stdout (4/9):
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=170
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=171
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=172
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=173
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=174
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=175
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=176
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=177
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=178
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=179
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=180
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=181
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=182
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=183
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=184
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=185
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=186
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=187
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=188
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=189
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=190
+IN_LOOP B/SFB cp_async START block=(40,0,0) tid=191
+DBG block=(3,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=384 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(2,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=256 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(13,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1664 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(12,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1536 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(1,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=128 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(6,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=768 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+Program stdout (5/9):
+DBG block=(7,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=896 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(9,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1152 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(8,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1024 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(49,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=6272 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(39,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=4992 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(54,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=6912 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(43,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=5504 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(32,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=4096 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(42,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=5376 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(26,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3328 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(27,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3456 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(29,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3712 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(28,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3584 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(30,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3840 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(31,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3968 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+Program stdout (6/9):
+DBG block=(20,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=2560 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(21,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=2688 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(24,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3072 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(25,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3200 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(15,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1920 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(14,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1792 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(19,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=2432 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(18,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=2304 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+
+[SCALE DEBUG] sfa_ref_cpu shape=torch.Size([7168, 1024, 1]), device=cuda:0
+[SCALE DEBUG] sfb_ref_cpu shape=torch.Size([128, 1024, 1]), device=cuda:0
+[DEBUG] a_bytes: shape=(1, 7168, 8192), stride=(58720256, 8192, 1), elem_size=1, numel=58720256, bytes=58720256, data_ptr=0x7ffc78000000
+[DEBUG] b_bytes: shape=(1, 128, 8192), stride=(1048576, 8192, 1), elem_size=1, numel=1048576, bytes=1048576, data_ptr=0x7ffc5d900000
+[DEBUG] sfa_bytes: shape=(1, 7168, 1024), stride=(7340032, 1024, 1), elem_size=1, numel=7340032, bytes=7340032, data_ptr=0x7ffcca000000
+[DEBUG] sfb_bytes: shape=(1, 128, 1024), stride=(131072, 1024, 1), elem_size=1, numel=131072, bytes=131072, data_ptr=0x7ffcabb87000
+[DEBUG] a_bytes range: [0x7ffc78000000, 0x7ffc7b800000) (58720256 bytes)
+[DEBUG] b_bytes range: [0x7ffc5d900000, 0x7ffc5da00000) (1048576 bytes)
+Program stdout (7/9):
+[DEBUG] sfa_bytes range: [0x7ffcca000000, 0x7ffcca700000) (7340032 bytes)
+[DEBUG] sfb_bytes range: [0x7ffcabb87000, 0x7ffcabba7000) (131072 bytes)
+[DEBUG] a shape=(1, 7168, 8192), stride=(58720256, 8192, 1), data_ptr=0x7ffc78000000
+[DEBUG] b shape=(1, 128, 8192), stride=(1048576, 8192, 1), data_ptr=0x7ffc5d900000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ (Python) a_bytes 128-byte alignment check passed: 0x7ffc78000000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ (Python) b_bytes 128-byte alignment check passed: 0x7ffc5d900000
+
+[SCALE DEBUG] sfa_ref_cpu shape=torch.Size([4096, 448, 8]), device=cuda:0
+[SCALE DEBUG] sfb_ref_cpu shape=torch.Size([128, 448, 8]), device=cuda:0
+[DEBUG] a_bytes: shape=(8, 4096, 3584), stride=(14680064, 3584, 1), elem_size=1, numel=117440512, bytes=117440512, data_ptr=0x7ffc14000000
+[DEBUG] b_bytes: shape=(8, 128, 3584), stride=(458752, 3584, 1), elem_size=1, numel=3670016, bytes=3670016, data_ptr=0x7ffc6f220000
+[DEBUG] sfa_bytes: shape=(8, 4096, 448), stride=(1835008, 448, 1), elem_size=1, numel=14680064, bytes=14680064, data_ptr=0x7ffc6d620000
+[DEBUG] sfb_bytes: shape=(8, 128, 448), stride=(57344, 448, 1), elem_size=1, numel=458752, bytes=458752, data_ptr=0x7ffc5d8e0000
+[DEBUG] a_bytes range: [0x7ffc14000000, 0x7ffc1b000000) (117440512 bytes)
+[DEBUG] b_bytes range: [0x7ffc6f220000, 0x7ffc6f5a0000) (3670016 bytes)
+[DEBUG] sfa_bytes range: [0x7ffc6d620000, 0x7ffc6e420000) (14680064 bytes)
+[DEBUG] sfb_bytes range: [0x7ffc5d8e0000, 0x7ffc5d950000) (458752 bytes)
+[DEBUG] a shape=(8, 4096, 3584), stride=(14680064, 3584, 1), data_ptr=0x7ffc14000000
+[DEBUG] b shape=(8, 128, 3584), stride=(458752, 3584, 1), data_ptr=0x7ffc6f220000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ (Python) a_bytes 128-byte alignment check passed: 0x7ffc14000000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ (Python) b_bytes 128-byte alignment check passed: 0x7ffc6f220000
+
+[SCALE DEBUG] sfa_ref_cpu shape=torch.Size([7168, 128, 4]), device=cuda:0
+Program stdout (8/9):
+[SCALE DEBUG] sfb_ref_cpu shape=torch.Size([128, 128, 4]), device=cuda:0
+[DEBUG] a_bytes: shape=(4, 7168, 1024), stride=(7340032, 1024, 1), elem_size=1, numel=29360128, bytes=29360128, data_ptr=0x7ffc66000000
+[DEBUG] b_bytes: shape=(4, 128, 1024), stride=(131072, 1024, 1), elem_size=1, numel=524288, bytes=524288, data_ptr=0x7ffc5d90e000
+[DEBUG] sfa_bytes: shape=(4, 7168, 128), stride=(917504, 128, 1), elem_size=1, numel=3670016, bytes=3670016, data_ptr=0x7ffc6eb20000
+[DEBUG] sfb_bytes: shape=(4, 128, 128), stride=(16384, 128, 1), elem_size=1, numel=65536, bytes=65536, data_ptr=0x7ffcaf6dc000
+[DEBUG] a_bytes range: [0x7ffc66000000, 0x7ffc67c00000) (29360128 bytes)
+[DEBUG] b_bytes range: [0x7ffc5d90e000, 0x7ffc5d98e000) (524288 bytes)
+[DEBUG] sfa_bytes range: [0x7ffc6eb20000, 0x7ffc6eea0000) (3670016 bytes)
+[DEBUG] sfb_bytes range: [0x7ffcaf6dc000, 0x7ffcaf6ec000) (65536 bytes)
+[DEBUG] a shape=(4, 7168, 1024), stride=(7340032, 1024, 1), data_ptr=0x7ffc66000000
+[DEBUG] b shape=(4, 128, 1024), stride=(131072, 1024, 1), data_ptr=0x7ffc5d90e000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ (Python) a_bytes 128-byte alignment check passed: 0x7ffc66000000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ (Python) b_bytes 128-byte alignment check passed: 0x7ffc5d90e000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ A_ptr 128-byte alignment check passed: 0x7ffc78000000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ K_packed 128-byte stride alignment check passed: 8192 bytes
+TMA Debug: A_ptr = 0x7ffc78000000, map_A_ptr = 0x55556adecc00
+WARNING: box_k (64) is not a multiple of 128 elements, may reduce TMA efficiency
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ Tile size 128-byte alignment check passed: 8192 bytes
+TMA Debug: Using RANK=2 for L=1
+TMA Debug: dims = [K_packed=8192, M=7168], box = [64, 128]
+TMA Debug: strides_A[0] = 8192 bytes
+TMA Encode A Result: 0
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ TMA Encode A (rank=2) SUCCESS!
+DEBUG launch grid=(56,1) blockDim.x=320 shared_bytes=108672 M=7168 K=16384 L=1
+Program stdout (9/9):
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ A_ptr 128-byte alignment check passed: 0x7ffc14000000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ K_packed 128-byte stride alignment check passed: 3584 bytes
+TMA Debug: A_ptr = 0x7ffc14000000, map_A_ptr = 0x55556adecc00
+WARNING: box_k (64) is not a multiple of 128 elements, may reduce TMA efficiency
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ Tile size 128-byte alignment check passed: 8192 bytes
+TMA Debug: Using RANK=3 for L=8
+TMA Debug: dims = [K_packed=3584, M=4096, L=8], box = [64, 128, 1]
+TMA Debug: strides_A = [3584, 14680064]
+TMA Encode A Result: 0
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ TMA Encode A (rank=3) SUCCESS!
+DEBUG launch grid=(32,8) blockDim.x=320 shared_bytes=85120 M=4096 K=7168 L=8
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ A_ptr 128-byte alignment check passed: 0x7ffc66000000
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ K_packed 128-byte stride alignment check passed: 1024 bytes
+TMA Debug: A_ptr = 0x7ffc66000000, map_A_ptr = 0x55556adecc00
+WARNING: box_k (64) is not a multiple of 128 elements, may reduce TMA efficiency
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ Tile size 128-byte alignment check passed: 8192 bytes
+TMA Debug: Using RANK=3 for L=4
+TMA Debug: dims = [K_packed=1024, M=7168, L=4], box = [64, 128, 1]
+TMA Debug: strides_A = [1024, 7340032]
+TMA Encode A Result: 0
+ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ TMA Encode A (rank=3) SUCCESS!
+DEBUG launch grid=(56,4) blockDim.x=320 shared_bytes=71936 M=7168 K=2048 L=4
