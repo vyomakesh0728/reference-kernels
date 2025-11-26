@@ -802,13 +802,13 @@ fp4_gemv_streaming(
                 int matrix_id = lane_id / 8;  // 0, 1, 2, or 3
                 int row_in_matrix = lane_id % 8;  // 0-7
 
-                // PTX layout: LSB = row block, MSB = column block. Swap fixes A01/A10 mixup.
+                // Matrix layout: bit0 of matrix_id selects the row block, bit1 selects the col block:
                 //   matrix_id 0 -> rows 0-7,  cols 0-7
                 //   matrix_id 1 -> rows 8-15, cols 0-7
                 //   matrix_id 2 -> rows 0-7,  cols 8-15
                 //   matrix_id 3 -> rows 8-15, cols 8-15
-                int block_row = (matrix_id & 1) * 8;        // LSB chooses top/bottom
-                int block_col = (matrix_id >> 1) * 8;       // MSB chooses left/right
+                int block_row = (matrix_id & 1) ? 8 : 0;   // use LSB for row offset
+                int block_col = (matrix_id >= 2) ? 8 : 0;  // use MSB for col offset
 
                 int a_row = block_row + row_in_matrix;
                 int a_col = block_col;
