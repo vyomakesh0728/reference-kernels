@@ -1,7 +1,6 @@
 import os
 
 import torch
-from reference import ref_kernel as reference_kernel
 from task import input_t, output_t
 from torch.utils.cpp_extension import load_inline
 
@@ -215,35 +214,6 @@ __device__ __forceinline__ uint64_t* mbar_stage(uint64_t* base, int stage) {
 }
 #endif
 
-// CuTe MMA scale layout indexing helper
-// Layout: [32, 4, n_m_blocks, 4, n_k_blocks, L] flattened
-// For element at (row, scale_col, batch):
-//   mm32 = row % 32
-//   mm4  = (row % 128) / 32
-//   mm   = row / 128
-//   kk4  = scale_col % 4
-//   kk   = scale_col / 4
-__device__ __forceinline__ size_t cute_scale_idx(
-    int row, int scale_col, int batch,
-    int n_m_blocks, int n_k_blocks, int L
-) {
-    int mm32 = row & 31;              // row % 32
-    int mm4 = (row & 127) >> 5;       // (row % 128) / 32
-    int mm = row >> 7;                // row / 128
-    int kk4 = scale_col & 3;          // scale_col % 4
-    int kk = scale_col >> 2;          // scale_col / 4
-
-    // Compute linear index: [mm32, mm4, mm, kk4, kk, batch]
-    // Strides: [4*n_m_blocks*4*n_k_blocks*L, n_m_blocks*4*n_k_blocks*L, 4*n_k_blocks*L, n_k_blocks*L, L, 1]
-    size_t idx = static_cast<size_t>(mm32) * (4 * n_m_blocks * 4 * n_k_blocks * L)
-               + static_cast<size_t>(mm4) * (n_m_blocks * 4 * n_k_blocks * L)
-               + static_cast<size_t>(mm) * (4 * n_k_blocks * L)
-               + static_cast<size_t>(kk4) * (n_k_blocks * L)
-               + static_cast<size_t>(kk) * L
-               + static_cast<size_t>(batch);
-    return idx;
-}
-
 template<int TileM, int TileK, int Threads>
 __global__ void __launch_bounds__(Threads)
 fp4_gemv_streaming(
@@ -255,9 +225,7 @@ fp4_gemv_streaming(
     const CUtensorMap* __restrict__ desc_B,
     const CUtensorMap* __restrict__ desc_SFB,
     half* __restrict__ D,
-    const int M, const int K, const int L,
-    const int n_m_blocks_A, const int n_k_blocks,
-    const int n_m_blocks_B
+    const int M, const int K, const int L
 ) {
 #if __CUDA_ARCH__ >= 700
     constexpr int TileKPacked = TileK / 2;
@@ -282,9 +250,8 @@ fp4_gemv_streaming(
 
     const uint8_t* A_batch = A_packed + static_cast<size_t>(batch) * M * K_packed;
     const uint8_t* B_batch = B_packed + static_cast<size_t>(batch) * 128 * K_packed;
-    // SFA/SFB use CuTe MMA layout - no per-batch offset, indexing handles batch
-    const uint8_t* SFA_base = SFA_packed;
-    const uint8_t* SFB_base = SFB_packed;
+    const uint8_t* SFA_batch = SFA_packed + static_cast<size_t>(batch) * M * K_scales;
+    const uint8_t* SFB_batch = SFB_packed + static_cast<size_t>(batch) * 128 * K_scales;
     half* D_batch = D + static_cast<size_t>(batch) * M;
 
     extern __shared__ uint8_t smem[];
@@ -300,9 +267,9 @@ fp4_gemv_streaming(
                           tid, warp_id, lane_id,
                           batch, m_tile, tile_rows,
                           M, K, L, K_packed, K_scales);
-        DEBUG_PRINT_ERROR("DBG A_batch=%p B_batch=%p SFA_base=%p SFB_base=%p D_batch=%p smem=%p\n",
+        DEBUG_PRINT_ERROR("DBG A_batch=%p B_batch=%p SFA_batch=%p SFB_batch=%p D_batch=%p smem=%p\n",
                           (const void*)A_batch, (const void*)B_batch,
-                          (const void*)SFA_base, (const void*)SFB_base,
+                          (const void*)SFA_batch, (const void*)SFB_batch,
                           (const void*)D_batch, (void*)smem);
     }
 #endif
@@ -353,7 +320,7 @@ fp4_gemv_streaming(
         offset += TileM * TileKPacked;
     }
 
-    // Scales used alongside TMA data ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“ keep them 128-byte aligned as well
+    // Scales used alongside TMA data keep them 128-byte aligned as well
     align_up_smem_128();
     uint8_t* sfa_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
@@ -368,9 +335,6 @@ fp4_gemv_streaming(
     align_up_smem_128();
     half* b_tile_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(TileK) * 8 * sizeof(half);
-    align_up_smem_128();
-    half* a_scale_smem = reinterpret_cast<half*>(smem + offset);
-    offset += static_cast<size_t>(TileM) * TileScaleCount * sizeof(half);
 
     (void)offset;
 
@@ -386,6 +350,7 @@ fp4_gemv_streaming(
         for (int s = 0; s < StageCount; ++s) {
             stage_phase_smem[s] = 0;
         }
+        __threadfence_block();  // Ensure stage_phase init visible to all warps
     }
 
 #ifndef NDEBUG
@@ -429,8 +394,8 @@ fp4_gemv_streaming(
         __syncthreads();
 #endif
 
-        // Total size (in bytes) of B packed tensor across all batches.
         const size_t B_total_bytes = static_cast<size_t>(L) * 128 * K_packed;
+        const size_t SFB_total_bytes = static_cast<size_t>(L) * 128 * K_scales;
 
         int b_segments = (K_packed + 15) / 16;
         for (int idx = tid; idx < b_segments; idx += Threads) {
@@ -507,12 +472,73 @@ fp4_gemv_streaming(
                 }
             }
         }
-        // Load SFB scales using CuTe MMA layout indexing (row 0 only for GEMV)
-        for (int idx = tid; idx < K_scales; idx += Threads) {
-            // For row=0: mm32=0, mm4=0, mm=0, so index is simpler
-            size_t sfb_idx = cute_scale_idx(0, idx, batch, n_m_blocks_B, n_k_blocks, L);
-            uint8_t val = SFB_base[sfb_idx];
-            sfb_smem[idx] = val;
+        int sfb_segments = (K_scales + 15) / 16;
+        for (int idx = tid; idx < sfb_segments; idx += Threads) {
+            int byte_idx = idx * 16;
+            bool full = (byte_idx + 16) <= K_scales;
+            uint8_t* dst = sfb_smem + byte_idx;
+            const uint8_t* src = SFB_batch + byte_idx;
+
+#ifndef NDEBUG
+            {
+                size_t SFB_index = static_cast<size_t>(batch) * 128 * K_scales
+                                   + static_cast<size_t>(byte_idx);
+                DEBUG_OOB_GLOBAL_1D("SFB_packed_cp_async", SFB_index, SFB_total_bytes, SFB_packed);
+                DEBUG_OOB_SMEM_1D("sfb_smem_cp_async", byte_idx, K_scales, sfb_smem);
+                size_t start = static_cast<size_t>(byte_idx);
+                size_t end = start + 16;
+                if (start >= static_cast<size_t>(K_scales) || SFB_index >= SFB_total_bytes) {
+                    DEBUG_PRINT_ERROR("OOB: SFB_batch cp_async start OOB: byte_idx=%d K_scales=%d SFB_index=%zu SFB_total=%zu src=%p dst=%p at %s:%d\n",
+                                      byte_idx, K_scales, SFB_index, SFB_total_bytes,
+                                      (const void*)src, (void*)dst, __FILE__, __LINE__);
+                    return;
+                }
+                if (end > static_cast<size_t>(K_scales) ||
+                    (SFB_index + 16) > SFB_total_bytes) {
+                    DEBUG_PRINT_ERROR("INFO: SFB_batch cp_async partial tail: byte_idx=%d K_scales=%d SFB_index=%zu SFB_total=%zu src=%p dst=%p at %s:%d\n",
+                                      byte_idx, K_scales, SFB_index, SFB_total_bytes,
+                                      (const void*)src, (void*)dst, __FILE__, __LINE__);
+                }
+                if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 &&
+                    tid == 0 && idx < 4) {
+                    uintptr_t src_addr = reinterpret_cast<uintptr_t>(src);
+                    uintptr_t dst_addr = reinterpret_cast<uintptr_t>(dst);
+                    DEBUG_PRINT_ERROR("SFB cp_async: batch=%d idx=%d byte_idx=%d SFB_total=%zu SFB_packed=%p SFB_batch=%p src=%p dst=%p src_mod16=%llu dst_mod16=%llu at %s:%d\n",
+                                      batch, idx, byte_idx,
+                                      SFB_total_bytes,
+                                      (const void*)SFB_packed, (const void*)SFB_batch,
+                                      (const void*)src, (void*)dst,
+                                      (unsigned long long)(src_addr % 16),
+                                      (unsigned long long)(dst_addr % 16),
+                                      __FILE__, __LINE__);
+                }
+            }
+#endif
+
+            cp_async_16b(dst, src, full && (byte_idx < K_scales));
+            if (!full && byte_idx < K_scales) {
+#pragma unroll
+                for (int i = 0; i < 16; ++i) {
+                    int g = byte_idx + i;
+                    if (g < K_scales) {
+                        size_t SFB_idx_g = static_cast<size_t>(batch) * 128 * K_scales
+                                           + static_cast<size_t>(g);
+                        DEBUG_OOB_GLOBAL_1D("SFB_packed_tail", SFB_idx_g, SFB_total_bytes, SFB_packed);
+                        DEBUG_OOB_SMEM_1D("sfb_smem_tail", g, K_scales, sfb_smem);
+                        if (SFB_idx_g >= SFB_total_bytes) {
+                            DEBUG_PRINT_ERROR("OOB: SFB_tail copy global index OOB: g=%d SFB_idx=%zu SFB_total=%zu at %s:%d\n",
+                                              g, SFB_idx_g, SFB_total_bytes, __FILE__, __LINE__);
+                            return;
+                        }
+                        dst[i] = src[i];
+                    } else {
+#ifndef NDEBUG
+                        DEBUG_PRINT_ERROR("WARN: SFB_batch tail copy would be OOB: g=%d K_scales=%d base=%p at %s:%d\n",
+                                          g, K_scales, (const void*)SFB_batch, __FILE__, __LINE__);
+#endif
+                    }
+                }
+            }
         }
         cp_async_commit();
         cp_async_wait();
@@ -521,12 +547,12 @@ fp4_gemv_streaming(
         DEBUG_PRINT_ERROR("IN_LOOP B/SFB cp_async END block=(%d,%d,%d) tid=%d\n",
                           blockIdx.x, blockIdx.y, blockIdx.z, tid);
         __syncthreads();
-#endif
-    }
-    __syncthreads();
+        #endif
+        }
+        __syncthreads();
 
-    // DEBUG: Print first 4 SFB scale bytes and first 4 B packed bytes (first tile only)
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+        // DEBUG: Print first 4 SFB scale bytes and first 4 B packed bytes (first tile only)
+        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
         printf("=== KERNEL DEBUG (block 0,0) ===\n");
         printf("SFB raw bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
                sfb_smem[0], sfb_smem[1], sfb_smem[2], sfb_smem[3]);
@@ -536,20 +562,13 @@ fp4_gemv_streaming(
         printf("B packed bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
                b_packed_smem[0], b_packed_smem[1], b_packed_smem[2], b_packed_smem[3]);
 
-        // Also print the CuTe indices we used for SFB
         for (int i = 0; i < 4; i++) {
-            size_t sfb_idx = cute_scale_idx(0, i, batch, n_m_blocks_B, n_k_blocks, L);
-            printf("SFB cute_idx[row=0,col=%d,batch=%d] = %llu\n", i, batch, (unsigned long long)sfb_idx);
+            size_t sfb_idx = static_cast<size_t>(batch) * 128 * K_scales + static_cast<size_t>(i);
+            printf("SFB contiguous_idx[row=0,col=%d,batch=%d] = %llu\n",
+                   i, batch, (unsigned long long)sfb_idx);
         }
-        
-        // Debug cute_scale_idx for rows 1, 32, 128 (col=0) to verify formula
-        size_t idx_r1 = cute_scale_idx(1, 0, batch, n_m_blocks_B, n_k_blocks, L);
-        size_t idx_r32 = cute_scale_idx(32, 0, batch, n_m_blocks_B, n_k_blocks, L);
-        size_t idx_r128 = cute_scale_idx(128, 0, batch, n_m_blocks_B, n_k_blocks, L);
-        printf("SFB cute_idx row test: r1=%llu r32=%llu r128=%llu\n",
-               (unsigned long long)idx_r1, (unsigned long long)idx_r32, (unsigned long long)idx_r128);
-    }
-    __syncthreads();
+        }
+        __syncthreads();
 
     // Decode B vector
     for (int idx = tid; idx < K_packed; idx += Threads) {
@@ -562,9 +581,9 @@ fp4_gemv_streaming(
             DEBUG_OOB_SMEM_1D("sfb_smem", scale_idx, K_scales, sfb_smem);
             scale_h = __float2half(decode_fp8_e4m3(sfb_smem[scale_idx]));
         }
-        // NVFP4 convention: low nibble = element 0, high nibble = element 1
-        half v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);         // LOW nibble → first element
-        half v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);  // HIGH nibble → second element
+        // FIXED: HIGH nibble = element 0, LOW nibble = element 1 (matches torch._scaled_mm)
+        half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);  // HIGH nibble -> element 0
+        half v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);         // LOW nibble -> element 1
 
 #ifndef NDEBUG
         // Debug: print first few B decode values
@@ -740,14 +759,18 @@ fp4_gemv_streaming(
                 int global_scale = scale_offset + col;
                 uint8_t val = 0;
                 if (row < tile_rows && global_scale < K_scales) {
-                    // Use CuTe MMA layout indexing for SFA
-                    size_t sfa_idx = cute_scale_idx(global_row, global_scale, batch, n_m_blocks_A, n_k_blocks, L);
-                    val = SFA_base[sfa_idx];
+                    if (global_row < M) {
+                        size_t sfa_idx = static_cast<size_t>(global_row) * K_scales
+                                       + static_cast<size_t>(global_scale);
+                        val = SFA_batch[sfa_idx];
+                    }
                 }
                 int sfa_smem_idx = row * TileScaleCount + col;
                 DEBUG_OOB_SMEM_1D("sfa_stage", sfa_smem_idx, TileM * TileScaleCount, sfa_stage[stage]);
                 sfa_stage[stage][sfa_smem_idx] = val;
             }
+            // Ensure SFA writes are visible to other warps before signaling ready
+            __threadfence_block();
         }
     };
 
@@ -789,21 +812,6 @@ fp4_gemv_streaming(
         int curr_cols = (curr_k + 1) >> 1;
         int scale_count = (curr_k + 15) >> 4;
 
-        for (int idx = tid; idx < tile_rows * scale_count; idx += Threads) {
-            int row = idx / scale_count;
-            int s = idx - row * scale_count;
-            half scale_h = __float2half(0.0f);
-            if (row < tile_rows) {
-                int sfa_idx = row * TileScaleCount + s;
-                DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, TileM * TileScaleCount, sfa_stage[stage]);
-                scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][sfa_idx]));
-            }
-            int a_scale_idx = row * TileScaleCount + s;
-            DEBUG_OOB_SMEM_1D("a_scale_smem", a_scale_idx, TileM * TileScaleCount, a_scale_smem);
-            a_scale_smem[a_scale_idx] = scale_h;
-        }
-        __syncthreads();
-
         {
             uint8_t* a_stage = a_packed_stage[stage];
             for (int idx = tid; idx < tile_rows * curr_cols; idx += Threads) {
@@ -813,17 +821,23 @@ fp4_gemv_streaming(
                 int a_smem_idx = row * TileKPacked + col_packed;
                 DEBUG_OOB_SMEM_1D("a_packed_stage", a_smem_idx, TileM * TileKPacked, a_stage);
                 uint8_t packed = a_stage[a_smem_idx];
-                int scale_idx = row * TileScaleCount + (col_packed >> 3);
-                DEBUG_OOB_SMEM_1D("a_scale_smem", scale_idx, TileM * TileScaleCount, a_scale_smem);
-                half scale_h = a_scale_smem[scale_idx];
+                half scale_h = __float2half(0.0f);
+                if (row < tile_rows) {
+                    int scale_col = col_packed >> 3;
+                    if (scale_col < scale_count) {
+                        int sfa_idx = row * TileScaleCount + scale_col;
+                        DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, TileM * TileScaleCount, sfa_stage[stage]);
+                        scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][sfa_idx]));
+                    }
+                }
                 half v0 = __float2half(0.0f);
                 half v1 = __float2half(0.0f);
-                // NVFP4 convention: low nibble = element 0, high nibble = element 1
+                // FIXED: HIGH nibble = element 0, LOW nibble = element 1 (matches torch._scaled_mm)
                 if (row < tile_rows && k_base < K) {
-                    v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);         // LOW nibble → first element
+                    v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);  // HIGH nibble -> element 0
                 }
                 if (row < tile_rows && (k_base + 1) < K) {
-                    v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);  // HIGH nibble → second element
+                    v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);         // LOW nibble -> element 1
                 }
 
 #ifndef NDEBUG
@@ -863,18 +877,16 @@ fp4_gemv_streaming(
                    __half2float(a_row0[4]), __half2float(a_row0[5]),
                    __half2float(a_row0[6]), __half2float(a_row0[7]));
 
-            // Also print the CuTe indices we used for SFA
-            for (int i = 0; i < 4; i++) {
-                size_t sfa_idx = cute_scale_idx(m_tile + 0, i, batch, n_m_blocks_A, n_k_blocks, L);
-                printf("SFA cute_idx[row=%d,col=%d,batch=%d] = %llu\n", m_tile, i, batch, (unsigned long long)sfa_idx);
-            }
-            
-            // Debug cute_scale_idx for rows 1, 32, 128 (col=0) to verify formula
-            size_t sfa_r1 = cute_scale_idx(1, 0, batch, n_m_blocks_A, n_k_blocks, L);
-            size_t sfa_r32 = cute_scale_idx(32, 0, batch, n_m_blocks_A, n_k_blocks, L);
-            size_t sfa_r128 = cute_scale_idx(128, 0, batch, n_m_blocks_A, n_k_blocks, L);
-            printf("SFA cute_idx row test: r1=%llu r32=%llu r128=%llu\n",
-                   (unsigned long long)sfa_r1, (unsigned long long)sfa_r32, (unsigned long long)sfa_r128);
+            // Print CuTe blocked indices for SFA at this tile origin
+            int nmblocks_sfa = (M + 127) / 128;
+            int nkblocks_sfa = (K_scales + 3) / 4;
+        for (int i = 0; i < 4; i++) {
+        size_t sfa_idx = static_cast<size_t>(batch) * M * K_scales
+                       + static_cast<size_t>(m_tile) * K_scales
+                       + static_cast<size_t>(i);
+        printf("SFA contiguous_idx[row=%d,col=%d,batch=%d] = %llu\n",
+               m_tile, i, batch, (unsigned long long)sfa_idx);
+        }
             printf("=== END KERNEL DEBUG ===\n");
         }
         __syncthreads();
@@ -923,9 +935,13 @@ fp4_gemv_streaming(
                 int matrix_id = lane_id / 8;  // 0, 1, 2, or 3
                 int row_in_matrix = lane_id % 8;  // 0-7
 
-                // Matrix layout: 0=top-left, 1=top-right, 2=bottom-left, 3=bottom-right
-                int block_row = (matrix_id >= 2) ? 8 : 0;  // 0 for matrices 0,1; 8 for matrices 2,3
-                int block_col = (matrix_id & 1) ? 8 : 0;   // 0 for matrices 0,2; 8 for matrices 1,3
+                // Matrix layout: bit0 of matrix_id selects the row block, bit1 selects the col block:
+                //   matrix_id 0 -> rows 0-7, cols 0-7
+                //   matrix_id 1 -> rows 8-15, cols 0-7
+                //   matrix_id 2 -> rows 0-7, cols 8-15
+                //   matrix_id 3 -> rows 8-15, cols 8-15
+                int block_row = (matrix_id & 1) ? 8 : 0;   // use LSB for row offset
+                int block_col = (matrix_id >= 2) ? 8 : 0;  // use MSB for col offset
 
                 int a_row = block_row + row_in_matrix;
                 int a_col = block_col;
@@ -1127,8 +1143,6 @@ void launch_fp4_gemv_optimized(
     shared_bytes += static_cast<size_t>(kTileM) * kAStride * sizeof(__half); // a_f16_smem
     shared_bytes = align_up(shared_bytes, 128); // for b_tile_smem
     shared_bytes += static_cast<size_t>(kTileK) * 8 * sizeof(__half); // b_tile_smem
-    shared_bytes = align_up(shared_bytes, 128); // for a_scale_smem
-    shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount * sizeof(__half); // a_scale_smem
 
     auto check_cuda = [](cudaError_t err, const char* msg) {
         if (err != cudaSuccess) {
@@ -1164,7 +1178,7 @@ void launch_fp4_gemv_optimized(
                A_ptr, (unsigned long long)(base_addr % 128));
         tma_ok = false;
     } else {
-        printf("ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ A_ptr 128-byte alignment check passed: %p\n", A_ptr);
+        printf("✅A_ptr 128-byte alignment check passed: %p\n", A_ptr);
     }
 
     // 3. Check that strides are properly 128-byte aligned
@@ -1172,7 +1186,7 @@ void launch_fp4_gemv_optimized(
         printf("WARNING: K_packed (%llu) is not 128-byte aligned, may cause TMA issues\n",
                (unsigned long long)K_packed);
     } else {
-        printf("ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ K_packed 128-byte stride alignment check passed: %llu bytes\n",
+        printf("✅K_packed 128-byte stride alignment check passed: %llu bytes\n",
                (unsigned long long)K_packed);
     }
 
@@ -1219,7 +1233,7 @@ void launch_fp4_gemv_optimized(
         if (tile_bytes % 128 != 0) {
             printf("WARNING: tile_bytes (%u) is not 128-byte aligned\n", tile_bytes);
         } else {
-            printf("ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ Tile size 128-byte alignment check passed: %u bytes\n", tile_bytes);
+            printf("✅Tile size 128-byte alignment check passed: %u bytes\n", tile_bytes);
         }
 
         if (L == 1) {
@@ -1265,7 +1279,7 @@ void launch_fp4_gemv_optimized(
                     printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
                     tma_ok = false;
                 } else {
-                    printf("ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ TMA Encode A (rank=2) SUCCESS!\n");
+                    printf("✅TMA Encode A (rank=2) SUCCESS!\n");
                 }
             }
         }
@@ -1317,7 +1331,7 @@ void launch_fp4_gemv_optimized(
                     printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
                     tma_ok = false;
                 } else {
-                    printf("ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ TMA Encode A (rank=3) SUCCESS!\n");
+                    printf("✅TMA Encode A (rank=3) SUCCESS!\n");
                 }
             }
         }
@@ -1343,11 +1357,6 @@ void launch_fp4_gemv_optimized(
     int grid_x = num_blocks;
     int grid_y = static_cast<int>(L);
 
-    // CuTe MMA layout parameters for scale factors
-    int n_m_blocks_A = static_cast<int>((M + 127) / 128);
-    int n_k_blocks = static_cast<int>((K_scales + 3) / 4);
-    int n_m_blocks_B = 1;  // B has 128 rows, so 1 block of 128
-
 #ifndef NDEBUG
     // Debug mode: keep full grid to process all data, just add logging
     printf("DEBUG launch grid=(%d,%d) blockDim.x=%d shared_bytes=%zu M=%lld K=%lld L=%lld\n",
@@ -1359,8 +1368,7 @@ void launch_fp4_gemv_optimized(
     fp4_gemv_streaming<kTileM, kTileK, kThreads><<<grid, block, shared_bytes>>>(
         A_ptr, B_ptr, SFA_ptr, SFB_ptr,
         d_map_A, d_map_B, d_map_SFB,
-        D_ptr, static_cast<int>(M), static_cast<int>(K), static_cast<int>(L),
-        n_m_blocks_A, n_k_blocks, n_m_blocks_B
+        D_ptr, static_cast<int>(M), static_cast<int>(K), static_cast<int>(L)
     );
 
     cudaError_t err = cudaDeviceSynchronize();
@@ -1441,23 +1449,24 @@ def custom_kernel(data: input_t) -> output_t:
         f"Shape mismatch: b.shape={b.shape}"
     )
 
-    # Scale factors: use sfa_permuted/sfb_permuted which are already in CuTe MMA layout
-    # Layout: [32, 4, n_m_blocks, 4, n_k_blocks, L]
-    # sfa_permuted is already on GPU with correct layout from generate_input
+    # Scale factors: use simple LINEAR layout [L, rows, K_scales]
+    # sfa_ref_cpu: [M, K_scales, L] -> permute to [L, M, K_scales]
+    # sfb_ref_cpu: [128, K_scales, L] -> permute to [L, 128, K_scales]
+    K_scales = K // 16
     print(
-        f"\n[SCALE DEBUG] sfa_permuted shape={sfa_permuted.shape}, device={sfa_permuted.device}"
+        f"\n[SCALE DEBUG] sfa_ref_cpu shape={sfa_ref_cpu.shape}, device={sfa_ref_cpu.device}"
     )
     print(
-        f"[SCALE DEBUG] sfb_permuted shape={sfb_permuted.shape}, device={sfb_permuted.device}"
+        f"[SCALE DEBUG] sfb_ref_cpu shape={sfb_ref_cpu.shape}, device={sfb_ref_cpu.device}"
     )
 
-    # Flatten and view as bytes - the kernel uses cute_scale_idx to access
-    sfa_flat = sfa_permuted.contiguous().flatten()
-    sfb_flat = sfb_permuted.contiguous().flatten()
+    # Permute to [L, M, K_scales] and [L, 128, K_scales] for simple linear indexing
+    sfa_linear = sfa_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda()
+    sfb_linear = sfb_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda()
 
     # Reinterpret as raw bytes for the CUDA kernel (uint8 view of float8 storage)
-    sfa_bytes = sfa_flat.view(torch.uint8)
-    sfb_bytes = sfb_flat.view(torch.uint8)
+    sfa_bytes = sfa_linear.view(torch.uint8)
+    sfb_bytes = sfb_linear.view(torch.uint8)
 
     # Reinterpret as raw bytes
     a_bytes = a.view(torch.uint8)
@@ -1525,18 +1534,14 @@ def custom_kernel(data: input_t) -> output_t:
             f"(mod128={a_ptr % 128})"
         )
     else:
-        print(
-            f"ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ (Python) a_bytes 128-byte alignment check passed: {hex(a_ptr)}"
-        )
+        print(f"✅(Python) a_bytes 128-byte alignment check passed: {hex(a_ptr)}")
     if b_ptr % 128 != 0:
         print(
             f"WARNING (Python): b_bytes data_ptr {hex(b_ptr)} is not 128-byte aligned "
             f"(mod128={b_ptr % 128})"
         )
     else:
-        print(
-            f"ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ (Python) b_bytes 128-byte alignment check passed: {hex(b_ptr)}"
-        )
+        print(f"✅(Python) b_bytes 128-byte alignment check passed: {hex(b_ptr)}")
     if K_packed_val % 128 != 0:
         print(f"WARNING (Python): K_packed ({K_packed_val}) is not 128-byte aligned")
 
