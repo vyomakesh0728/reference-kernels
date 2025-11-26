@@ -1,0 +1,24 @@
+
+
+<<<PROBLEM DESCRIPTION>>>
+batched matrix-vector multiplication kernel optimized for NVIDIA B200.
+To be explicit, you will be given a tuple of tensors:
+```
+(a, b, sfa, sfb, c)
+```
+where:
+* `a` is M x K x L in K-major order in nvfp4(e2m1)
+* `b` is 1 x K x L in K-major order in nvfp4(e2m1)
+* `sfa` is M x (K // 16) x L in K-major order in fp8(e4m3fnuz)
+* `sfb` is 1 x (K // 16) x L in K-major order in fp8(e4m3fnuz)
+* `c` is M x 1 x L in fp16
+<<<END OF PROBLEM DESCRIPTION>>>
+
+Matrix sizes `M` is divisible by mma_tiler_mn[0] defined in the kernel, `K` is divisible by 64.
+The ranking criteria is the geometric mean of the benchmark results.
+
+The speed of light analysis based on the max(FFMA math throughput, DRAM memory throughput) of B200 and tested under 1.5Ghz clock:
+M K L time[us]
+7168 16384 1 8.622
+4096 7168 8 17.275
+7168 2048 4 4.317

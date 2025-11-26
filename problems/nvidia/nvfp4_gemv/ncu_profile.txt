@@ -1,0 +1,269 @@
+Running on:
+GPU: NVIDIA B200
+CPU: INTEL(R) XEON(R) PLATINUM 8570
+Runtime: CUDA
+Platform: Linux-6.8.0-51-generic-x86_64-with-glibc2.35
+Torch: 2.9.1+cu130
+Cluster Bot
+APP
+ — 11:38 AM
+Profiling k: 16384; l: 1; m: 7168; seed: 1111 (1/2):
+    void fp4_gemv_streaming<128, 128, 320>(const unsigned char *, const unsigned char *, const unsigned char *, const unsigned char *, const CUtensorMap_st *, const CUtensorMap_st *, const CUtensorMap_st *, __half *, int, int, int) (56, 1, 1)x(320, 1, 1), Context 1, Stream 7, Device 0, CC 10.0
+
+      Table Name : GPU Throughput
+      ---------------- ----------- ------------
+      Metric Name      Metric Unit Metric Value
+      ---------------- ----------- ------------
+      Memory [%]                 %         2.13
+      Compute (SM) [%]           %         7.17
+      ---------------- ----------- ------------
+
+      Table Name : Pipe Utilization (% of active cycles)
+      Table Description : Pipeline utilization based on the number of cycles the pipeline was active. This takes the rates of different instructions executing on the pipeline into account. For an instruction requiring 4 cycles to complete execution, the counter is increased by 1 for 4 cycles. Use this to understand the pipeline utilization for the time it was active.
+      -------------------- ----------- ------------
+      Metric Name          Metric Unit Metric Value
+      -------------------- ----------- ------------
+      ALU                            %        17.49
+      FMA                            %         7.64
+      Shared (FP64+Tensor)           %         0.37
+      Tensor (All)                   %         0.37
+      Tensor (FP)                    %         0.37
+      TMA                            %         0.01
+      TMEM (Tensor Memory)           %            0
+      FP64                           %            0
+      TC                             %            0
+      Tensor (DP)                    %            0
+      Tensor (INT)                   %            0
+      -------------------- ----------- ------------
+
+      Table Name : Warp State (All Cycles)
+Profiling k: 16384; l: 1; m: 7168; seed: 1111 (2/2):
+      ------------------------ ----------- ------------
+      Metric Name              Metric Unit Metric Value
+      ------------------------ ----------- ------------
+      Stall Barrier                   inst         3.80
+      Stall Wait                      inst         2.78
+      Stall Branch Resolving          inst         1.13
+      Selected                        inst         1.00
+      Stall Short Scoreboard          inst         0.97
+      Stall Long Scoreboard           inst         0.56
+      Stall No Instruction            inst         0.24
+      Stall Not Selected              inst         0.19
+      Stall Math Pipe Throttle        inst         0.13
+      Stall Dispatch Stall            inst         0.04
+      Stall Misc                      inst         0.02
+      Stall Drain                     inst         0.00
+      Stall LG Throttle               inst            0
+      Stall Membar                    inst         0.00
+      Stall MIO Throttle              inst         0.00
+      Stall Sleeping                  inst            0
+      Stall Tex Throttle              inst            0
+      ------------------------ ----------- ------------
+Profiling k: 7168; l: 8; m: 4096; seed: 1111 (1/4):
+    void fp4_gemv_streaming<128, 128, 320>(const unsigned char *, const unsigned char *, const unsigned char *, const unsigned char *, const CUtensorMap_st *, const CUtensorMap_st *, const CUtensorMap_st *, __half *, int, int, int) (32, 8, 1)x(320, 1, 1), Context 1, Stream 7, Device 0, CC 10.0
+
+      Table Name : GPU Throughput
+      ---------------- ----------- ------------
+      Metric Name      Metric Unit Metric Value
+      ---------------- ----------- ------------
+      Memory [%]                 %         7.67
+      Compute (SM) [%]           %        26.01
+      ---------------- ----------- ------------
+
+      Table Name : Pipe Utilization (% of active cycles)
+      Table Description : Pipeline utilization based on the number of cycles the pipeline was active. This takes the rates of different instructions executing on the pipeline into account. For an instruction requiring 4 cycles to complete execution, the counter is increased by 1 for 4 cycles. Use this to understand the pipeline utilization for the time it was active.
+      -------------------- ----------- ------------
+      Metric Name          Metric Unit Metric Value
+      -------------------- ----------- ------------
+      ALU                            %        30.31
+      FMA                            %        13.25
+      Shared (FP64+Tensor)           %         0.65
+      Tensor (All)                   %         0.65
+      Tensor (FP)                    %         0.65
+      TMA                            %         0.01
+      TMEM (Tensor Memory)           %            0
+      FP64                           %            0
+      TC                             %            0
+      Tensor (DP)                    %            0
+      Tensor (INT)                   %            0
+      -------------------- ----------- ------------
+
+      Table Name : Warp State (All Cycles)
+Profiling k: 7168; l: 8; m: 4096; seed: 1111 (2/4):
+      ------------------------ ----------- ------------
+      Metric Name              Metric Unit Metric Value
+      ------------------------ ----------- ------------
+      Stall Barrier                   inst         3.41
+      Stall Wait                      inst         2.81
+      Stall Branch Resolving          inst         1.15
+      Selected                        inst         1.00
+      Stall Short Scoreboard          inst         0.97
+      Stall Long Scoreboard           inst         0.53
+      Stall Not Selected              inst         0.43
+      Stall No Instruction            inst         0.30
+      Stall Math Pipe Throttle        inst         0.25
+      Stall Dispatch Stall            inst         0.07
+      Stall Misc                      inst         0.02
+      Stall Drain                     inst         0.00
+      Stall LG Throttle               inst         0.00
+      Stall Membar                    inst         0.00
+      Stall MIO Throttle              inst         0.00
+      Stall Sleeping                  inst            0
+      Stall Tex Throttle              inst            0
+      ------------------------ ----------- ------------
+
+    void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() lambda() (instance 10)]::operator ()() lambda(c10::Half) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3) (64, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 10.0
+
+      Table Name : GPU Throughput
+      ---------------- ----------- ------------
+      Metric Name      Metric Unit Metric Value
+      ---------------- ----------- ------------
+      Memory [%]                 %         2.45
+      Compute (SM) [%]           %         0.70
+      ---------------- ----------- ------------
+Profiling k: 7168; l: 8; m: 4096; seed: 1111 (3/4):
+      Table Name : Pipe Utilization (% of active cycles)
+      Table Description : Pipeline utilization based on the number of cycles the pipeline was active. This takes the rates of different instructions executing on the pipeline into account. For an instruction requiring 4 cycles to complete execution, the counter is increased by 1 for 4 cycles. Use this to understand the pipeline utilization for the time it was active.
+      -------------------- ----------- ------------
+      Metric Name          Metric Unit Metric Value
+      -------------------- ----------- ------------
+      ALU                            %         2.92
+      FMA                            %         1.26
+      TMEM (Tensor Memory)           %            0
+      FP64                           %            0
+      Shared (FP64+Tensor)           %            0
+      TC                             %            0
+      Tensor (All)                   %            0
+      Tensor (DP)                    %            0
+      Tensor (FP)                    %            0
+      Tensor (INT)                   %            0
+      TMA                            %            0
+      -------------------- ----------- ------------
+
+      Table Name : Warp State (All Cycles)
+      ------------------------ ----------- ------------
+      Metric Name              Metric Unit Metric Value
+      ------------------------ ----------- ------------
+      Stall Long Scoreboard           inst        11.07
+      Stall Short Scoreboard          inst         5.59
+      Stall No Instruction            inst         4.44
+      Stall Wait                      inst         2.16
+      Selected                        inst            1
+      Stall Branch Resolving          inst         0.24
+      Stall Drain                     inst         0.13
+      Stall Dispatch Stall            inst         0.10
+Profiling k: 7168; l: 8; m: 4096; seed: 1111 (4/4):
+      Stall Barrier                   inst            0
+      Stall LG Throttle               inst            0
+      Stall Math Pipe Throttle        inst            0
+      Stall Membar                    inst            0
+      Stall MIO Throttle              inst            0
+      Stall Misc                      inst            0
+      Stall Not Selected              inst            0
+      Stall Sleeping                  inst            0
+      Stall Tex Throttle              inst            0
+      ------------------------ ----------- ------------
+Profiling k: 2048; l: 4; m: 7168; seed: 1111 (1/4):
+    void fp4_gemv_streaming<128, 128, 320>(const unsigned char *, const unsigned char *, const unsigned char *, const unsigned char *, const CUtensorMap_st *, const CUtensorMap_st *, const CUtensorMap_st *, __half *, int, int, int) (56, 4, 1)x(320, 1, 1), Context 1, Stream 7, Device 0, CC 10.0
+
+      Table Name : GPU Throughput
+      ---------------- ----------- ------------
+      Metric Name      Metric Unit Metric Value
+      ---------------- ----------- ------------
+      Memory [%]                 %         3.80
+      Compute (SM) [%]           %        12.61
+      ---------------- ----------- ------------
+
+      Table Name : Pipe Utilization (% of active cycles)
+      Table Description : Pipeline utilization based on the number of cycles the pipeline was active. This takes the rates of different instructions executing on the pipeline into account. For an instruction requiring 4 cycles to complete execution, the counter is increased by 1 for 4 cycles. Use this to understand the pipeline utilization for the time it was active.
+      -------------------- ----------- ------------
+      Metric Name          Metric Unit Metric Value
+      -------------------- ----------- ------------
+      ALU                            %        28.21
+      FMA                            %        12.30
+      Shared (FP64+Tensor)           %         0.60
+      Tensor (All)                   %         0.60
+      Tensor (FP)                    %         0.60
+      TMA                            %         0.01
+      TMEM (Tensor Memory)           %            0
+      FP64                           %            0
+      TC                             %            0
+      Tensor (DP)                    %            0
+      Tensor (INT)                   %            0
+      -------------------- ----------- ------------
+
+      Table Name : Warp State (All Cycles)
+Profiling k: 2048; l: 4; m: 7168; seed: 1111 (2/4):
+      ------------------------ ----------- ------------
+      Metric Name              Metric Unit Metric Value
+      ------------------------ ----------- ------------
+      Stall Wait                      inst         2.80
+      Stall Barrier                   inst         2.43
+      Stall Branch Resolving          inst         1.14
+      Selected                        inst         1.00
+      Stall Short Scoreboard          inst         0.99
+      Stall No Instruction            inst         0.45
+      Stall Not Selected              inst         0.44
+      Stall Long Scoreboard           inst         0.35
+      Stall Math Pipe Throttle        inst         0.26
+      Stall Dispatch Stall            inst         0.07
+      Stall Misc                      inst         0.02
+      Stall Membar                    inst         0.01
+      Stall Drain                     inst         0.00
+      Stall LG Throttle               inst         0.00
+      Stall MIO Throttle              inst         0.00
+      Stall Sleeping                  inst            0
+      Stall Tex Throttle              inst            0
+      ------------------------ ----------- ------------
+
+    void at::elementwise_kernel<128, 4, void at::gpu_kernel_impl_nocast<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() lambda() (instance 10)]::operator ()() lambda(c10::Half) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3) (56, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 10.0
+
+      Table Name : GPU Throughput
+      ---------------- ----------- ------------
+      Metric Name      Metric Unit Metric Value
+      ---------------- ----------- ------------
+      Memory [%]                 %         2.25
+      Compute (SM) [%]           %         0.63
+      ---------------- ----------- ------------
+Profiling k: 2048; l: 4; m: 7168; seed: 1111 (3/4):
+      Table Name : Pipe Utilization (% of active cycles)
+      Table Description : Pipeline utilization based on the number of cycles the pipeline was active. This takes the rates of different instructions executing on the pipeline into account. For an instruction requiring 4 cycles to complete execution, the counter is increased by 1 for 4 cycles. Use this to understand the pipeline utilization for the time it was active.
+      -------------------- ----------- ------------
+      Metric Name          Metric Unit Metric Value
+      -------------------- ----------- ------------
+      ALU                            %         2.60
+      FMA                            %         1.12
+      TMEM (Tensor Memory)           %            0
+      FP64                           %            0
+      Shared (FP64+Tensor)           %            0
+      TC                             %            0
+      Tensor (All)                   %            0
+      Tensor (DP)                    %            0
+      Tensor (FP)                    %            0
+      Tensor (INT)                   %            0
+      TMA                            %            0
+      -------------------- ----------- ------------
+
+      Table Name : Warp State (All Cycles)
+      ------------------------ ----------- ------------
+      Metric Name              Metric Unit Metric Value
+      ------------------------ ----------- ------------
+      Stall Long Scoreboard           inst        14.25
+      Stall No Instruction            inst         4.41
+      Stall Short Scoreboard          inst         3.86
+      Stall Wait                      inst         2.16
+      Selected                        inst            1
+      Stall Branch Resolving          inst         0.24
+      Stall Drain                     inst         0.13
+      Stall Dispatch Stall            inst         0.10
+Profiling k: 2048; l: 4; m: 7168; seed: 1111 (4/4):
+      Stall Barrier                   inst            0
+      Stall LG Throttle               inst            0
+      Stall Math Pipe Throttle        inst            0
+      Stall Membar                    inst            0
+      Stall MIO Throttle              inst            0
+      Stall Misc                      inst            0
+      Stall Not Selected              inst            0
+      Stall Sleeping                  inst            0
+      Stall Tex Throttle              inst            0
+      ------------------------ ----------- ------------
