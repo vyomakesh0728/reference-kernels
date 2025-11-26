@@ -267,6 +267,8 @@ fp4_gemv_streaming(
 
     const int K_packed = K >> 1;
     // K_scales_padded is passed as parameter - use it for tensor access and validity checks
+    // Keep K_scales as local variable for lambda capture compatibility (though we use K_scales_padded for SFA)
+    const int K_scales = K >> 4;  // Used for SFB (not padded) - lambda needs this
     const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
 
     const uint8_t* A_batch = A_packed + static_cast<size_t>(batch) * M * K_packed;
@@ -578,13 +580,6 @@ fp4_gemv_streaming(
         printf("DEBUG: After b_vec_smem decode print, about to syncthreads\n");
     }
     __syncthreads();
-#ifndef NDEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        printf("DEBUG: After syncthreads successfully completed!\n");
-    }
-    // Early return to test if syncthreads completes without executing lambda
-    return;
-#endif
 
     auto prefetch_tile = [&](int stage, int k_tile_base) {
 #ifndef NDEBUG
@@ -1560,7 +1555,7 @@ def get_module():
             ],
             verbose=True,
             extra_cuda_cflags=[
-                "-O0",
+                "-O2",  # Enable optimizations to fix lambda stack issues
                 # "--use_fast_math",  # Disabled for debugging
                 "-std=c++17",
                 "-gencode=arch=compute_100a,code=sm_100a",
