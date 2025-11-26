@@ -433,7 +433,7 @@ fp4_gemv_streaming(
                     "[%0], [%1, {%2, %3}], [%4];\n"
                     :
                     : "r"(smem_addr), "l"(desc_B),
-                      "r"(static_cast<uint32_t>(tile_idx)), "r"(0u),
+                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u),
                       "r"(cvta_to_shared_u32(mbar_b))
                 );
             } else {
@@ -442,7 +442,7 @@ fp4_gemv_streaming(
                     "[%0], [%1, {%2, %3, %4}], [%5];\n"
                     :
                     : "r"(smem_addr), "l"(desc_B),
-                      "r"(static_cast<uint32_t>(tile_idx)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
+                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
                       "r"(cvta_to_shared_u32(mbar_b))
                 );
             }
@@ -461,7 +461,7 @@ fp4_gemv_streaming(
                     "[%0], [%1, {%2, %3}], [%4];\n"
                     :
                     : "r"(smem_addr), "l"(desc_SFB),
-                      "r"(static_cast<uint32_t>(tile_idx)), "r"(0u),
+                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u),
                       "r"(cvta_to_shared_u32(mbar_sfb))
                 );
             } else {
@@ -470,7 +470,7 @@ fp4_gemv_streaming(
                     "[%0], [%1, {%2, %3, %4}], [%5];\n"
                     :
                     : "r"(smem_addr), "l"(desc_SFB),
-                      "r"(static_cast<uint32_t>(tile_idx)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
+                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
                       "r"(cvta_to_shared_u32(mbar_sfb))
                 );
             }
