@@ -500,7 +500,7 @@ fp4_gemv_streaming(
                    i, batch, (unsigned long long)sfb_idx);
         }
         }
-        __syncthreads();
+    __syncthreads();
 
     // Decode B vector
     for (int idx = tid; idx < K_packed; idx += Threads) {
