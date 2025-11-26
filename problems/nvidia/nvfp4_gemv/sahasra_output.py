@@ -6,12 +6,12 @@ Platform: Linux-6.8.0-51-generic-x86_64-with-glibc2.35
 Torch: 2.9.1+cu130
 Running failed
 Command
-python3 eval.py benchmark /tmp/tmp82a5p2lr
+python3 eval.py benchmark /tmp/tmpg9apnab0
 
-exited with error code 1 after 33.88 seconds.
+exited with error code 1 after 32.87 seconds.
 Cluster Bot
 APP
- — 3:34 PM
+ — 5:27 PM
 Program stderr (1/1):
 multiprocessing.pool.RemoteTraceback:
 """
@@ -20,9 +20,9 @@ Traceback (most recent call last):
     result = (True, func(*args, **kwds))
   File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 217, in _run_single_benchmark
     output = custom_kernel(_clone_data(data))
-  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1596, in custom_kernel
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1600, in custom_kernel
     mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L)
-RuntimeError: CUDA error: unspecified launch failure
+RuntimeError: CUDA error: an illegal instruction was encountered
 """
 
 The above exception was the direct cause of the following exception:
@@ -40,39 +40,39 @@ Traceback (most recent call last):
     return self.apply_async(func, args, kwds).get()
   File "/usr/lib/python3.10/multiprocessing/pool.py", line 774, in get
     raise self._value
-RuntimeError: CUDA error: unspecified launch failure
+RuntimeError: CUDA error: an illegal instruction was encountered
 Program stdout (1/6):
 [SCALE DEBUG] sfa_ref_cpu shape=torch.Size([7168, 1024, 1]), device=cuda:0
 [SCALE DEBUG] sfb_ref_cpu shape=torch.Size([128, 1024, 1]), device=cuda:0
-[DEBUG] a_bytes: shape=(1, 7168, 8192), stride=(58720256, 8192, 1), elem_size=1, numel=58720256, bytes=58720256, data_ptr=0x7ffc66000000
-[DEBUG] b_bytes: shape=(1, 128, 8192), stride=(1048576, 8192, 1), elem_size=1, numel=1048576, bytes=1048576, data_ptr=0x7ffca3800000
-[DEBUG] sfa_bytes: shape=(1, 7168, 1024), stride=(7340032, 1024, 1), elem_size=1, numel=7340032, bytes=7340032, data_ptr=0x7ffc6c000000
-[DEBUG] sfb_bytes: shape=(1, 128, 1024), stride=(131072, 1024, 1), elem_size=1, numel=131072, bytes=131072, data_ptr=0x7ffc9fbce000
-[DEBUG] a_bytes range: [0x7ffc66000000, 0x7ffc69800000) (58720256 bytes)
-[DEBUG] b_bytes range: [0x7ffca3800000, 0x7ffca3900000) (1048576 bytes)
-[DEBUG] sfa_bytes range: [0x7ffc6c000000, 0x7ffc6c700000) (7340032 bytes)
-[DEBUG] sfb_bytes range: [0x7ffc9fbce000, 0x7ffc9fbee000) (131072 bytes)
-[DEBUG] a shape=(1, 7168, 8192), stride=(58720256, 8192, 1), data_ptr=0x7ffc66000000
-[DEBUG] b shape=(1, 128, 8192), stride=(1048576, 8192, 1), data_ptr=0x7ffca3800000
-✅(Python) a_bytes 128-byte alignment check passed: 0x7ffc66000000
-✅(Python) b_bytes 128-byte alignment check passed: 0x7ffca3800000
+[DEBUG] a_bytes: shape=(1, 7168, 8192), stride=(58720256, 8192, 1), elem_size=1, numel=58720256, bytes=58720256, data_ptr=0x7ffc72000000
+[DEBUG] b_bytes: shape=(1, 128, 8192), stride=(1048576, 8192, 1), elem_size=1, numel=1048576, bytes=1048576, data_ptr=0x7ffcaf800000
+[DEBUG] sfa_bytes: shape=(1, 7168, 1024), stride=(7340032, 1024, 1), elem_size=1, numel=7340032, bytes=7340032, data_ptr=0x7ffc78000000
+[DEBUG] sfb_bytes: shape=(1, 128, 1024), stride=(131072, 1024, 1), elem_size=1, numel=131072, bytes=131072, data_ptr=0x7ffcabbce000
+[DEBUG] a_bytes range: [0x7ffc72000000, 0x7ffc75800000) (58720256 bytes)
+[DEBUG] b_bytes range: [0x7ffcaf800000, 0x7ffcaf900000) (1048576 bytes)
+[DEBUG] sfa_bytes range: [0x7ffc78000000, 0x7ffc78700000) (7340032 bytes)
+[DEBUG] sfb_bytes range: [0x7ffcabbce000, 0x7ffcabbee000) (131072 bytes)
+[DEBUG] a shape=(1, 7168, 8192), stride=(58720256, 8192, 1), data_ptr=0x7ffc72000000
+[DEBUG] b shape=(1, 128, 8192), stride=(1048576, 8192, 1), data_ptr=0x7ffcaf800000
+✅(Python) a_bytes 128-byte alignment check passed: 0x7ffc72000000
+✅(Python) b_bytes 128-byte alignment check passed: 0x7ffcaf800000
 Program stdout (2/6):
 [1/2] /usr/local/cuda-13.0/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemv_sm100_ptx -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 --use_fast_math -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -c /home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu -o cuda.cuda.o
-/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(955): warning #177-D: variable "kTileScaleCount" was declared but never referenced
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(959): warning #177-D: variable "kTileScaleCount" was declared but never referenced
       constexpr int kTileScaleCount = kTileK / 16;
                     ^
 
 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
 
-/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(1015): warning #177-D: variable "use_tma_a" was declared but never referenced
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(1019): warning #177-D: variable "use_tma_a" was declared but never referenced
       bool use_tma_a = true;
            ^
 
-/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(739): warning #177-D: variable "nmblocks_sfa" was declared but never referenced
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(743): warning #177-D: variable "nmblocks_sfa" was declared but never referenced
               int nmblocks_sfa = (M + 127) / 128;
                   ^
 
-/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(740): warning #177-D: variable "nkblocks_sfa" was declared but never referenced
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemv_sm100_ptx/cuda.cu(744): warning #177-D: variable "nkblocks_sfa" was declared but never referenced
               int nkblocks_sfa = (K_scales + 3) / 4;
                   ^
 Program stdout (3/6):
@@ -89,12 +89,12 @@ ptxas info    : 6057 bytes gmem
 ptxas info    : Compiling entry function '_Z18fp4_gemv_streamingILi128ELi128ELi320EEvPKhS1_S1_S1_PK14CUtensorMap_stS4_S4_S4_P6__halfiii' for 'sm_100a'
 ptxas info    : Function properties for _Z18fp4_gemv_streamingILi128ELi128ELi320EEvPKhS1_S1_S1_PK14CUtensorMap_stS4_S4_S4_P6__halfiii
     112 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
-ptxas info    : Used 62 registers, used 1 barriers, 112 bytes cumulative stack size, 16 bytes smem
-ptxas info    : Compile time = 114.829 ms
+ptxas info    : Used 56 registers, used 1 barriers, 112 bytes cumulative stack size, 16 bytes smem
+ptxas info    : Compile time = 114.069 ms
 [2/2] c++ main.o cuda.cuda.o -shared -lcuda -L/usr/local/lib/python3.10/dist-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda-13.0/lib64 -lcudart -o nvfp4_gemv_sm100_ptx.so
-✅A_ptr 128-byte alignment check passed: 0x7ffc66000000
+✅A_ptr 128-byte alignment check passed: 0x7ffc72000000
 ✅K_packed 128-byte stride alignment check passed: 8192 bytes
-TMA Debug: A_ptr = 0x7ffc66000000, map_A_ptr = 0x5555622c4380
+TMA Debug: A_ptr = 0x7ffc72000000, map_A_ptr = 0x5555621ddc00
 WARNING: box_k (64) is not a multiple of 128 elements, may reduce TMA efficiency
 ✅Tile size 128-byte alignment check passed: 8192 bytes
 TMA Debug: Using RANK=2 for L=1
@@ -105,40 +105,40 @@ TMA Encode A Result: 0
 Program stdout (4/6):
 ✅TMA Encode B (rank=2) SUCCESS!
 ✅TMA Encode SFB (rank=2) SUCCESS!
-TMA SFA (rank=2): dims=[1024,7168] box=[16,128] stride=[1024] ptr=0x7ffc6c000000
+TMA SFA (rank=2): dims=[1024,7168] box=[16,128] stride=[1024] ptr=0x7ffc78000000
 ✅TMA Encode SFA (rank=2) SUCCESS!
 DEBUG launch grid=(56,1) blockDim.x=320 shared_bytes=109696 M=7168 K=16384 L=1
-DBG block=(50,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=6400 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(51,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=6528 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(44,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=5632 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(45,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=5760 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(26,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3328 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(48,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=6144 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(27,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3456 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(28,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3584 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(29,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3712 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(32,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=4096 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(30,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3840 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(33,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=4224 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(31,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3968 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-Program stdout (5/6):
-DBG block=(34,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=4352 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(36,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=4608 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(37,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=4736 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(6,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=768 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+KERNEL STARTING: grid=(56,1,1) blockDim.x=320 M=7168 K=16384 L=1
+DBG block=(10,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1280 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(11,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1408 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(4,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=512 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(5,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=640 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(1,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=128 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
 DBG block=(38,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=4864 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
 DBG block=(39,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=4992 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(41,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=5248 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(20,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=2560 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(21,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=2688 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(8,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1024 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(14,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1792 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
 DBG block=(42,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=5376 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(15,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1920 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(43,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=5504 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(17,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=2176 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-Program stdout (6/6):
-DBG block=(24,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3072 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(25,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3200 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
-DBG block=(19,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=2432 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
 DBG block=(7,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=896 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(6,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=768 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(8,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1024 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(9,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1152 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+Program stdout (5/6):
+DBG block=(44,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=5632 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(45,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=5760 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(49,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=6272 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(48,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=6144 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(13,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1664 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(12,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1536 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(2,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=256 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(3,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=384 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(50,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=6400 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(14,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1792 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(15,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=1920 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(19,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=2432 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(25,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3200 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(24,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3072 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(36,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=4608 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+Program stdout (6/6):
+DBG block=(37,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=4736 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(27,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3456 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(30,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3840 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
+DBG block=(31,0,0) tid=0 warp_id=0 lane_id=0 batch=0 m_tile=3968 tile_rows=128 M=7168 K=16384 L=1 K_packed=8192 K_scales=1024
