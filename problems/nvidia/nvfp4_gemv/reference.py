@@ -140,38 +140,6 @@ def ref_kernel(
                 a_decoded.append(fp4_lut[hi] * scale_val)
             print(f"A decoded [row=0, 0-7]: {a_decoded[0]:.6f} {a_decoded[1]:.6f} {a_decoded[2]:.6f} {a_decoded[3]:.6f} {a_decoded[4]:.6f} {a_decoded[5]:.6f} {a_decoded[6]:.6f} {a_decoded[7]:.6f}")
             
-            # Compute expected cute_scale_idx values for comparison
-            # CuTe MMA layout: [32, 4, n_m_blocks, 4, n_k_blocks, L]
-            # For element at (row, scale_col, batch):
-            #   mm32 = row % 32
-            #   mm4  = (row % 128) // 32
-            #   mm   = row // 128
-            #   kk4  = scale_col % 4
-            #   kk   = scale_col // 4
-            n_m_blocks = ceil_div(m, 128)
-            n_k_blocks_ref = ceil_div(k_scales, 4)
-            
-            def compute_cute_idx(row, scale_col, batch_idx, n_m_blk, n_k_blk, L_val):
-                mm32 = row % 32
-                mm4 = (row % 128) // 32
-                mm = row // 128
-                kk4 = scale_col % 4
-                kk = scale_col // 4
-                idx = (mm32 * (4 * n_m_blk * 4 * n_k_blk * L_val)
-                     + mm4 * (n_m_blk * 4 * n_k_blk * L_val)
-                     + mm * (4 * n_k_blk * L_val)
-                     + kk4 * (n_k_blk * L_val)
-                     + kk * L_val
-                     + batch_idx)
-                return idx
-            
-            # Test indices for rows 1, 32, 128
-            idx_r1 = compute_cute_idx(1, 0, l_idx, n_m_blocks, n_k_blocks_ref, l)
-            idx_r32 = compute_cute_idx(32, 0, l_idx, n_m_blocks, n_k_blocks_ref, l)
-            idx_r128 = compute_cute_idx(128, 0, l_idx, n_m_blocks, n_k_blocks_ref, l)
-            print(f"REFERENCE cute_idx row test: r1={idx_r1} r32={idx_r32} r128={idx_r128}")
-            print(f"  (n_m_blocks={n_m_blocks}, n_k_blocks={n_k_blocks_ref}, L={l})")
-            
             print("=== END REFERENCE DEBUG ===")
             
             # Compute expected dot product for row 0 manually
