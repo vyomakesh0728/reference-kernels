@@ -231,6 +231,7 @@ fp4_gemv_streaming(
 #if __CUDA_ARCH__ >= 700
     constexpr int TileKPacked = TileK / 2;
     constexpr int TileScaleCount = TileK / 16;
+    constexpr int SfaBoxK = 16;  // Must match host-side box_sfa_k used for TMA
     constexpr int StageCount = 3;
     constexpr int a_stride = TileK + 8;
     constexpr int ProducerThreads = 64;
@@ -299,11 +300,13 @@ fp4_gemv_streaming(
     uint64_t* mbar_b = alloc_mbar_array(1);
     uint64_t* mbar_sfb = alloc_mbar_array(1);
 
-    offset = align_up(offset, 16);
+    // TMA requires 128-byte alignment for destination addresses
+    align_up_smem_128();
 
     uint8_t* b_packed_smem = smem + offset;
     offset += K_packed;
-    offset = align_up(offset, 16);
+
+    align_up_smem_128();
 
     uint8_t* sfb_smem = smem + offset;
     offset += K_scales;
@@ -326,7 +329,7 @@ fp4_gemv_streaming(
     uint8_t* sfa_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
         sfa_stage[s] = smem + offset;
-        offset += TileM * TileScaleCount;
+        offset += TileM * SfaBoxK;
     }
 
     // Tensor Core operand tiles in shared memory: also 128-byte aligned
@@ -390,57 +393,96 @@ fp4_gemv_streaming(
     __syncthreads();
 
     // Verify TMA descriptors are valid
-    if (!desc_A || !desc_B || !desc_SFB) {
+    if (!desc_A || !desc_SFA || !desc_B || !desc_SFB) {
 #ifndef NDEBUG
         if (tid == 0) {
-            DEBUG_PRINT_ERROR("ERROR: TMA descriptors are null! desc_A=%p desc_B=%p desc_SFB=%p\n",
-                              (const void*)desc_A,
+            DEBUG_PRINT_ERROR("ERROR: TMA descriptors are null! desc_A=%p desc_SFA=%p desc_B=%p desc_SFB=%p\n",
+                              (const void*)desc_A, (const void*)desc_SFA,
                               (const void*)desc_B, (const void*)desc_SFB);
         }
 #endif
         return;  // Abort kernel execution
     }
 
-    // Use TMA for B and SFB - single warp, single thread issues TMA loads
-    // CRITICAL: TMA box limit is 256 elements, so need multiple loads for large K
 #if __CUDA_ARCH__ >= 900
+    // Use TMA for B and SFB - need proper barrier management for multi-tile loads
     constexpr int kTMABoxLimit = 256;
-    const int b_chunks = (K_packed + kTMABoxLimit - 1) / kTMABoxLimit;
-    const int sfb_chunks = (K_scales + kTMABoxLimit - 1) / kTMABoxLimit;
+    const int b_chunks = (K_packed + (kTMABoxLimit - 1)) / kTMABoxLimit;
+    const int sfb_chunks = (K_scales + (kTMABoxLimit - 1)) / kTMABoxLimit;
 
     if (warp_id == 0 && lane_id == 0) {
-        // Load B vector in chunks of 256 elements
-        for (int chunk = 0; chunk < b_chunks; ++chunk) {
-            uint32_t k_offset = chunk * kTMABoxLimit;
-            uint32_t chunk_size = std::min(static_cast<uint32_t>(kTMABoxLimit), static_cast<uint32_t>(K_packed) - k_offset);
-            uint8_t* dst = b_packed_smem + k_offset;
+        // Initialize barriers before any TMA operations
+        mbarrier_init(mbar_b);
+        mbarrier_init(mbar_sfb);
+        __threadfence_block();
 
+        // Calculate total expected bytes for all chunks
+        uint32_t total_b_bytes = static_cast<uint32_t>(K_packed);
+        uint32_t total_sfb_bytes = static_cast<uint32_t>(K_scales);
+
+        // Set barrier to expect all bytes at once
+        mbarrier_arrive_expect_tx(mbar_b, total_b_bytes);
+        mbarrier_arrive_expect_tx(mbar_sfb, total_sfb_bytes);
+
+        // Issue all TMA loads (barrier expects total bytes from all loads)
+        for (int tile_idx = 0; tile_idx < b_chunks; ++tile_idx) {
+            int elem_offset = tile_idx * kTMABoxLimit;
+            int chunk_size = (elem_offset + kTMABoxLimit <= K_packed) ? kTMABoxLimit : (K_packed - elem_offset);
+            (void)chunk_size;
+            uint8_t* dst = b_packed_smem + elem_offset;
+
+            uint32_t smem_addr = cvta_to_shared_u32(dst);
             if (L == 1) {
-                tma_load_2d(dst, desc_B, k_offset, 0,
-                           chunk_size, mbar_b);
+                asm volatile(
+                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+                    "[%0], [%1, {%2, %3}], [%4];\n"
+                    :
+                    : "r"(smem_addr), "l"(desc_B),
+                      "r"(static_cast<uint32_t>(tile_idx)), "r"(0u),
+                      "r"(cvta_to_shared_u32(mbar_b))
+                );
             } else {
-                tma_load_3d(dst, desc_B, k_offset, 0, batch,
-                           chunk_size, mbar_b);
+                asm volatile(
+                    "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::bytes "
+                    "[%0], [%1, {%2, %3, %4}], [%5];\n"
+                    :
+                    : "r"(smem_addr), "l"(desc_B),
+                      "r"(static_cast<uint32_t>(tile_idx)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
+                      "r"(cvta_to_shared_u32(mbar_b))
+                );
             }
         }
 
-        // Load SFB scales in chunks of 256 elements
-        for (int chunk = 0; chunk < sfb_chunks; ++chunk) {
-            uint32_t k_offset = chunk * kTMABoxLimit;
-            uint32_t chunk_size = std::min(static_cast<uint32_t>(kTMABoxLimit), static_cast<uint32_t>(K_scales) - k_offset);
-            uint8_t* dst = sfb_smem + k_offset;
+        for (int tile_idx = 0; tile_idx < sfb_chunks; ++tile_idx) {
+            int elem_offset = tile_idx * kTMABoxLimit;
+            int chunk_size = (elem_offset + kTMABoxLimit <= K_scales) ? kTMABoxLimit : (K_scales - elem_offset);
+            (void)chunk_size;
+            uint8_t* dst = sfb_smem + elem_offset;
 
+            uint32_t smem_addr = cvta_to_shared_u32(dst);
             if (L == 1) {
-                tma_load_2d(dst, desc_SFB, k_offset, 0,
-                           chunk_size, mbar_sfb);
+                asm volatile(
+                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+                    "[%0], [%1, {%2, %3}], [%4];\n"
+                    :
+                    : "r"(smem_addr), "l"(desc_SFB),
+                      "r"(static_cast<uint32_t>(tile_idx)), "r"(0u),
+                      "r"(cvta_to_shared_u32(mbar_sfb))
+                );
             } else {
-                tma_load_3d(dst, desc_SFB, k_offset, 0, batch,
-                           chunk_size, mbar_sfb);
+                asm volatile(
+                    "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::bytes "
+                    "[%0], [%1, {%2, %3, %4}], [%5];\n"
+                    :
+                    : "r"(smem_addr), "l"(desc_SFB),
+                      "r"(static_cast<uint32_t>(tile_idx)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
+                      "r"(cvta_to_shared_u32(mbar_sfb))
+                );
             }
         }
     }
 
-    // Wait for TMA transfers to complete
+    // All threads wait on barriers
     mbarrier_wait_parity(mbar_b, 0);
     mbarrier_wait_parity(mbar_sfb, 0);
 #endif
@@ -546,17 +588,18 @@ fp4_gemv_streaming(
                         mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), 0);
                     }
 
-                    // Load SFA scales tile (2D) - same barrier as A for synchronization
+                    // Load SFA scales tile (2D) using element-space coordinates
                     uint32_t sfa_c0 = c_k_scales;
                     uint32_t sfa_c1 = c_m;
-                    bool valid_sfa_k = (c_k_scales + TileScaleCount) <= static_cast<uint32_t>(K_scales);
+                    bool valid_sfa_k = (c_k_scales + SfaBoxK) <= static_cast<uint32_t>(K_scales);
+                    bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
-                    if (valid_m && valid_sfa_k) {
+                    if (valid_sfa_m && valid_sfa_k) {
                         tma_load_2d(
                             sfa_stage[stage],
                             desc_SFA,
                             sfa_c0, sfa_c1,
-                            static_cast<uint32_t>(TileM * TileScaleCount),
+                            static_cast<uint32_t>(TileM * SfaBoxK),
                             mbar_stage(mbar_a, stage)
                         );
                     }
@@ -581,18 +624,19 @@ fp4_gemv_streaming(
                         mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), 0);
                     }
 
-                    // Load SFA scales tile (3D) - same barrier as A
+                    // Load SFA scales tile (3D) using element-space coordinates
                     uint32_t sfa_c0 = c_k_scales;
                     uint32_t sfa_c1 = c_m;
                     uint32_t sfa_c2 = c2;
-                    bool valid_sfa_k = (c_k_scales + TileScaleCount) <= static_cast<uint32_t>(K_scales);
+                    bool valid_sfa_k = (c_k_scales + SfaBoxK) <= static_cast<uint32_t>(K_scales);
+                    bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
-                    if (valid_batch && valid_m && valid_sfa_k) {
+                    if (valid_batch && valid_sfa_m && valid_sfa_k) {
                         tma_load_3d(
                             sfa_stage[stage],
                             desc_SFA,
                             sfa_c0, sfa_c1, sfa_c2,
-                            static_cast<uint32_t>(TileM * TileScaleCount),
+                            static_cast<uint32_t>(TileM * SfaBoxK),
                             mbar_stage(mbar_a, stage)
                         );
                     }
@@ -653,8 +697,8 @@ fp4_gemv_streaming(
                 if (row < tile_rows) {
                     int scale_col = col_packed >> 3;
                     if (scale_col < scale_count) {
-                        int sfa_idx = row * TileScaleCount + scale_col;
-                        DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, TileM * TileScaleCount, sfa_stage[stage]);
+                        int sfa_idx = row * SfaBoxK + scale_col;
+                        DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, TileM * SfaBoxK, sfa_stage[stage]);
                         scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][sfa_idx]));
                     }
                 }
@@ -763,13 +807,13 @@ fp4_gemv_streaming(
                 int matrix_id = lane_id / 8;  // 0, 1, 2, or 3
                 int row_in_matrix = lane_id % 8;  // 0-7
 
-                // Matrix layout: bit0 of matrix_id selects the row block, bit1 selects the col block:
-                //   matrix_id 0 -> rows 0-7, cols 0-7
+                // PTX layout: LSB = row block, MSB = column block. Swap fixes A01/A10 mixup.
+                //   matrix_id 0 -> rows 0-7,  cols 0-7
                 //   matrix_id 1 -> rows 8-15, cols 0-7
-                //   matrix_id 2 -> rows 0-7, cols 8-15
+                //   matrix_id 2 -> rows 0-7,  cols 8-15
                 //   matrix_id 3 -> rows 8-15, cols 8-15
-                int block_row = (matrix_id & 1) ? 8 : 0;   // use LSB for row offset
-                int block_col = (matrix_id >= 2) ? 8 : 0;  // use MSB for col offset
+                int block_row = (matrix_id & 1) * 8;        // LSB chooses top/bottom
+                int block_col = (matrix_id >> 1) * 8;       // MSB chooses left/right
 
                 int a_row = block_row + row_in_matrix;
                 int a_col = block_col;
@@ -923,6 +967,7 @@ void launch_fp4_gemv_optimized(
     constexpr int kThreads = 320;
     constexpr int kTileKPacked = kTileK / 2;
     constexpr int kTileScaleCount = kTileK / 16;
+    constexpr int kSfaBoxK = 16;  // Must match device-side SfaBoxK
     constexpr int kStageCount = 3;
     constexpr int kAStride = kTileK + 8;
 
@@ -964,7 +1009,7 @@ void launch_fp4_gemv_optimized(
 
     shared_bytes = align_up(shared_bytes, 128); // for sfa_stage[0]
     for (int s = 0; s < kStageCount; ++s) {
-        shared_bytes += static_cast<size_t>(kTileM) * kTileScaleCount; // sfa_stage[s]
+        shared_bytes += static_cast<size_t>(kTileM) * kSfaBoxK; // sfa_stage[s]
     }
 
     shared_bytes = align_up(shared_bytes, 128); // for a_f16_smem
@@ -995,9 +1040,9 @@ void launch_fp4_gemv_optimized(
     CUtensorMap* map_A_ptr = reinterpret_cast<CUtensorMap*>(aligned_ptr);
 
     CUtensorMap* d_map_A = nullptr;
+    CUtensorMap* d_map_SFA = nullptr;
     CUtensorMap* d_map_B = nullptr;
     CUtensorMap* d_map_SFB = nullptr;
-    CUtensorMap* d_map_SFA = nullptr;
     bool tma_ok = true;
 
     // 2. Ensure tensor's device pointer is 128-byte aligned for TMA
@@ -1007,7 +1052,7 @@ void launch_fp4_gemv_optimized(
                A_ptr, (unsigned long long)(base_addr % 128));
         tma_ok = false;
     } else {
-        printf("âœ…A_ptr 128-byte alignment check passed: %p\n", A_ptr);
+        printf("✅A_ptr 128-byte alignment check passed: %p\n", A_ptr);
     }
 
     // 3. Check that strides are properly 128-byte aligned
@@ -1015,7 +1060,7 @@ void launch_fp4_gemv_optimized(
         printf("WARNING: K_packed (%llu) is not 128-byte aligned, may cause TMA issues\n",
                (unsigned long long)K_packed);
     } else {
-        printf("âœ…K_packed 128-byte stride alignment check passed: %llu bytes\n",
+        printf("✅K_packed 128-byte stride alignment check passed: %llu bytes\n",
                (unsigned long long)K_packed);
     }
 
@@ -1070,7 +1115,7 @@ void launch_fp4_gemv_optimized(
         if (tile_bytes % 128 != 0) {
             printf("WARNING: tile_bytes (%u) is not 128-byte aligned\n", tile_bytes);
         } else {
-            printf("âœ…Tile size 128-byte alignment check passed: %u bytes\n", tile_bytes);
+            printf("✅Tile size 128-byte alignment check passed: %u bytes\n", tile_bytes);
         }
 
         if (L == 1) {
@@ -1116,7 +1161,7 @@ void launch_fp4_gemv_optimized(
                     printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
                     tma_ok = false;
                 } else {
-                    printf("âœ…TMA Encode A (rank=2) SUCCESS!\n");
+                    printf("✅TMA Encode A (rank=2) SUCCESS!\n");
                 }
             }
         }
@@ -1168,7 +1213,7 @@ void launch_fp4_gemv_optimized(
                     printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
                     tma_ok = false;
                 } else {
-                    printf("âœ…TMA Encode A (rank=3) SUCCESS!\n");
+                    printf("✅TMA Encode A (rank=3) SUCCESS!\n");
                 }
             }
         }
@@ -1240,7 +1285,7 @@ void launch_fp4_gemv_optimized(
             // SFB: rank-2, actual layout is [1, 128, K_scales] but L=1 collapses to [128, K_scales]
             // TMA dims order: [K_scales, 128] (innermost to outermost)
             cuuint64_t dims_SFB[2] = {K_scales, 128};
-            cuuint32_t box_SFB[2] = {static_cast<cuuint32_t>(K_scales < 256ULL ? K_scales : 256ULL), 128};
+            cuuint32_t box_SFB[2] = {static_cast<cuuint32_t>(K_scales < 256ULL ? K_scales : 256ULL), 1};
             cuuint64_t strides_SFB[1] = {K_scales};
 
             CUresult resSFB = encode_tma(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
@@ -1259,24 +1304,24 @@ void launch_fp4_gemv_optimized(
             // SFB: rank-3, actual layout is [L, 128, K_scales]
             // TMA dims order: [K_scales, 128, L] (innermost to outermost)
             cuuint64_t dims_SFB[3] = {K_scales, 128, static_cast<cuuint64_t>(L)};
-            cuuint32_t box_SFB[3] = {static_cast<cuuint32_t>(K_scales < 256ULL ? K_scales : 256ULL), 128, 1};
+            cuuint32_t box_SFB[3] = {static_cast<cuuint32_t>(K_scales < 256ULL ? K_scales : 256ULL), 1, 1};
             cuuint64_t strides_SFB[2] = {K_scales, 128 * K_scales};
 
             CUresult resSFB = encode_tma(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                          3, SFB_ptr, dims_SFB, strides_SFB, box_SFB);
-        if (resSFB != CUDA_SUCCESS) {
-            const char* err_str = nullptr;
-            cuGetErrorString(resSFB, &err_str);
-            printf("TMA Encode SFB failed: %s\n", err_str ? err_str : "unknown");
-            tma_ok = false;
-        } else {
-            check_cuda(cudaMalloc(&d_map_SFB, sizeof(CUtensorMap)), "cudaMalloc d_map_SFB");
-            check_cuda(cudaMemcpy(d_map_SFB, map_SFB_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFB");
-            printf("✅TMA Encode SFB (rank=3) SUCCESS!\n");
+            if (resSFB != CUDA_SUCCESS) {
+                const char* err_str = nullptr;
+                cuGetErrorString(resSFB, &err_str);
+                printf("TMA Encode SFB failed: %s\n", err_str ? err_str : "unknown");
+                tma_ok = false;
+            } else {
+                check_cuda(cudaMalloc(&d_map_SFB, sizeof(CUtensorMap)), "cudaMalloc d_map_SFB");
+                check_cuda(cudaMemcpy(d_map_SFB, map_SFB_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFB");
+                printf("✅TMA Encode SFB (rank=3) SUCCESS!\n");
+            }
         }
-    }
 
-        // Create TMA descriptor for SFA (scale factors for A)
+        // Create TMA descriptors for SFA (scale factors for A) - tiled access
         std::vector<uint8_t> map_SFA_buf(sizeof(CUtensorMap) + 128);
         void* map_SFA_raw = map_SFA_buf.data();
         size_t map_SFA_space = map_SFA_buf.size();
@@ -1285,13 +1330,29 @@ void launch_fp4_gemv_optimized(
         std::memset(map_SFA_aligned, 0, sizeof(CUtensorMap));
         CUtensorMap* map_SFA_ptr = reinterpret_cast<CUtensorMap*>(map_SFA_aligned);
 
-        cuuint32_t box_sfa_k = static_cast<cuuint32_t>(std::min<uint64_t>(TileScaleCount, K_scales));
-        cuuint32_t box_sfa_m = static_cast<cuuint32_t>(std::min<uint64_t>(kTileM, static_cast<uint64_t>(M)));
+        cuuint32_t box_sfa_k = static_cast<cuuint32_t>(std::min<int64_t>(kSfaBoxK, K_scales));
+        cuuint32_t box_sfa_m = static_cast<cuuint32_t>(
+            kTileM < M ?
+                (kTileM < 16ULL ? 16ULL : (kTileM < 256ULL ? kTileM : 256ULL)) :
+                (M < 16ULL ? 16ULL : (M < 256ULL ? M : 256ULL))
+        );
 
         if (L == 1) {
+            // SFA: rank-2, actual layout is [1, M, K_scales] but L=1 collapses to [M, K_scales]
+            // TMA dims order: [K_scales, M] (innermost to outermost)
             cuuint64_t dims_SFA[2] = {K_scales, static_cast<cuuint64_t>(M)};
             cuuint32_t box_SFA[2] = {box_sfa_k, box_sfa_m};
             cuuint64_t strides_SFA[1] = {K_scales};
+
+            printf("TMA SFA (rank=2): dims=[%llu,%llu] box=[%u,%u] stride=[%llu] ptr=%p\n",
+                   (unsigned long long)dims_SFA[0], (unsigned long long)dims_SFA[1],
+                   box_SFA[0], box_SFA[1], (unsigned long long)strides_SFA[0], SFA_ptr);
+
+            uintptr_t sfa_addr = reinterpret_cast<uintptr_t>(SFA_ptr);
+            if ((sfa_addr % 128) != 0) {
+                printf("ERROR: SFA_ptr not 128-byte aligned: %p (mod128=%llu)\n",
+                       SFA_ptr, (unsigned long long)(sfa_addr % 128));
+            }
 
             CUresult resSFA = encode_tma(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                          2, SFA_ptr, dims_SFA, strides_SFA, box_SFA);
@@ -1306,9 +1367,11 @@ void launch_fp4_gemv_optimized(
                 printf("✅TMA Encode SFA (rank=2) SUCCESS!\n");
             }
         } else {
+            // SFA: rank-3, actual layout is [L, M, K_scales]
+            // TMA dims order: [K_scales, M, L] (innermost to outermost)
             cuuint64_t dims_SFA[3] = {K_scales, static_cast<cuuint64_t>(M), static_cast<cuuint64_t>(L)};
             cuuint32_t box_SFA[3] = {box_sfa_k, box_sfa_m, 1};
-            cuuint64_t strides_SFA[2] = {K_scales, static_cast<cuuint64_t>(M) * K_scales};
+            cuuint64_t strides_SFA[2] = {K_scales, M * K_scales};
 
             CUresult resSFA = encode_tma(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                          3, SFA_ptr, dims_SFA, strides_SFA, box_SFA);
@@ -1323,11 +1386,10 @@ void launch_fp4_gemv_optimized(
                 printf("✅TMA Encode SFA (rank=3) SUCCESS!\n");
             }
         }
-
     }
 
     // Verify all TMA descriptors were created successfully
-    if (!d_map_A || !d_map_B || !d_map_SFB || !d_map_SFA) {
+    if (!d_map_A || !d_map_SFA || !d_map_B || !d_map_SFB) {
         printf("ERROR: Not all TMA descriptors were created successfully!\n");
         printf("  d_map_A=%p d_map_SFA=%p d_map_B=%p d_map_SFB=%p\n",
                (void*)d_map_A, (void*)d_map_SFA, (void*)d_map_B, (void*)d_map_SFB);
@@ -1359,10 +1421,7 @@ void launch_fp4_gemv_optimized(
 
     fp4_gemv_streaming<kTileM, kTileK, kThreads><<<grid, block, shared_bytes>>>(
         A_ptr, B_ptr, SFA_ptr, SFB_ptr,
-        reinterpret_cast<const CUtensorMap*>(d_map_A),
-        reinterpret_cast<const CUtensorMap*>(d_map_SFA),
-        reinterpret_cast<const CUtensorMap*>(d_map_B),
-        reinterpret_cast<const CUtensorMap*>(d_map_SFB),
+        d_map_A, d_map_SFA, d_map_B, d_map_SFB,
         D_ptr, static_cast<int>(M), static_cast<int>(K), static_cast<int>(L)
     );
 
@@ -1530,14 +1589,14 @@ def custom_kernel(data: input_t) -> output_t:
             f"(mod128={a_ptr % 128})"
         )
     else:
-        print(f"âœ…(Python) a_bytes 128-byte alignment check passed: {hex(a_ptr)}")
+        print(f"✅(Python) a_bytes 128-byte alignment check passed: {hex(a_ptr)}")
     if b_ptr % 128 != 0:
         print(
             f"WARNING (Python): b_bytes data_ptr {hex(b_ptr)} is not 128-byte aligned "
             f"(mod128={b_ptr % 128})"
         )
     else:
-        print(f"âœ…(Python) b_bytes 128-byte alignment check passed: {hex(b_ptr)}")
+        print(f"✅(Python) b_bytes 128-byte alignment check passed: {hex(b_ptr)}")
     if K_packed_val % 128 != 0:
         print(f"WARNING (Python): K_packed ({K_packed_val}) is not 128-byte aligned")
 
