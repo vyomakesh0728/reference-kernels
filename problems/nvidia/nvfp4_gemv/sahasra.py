@@ -411,11 +411,6 @@ fp4_gemv_streaming(
     const int sfb_chunks = (K_scales + (kTMABoxLimit - 1)) / kTMABoxLimit;
 
     if (warp_id == 0 && lane_id == 0) {
-        // Initialize barriers before any TMA operations
-        mbarrier_init(mbar_b);
-        mbarrier_init(mbar_sfb);
-        __threadfence_block();
-
         // Calculate total expected bytes for all chunks
         uint32_t total_b_bytes = static_cast<uint32_t>(K_packed);
         uint32_t total_sfb_bytes = static_cast<uint32_t>(K_scales);
