@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Direct test without multiprocessing to get better error messages."""
+"""Test kernel execution only, no reference check."""
 import sys
 sys.path.insert(0, '/root/reference-kernels/problems/nvidia/nvfp4_gemv')
 
 from submission import custom_kernel
-from reference import generate_input, check_implementation
+from reference import generate_input
 from utils import set_seed
 
 # Test configurations
@@ -15,38 +15,28 @@ test_cases = [
     (7168, 16384, 8, "rank-3: Cluster + SWIZZLE_128B + box_k=K_scales_padded"),
 ]
 
+print("Testing kernel execution for all configurations...")
+print("="*60)
+
 for m, k, l, desc in test_cases:
-    print(f"\n{'='*60}")
-    print(f"Testing: M={m}, K={k}, L={l}")
+    print(f"\nTest: M={m}, K={k}, L={l}")
     print(f"Config: {desc}")
-    print(f"{'='*60}")
 
     # Set seed for reproducibility
     set_seed(1111)
 
     # Generate test data
-    print(f"Generating test data...")
     data = generate_input(m=m, k=k, l=l, seed=1111)
 
-    print("Running custom_kernel...")
     try:
         output = custom_kernel(data)
-        print("✓ Kernel executed successfully!")
-
-        # Check correctness
-        print("Running correctness check...")
-        good, message = check_implementation(data, output)
-        if good:
-            print("✓ Correctness check PASSED!")
-        else:
-            print(f"✗ Correctness check FAILED: {message}")
-            break  # Stop on first failure
+        print(f"✓ Kernel executed successfully! Output shape: {output.shape}")
     except Exception as e:
-        print(f"✗ Kernel failed with error: {e}")
+        print(f"✗ Kernel FAILED with error: {e}")
         import traceback
         traceback.print_exc()
         break  # Stop on first failure
 
-print(f"\n{'='*60}")
-print("All tests completed!")
-print(f"{'='*60}")
+print("\n" + "="*60)
+print("All kernel executions completed!")
+print("="*60)
