@@ -155,12 +155,35 @@ __device__ __forceinline__ void mbarrier_wait_parity(uint64_t* mbar, uint32_t ph
     );
 }
 
-// TMA load without mbarrier_arrive_expect_tx (caller must set expected bytes)
-__device__ __forceinline__ void tma_load_2d_no_arrive(void* smem_ptr,
-                                                       const CUtensorMap* desc,
-                                                       uint32_t coord0,
-                                                       uint32_t coord1,
-                                                       uint64_t* mbar) {
+// TMA load for CTA (rank-2, L=1) - no cluster
+__device__ __forceinline__ void tma_load_2d_cta_no_arrive(void* smem_ptr,
+                                                           const CUtensorMap* desc,
+                                                           uint32_t coord0,
+                                                           uint32_t coord1,
+                                                           uint64_t* mbar) {
+    uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
+    uint32_t mbar_addr = cvta_to_shared_u32(mbar);
+    uint64_t cache_hint = 0;
+
+    asm volatile(
+        "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+        "[%0], [%1, {%3, %4}], [%2];\n"
+        :
+        : "r"(smem_addr),
+          "l"(desc),
+          "r"(mbar_addr),
+          "r"(coord0),
+          "r"(coord1)
+        : "memory"
+    );
+}
+
+// TMA load for cluster (rank-3, L>1) - with cta_group::2
+__device__ __forceinline__ void tma_load_2d_cluster_no_arrive(void* smem_ptr,
+                                                                const CUtensorMap* desc,
+                                                                uint32_t coord0,
+                                                                uint32_t coord1,
+                                                                uint64_t* mbar) {
     uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
     // SM100 cluster TMA: clear peer bit so transaction bytes update CTA0's barrier
     constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
@@ -181,23 +204,63 @@ __device__ __forceinline__ void tma_load_2d_no_arrive(void* smem_ptr,
     );
 }
 
+// Wrapper that chooses CTA or cluster based on runtime L
+__device__ __forceinline__ void tma_load_2d_no_arrive(void* smem_ptr,
+                                                       const CUtensorMap* desc,
+                                                       uint32_t coord0,
+                                                       uint32_t coord1,
+                                                       uint64_t* mbar,
+                                                       int L) {
+    if (L == 1) {
+        tma_load_2d_cta_no_arrive(smem_ptr, desc, coord0, coord1, mbar);
+    } else {
+        tma_load_2d_cluster_no_arrive(smem_ptr, desc, coord0, coord1, mbar);
+    }
+}
+
 __device__ __forceinline__ void tma_load_2d(void* smem_ptr,
                                             const CUtensorMap* desc,
                                             uint32_t coord0,
                                             uint32_t coord1,
                                             uint32_t bytes,
-                                            uint64_t* mbar) {
+                                            uint64_t* mbar,
+                                            int L) {
     mbarrier_arrive_expect_tx(mbar, bytes);
-    tma_load_2d_no_arrive(smem_ptr, desc, coord0, coord1, mbar);
+    tma_load_2d_no_arrive(smem_ptr, desc, coord0, coord1, mbar, L);
 }
 
-// TMA 3D load without mbarrier_arrive_expect_tx
-__device__ __forceinline__ void tma_load_3d_no_arrive(void* smem_ptr,
-                                                       const CUtensorMap* desc,
-                                                       uint32_t coord0,
-                                                       uint32_t coord1,
-                                                       uint32_t coord2,
-                                                       uint64_t* mbar) {
+// TMA 3D load for CTA (rank-2, L=1) - no cluster
+__device__ __forceinline__ void tma_load_3d_cta_no_arrive(void* smem_ptr,
+                                                           const CUtensorMap* desc,
+                                                           uint32_t coord0,
+                                                           uint32_t coord1,
+                                                           uint32_t coord2,
+                                                           uint64_t* mbar) {
+    uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
+    uint32_t mbar_addr = cvta_to_shared_u32(mbar);
+    uint64_t cache_hint = 0;
+
+    asm volatile(
+        "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::bytes "
+        "[%0], [%1, {%3, %4, %5}], [%2];\n"
+        :
+        : "r"(smem_addr),
+          "l"(desc),
+          "r"(mbar_addr),
+          "r"(coord0),
+          "r"(coord1),
+          "r"(coord2)
+        : "memory"
+    );
+}
+
+// TMA 3D load for cluster (rank-3, L>1) - with cta_group::2
+__device__ __forceinline__ void tma_load_3d_cluster_no_arrive(void* smem_ptr,
+                                                                const CUtensorMap* desc,
+                                                                uint32_t coord0,
+                                                                uint32_t coord1,
+                                                                uint32_t coord2,
+                                                                uint64_t* mbar) {
     uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
     // SM100 cluster TMA: clear peer bit so transaction bytes update CTA0's barrier
     constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
@@ -219,15 +282,31 @@ __device__ __forceinline__ void tma_load_3d_no_arrive(void* smem_ptr,
     );
 }
 
+// Wrapper that chooses CTA or cluster based on runtime L
+__device__ __forceinline__ void tma_load_3d_no_arrive(void* smem_ptr,
+                                                       const CUtensorMap* desc,
+                                                       uint32_t coord0,
+                                                       uint32_t coord1,
+                                                       uint32_t coord2,
+                                                       uint64_t* mbar,
+                                                       int L) {
+    if (L == 1) {
+        tma_load_3d_cta_no_arrive(smem_ptr, desc, coord0, coord1, coord2, mbar);
+    } else {
+        tma_load_3d_cluster_no_arrive(smem_ptr, desc, coord0, coord1, coord2, mbar);
+    }
+}
+
 __device__ __forceinline__ void tma_load_3d(void* smem_ptr,
                                             const CUtensorMap* desc,
                                             uint32_t coord0,
                                             uint32_t coord1,
                                             uint32_t coord2,
                                             uint32_t bytes,
-                                            uint64_t* mbar) {
+                                            uint64_t* mbar,
+                                            int L) {
     mbarrier_arrive_expect_tx(mbar, bytes);
-    tma_load_3d_no_arrive(smem_ptr, desc, coord0, coord1, coord2, mbar);
+    tma_load_3d_no_arrive(smem_ptr, desc, coord0, coord1, coord2, mbar, L);
 }
 
 __device__ __forceinline__ uint64_t* mbar_stage(uint64_t* base, int stage) {
@@ -267,7 +346,8 @@ __device__ __forceinline__ void prefetch_tile(
 
                 // Load SFA scales tile (2D) using element-space coordinates
                 // TMA requires coordinates to be aligned to box size
-                uint32_t sfa_c0 = 0;  // For rank-2, always start at 0 (load box_k=16)
+                // For rank-2: align to SfaBoxK (16) and load the correct slice for this K-tile
+                uint32_t sfa_c0 = (c_k_scales / SfaBoxK) * SfaBoxK;  // Align to 16-scale boundaries
                 uint32_t sfa_c1 = c_m;
                 bool valid_sfa_k = (sfa_c0 + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
                 bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
@@ -296,7 +376,8 @@ __device__ __forceinline__ void prefetch_tile(
                         a_packed_stage[stage],
                         desc_A,
                         c0, c1,
-                        mbar_stage(mbar_a, stage)
+                        mbar_stage(mbar_a, stage),
+                        L
                     );
 #ifndef NDEBUG
                     if (k_tile_base == 256 && stage == 1) {  // Second tile with TileK=256
@@ -316,7 +397,8 @@ __device__ __forceinline__ void prefetch_tile(
                         sfa_stage[stage],
                         desc_SFA,
                         sfa_c0, sfa_c1,
-                        mbar_stage(mbar_a, stage)
+                        mbar_stage(mbar_a, stage),
+                        L
                     );
 #ifndef NDEBUG
                     if (k_tile_base == 256 && stage == 1) {  // Second tile with TileK=256
@@ -359,7 +441,8 @@ __device__ __forceinline__ void prefetch_tile(
                         a_packed_stage[stage],
                         desc_A,
                         c0, c1, c2,
-                        mbar_stage(mbar_a, stage)
+                        mbar_stage(mbar_a, stage),
+                        L
                     );
                 }
 
@@ -368,7 +451,8 @@ __device__ __forceinline__ void prefetch_tile(
                         sfa_stage[stage],
                         desc_SFA,
                         sfa_c0, sfa_c1, sfa_c2,
-                        mbar_stage(mbar_a, stage)
+                        mbar_stage(mbar_a, stage),
+                        L
                     );
                 }
             }
@@ -619,21 +703,23 @@ fp4_gemv_streaming(
             uint8_t* dst = b_packed_smem + elem_offset;
 
             uint32_t smem_addr = cvta_to_shared_u32(dst);
-            // SM100 cluster TMA: clear peer bit so transaction bytes update CTA0's barrier
-            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
-            uint32_t mbar_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
-            uint64_t cache_hint = 0;
+
             if (L == 1) {
+                // Rank-2: CTA launch (no cluster)
+                uint32_t mbar_addr = cvta_to_shared_u32(mbar_b);
                 asm volatile(
-                    "cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
-                    "[%0], [%1, {%3, %4}], [%2], %5;\n"
+                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+                    "[%0], [%1, {%3, %4}], [%2];\n"
                     :
                     : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u),
-                      "l"(cache_hint)
+                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
                     : "memory"
                 );
             } else {
+                // Rank-3: Cluster launch with cta_group::2
+                constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+                uint32_t mbar_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+                uint64_t cache_hint = 0;
                 asm volatile(
                     "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
                     "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
@@ -654,21 +740,23 @@ fp4_gemv_streaming(
             uint8_t* dst = sfb_smem + elem_offset;
 
             uint32_t smem_addr = cvta_to_shared_u32(dst);
-            // SM100 cluster TMA: clear peer bit so transaction bytes update CTA0's barrier
-            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
-            uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
-            uint64_t cache_hint = 0;
+
             if (L == 1) {
+                // Rank-2: CTA launch (no cluster)
+                uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb);
                 asm volatile(
-                    "cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
-                    "[%0], [%1, {%3, %4}], [%2], %5;\n"
+                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+                    "[%0], [%1, {%3, %4}], [%2];\n"
                     :
                     : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u),
-                      "l"(cache_hint)
+                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
                     : "memory"
                 );
             } else {
+                // Rank-3: Cluster launch with cta_group::2
+                constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+                uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+                uint64_t cache_hint = 0;
                 asm volatile(
                     "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
                     "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
@@ -1192,6 +1280,13 @@ fp4_gemv_streaming(
 
         // Column this thread holds (for c_frag_0/c_frag_2)
         int col = tid_in_octet * 2;  // 0, 2, 4, or 6
+
+#ifndef NDEBUG
+        if (blockIdx.x == 0 && blockIdx.y == 0 && warp_id == 2 && lane_id < 4) {
+            DEBUG_PRINT_ERROR("PRE_STORE_CHECK: lane=%d octet=%d tid_in_oct=%d col=%d\n",
+                              lane_id, octet, tid_in_octet, col);
+        }
+#endif
 
         // Since B was broadcast, all columns have same value.
         // We only write from threads holding col 0 to avoid duplication.
@@ -1725,46 +1820,68 @@ void launch_fp4_gemv_optimized(
     if (set_err != cudaSuccess) throw std::runtime_error(std::string("cudaFuncSetAttribute failed"));
 
     int num_blocks = static_cast<int>((M + kTileM - 1) / kTileM);
-    // Round up grid_x to be divisible by cluster.x=2 (required for cta_group::2 TMA)
-    // Extra blocks will check bounds and exit early - negligible overhead
-    int grid_x = ((num_blocks + 1) / 2) * 2;  // Round up to next even number
-    int grid_y = static_cast<int>(L);
-
-    dim3 grid(grid_x, grid_y);
-    dim3 block(kThreads);
-    dim3 cluster(2, 1, 1);  // cta_group::2 for TMA
-
-    // Enable non-portable cluster size (required for cluster launch)
     void const* kernel_ptr = (void const*)fp4_gemv_streaming<kTileM, kTileK, kThreads>;
-    cudaError_t cluster_enable = cudaFuncSetAttribute(
-        kernel_ptr,
-        cudaFuncAttributeNonPortableClusterSizeAllowed,
-        1
-    );
-    if (cluster_enable != cudaSuccess) {
-        throw std::runtime_error(std::string("cudaFuncSetAttribute NonPortableCluster failed: ") + cudaGetErrorString(cluster_enable));
-    }
 
-    // Set up cluster launch configuration
+    int grid_x, grid_y;
+    dim3 grid, block, cluster;
     cudaLaunchConfig_t launch_config = {0};
-    cudaLaunchAttribute launch_attr[1];
 
-    launch_attr[0].id = cudaLaunchAttributeClusterDimension;
-    launch_attr[0].val.clusterDim.x = cluster.x;
-    launch_attr[0].val.clusterDim.y = cluster.y;
-    launch_attr[0].val.clusterDim.z = cluster.z;
+    if (L == 1) {
+        // Rank-2: Regular CTA launch (no cluster)
+        grid_x = num_blocks;
+        grid_y = 1;
+        grid = dim3(grid_x, grid_y);
+        block = dim3(kThreads);
 
-    launch_config.gridDim = grid;
-    launch_config.blockDim = block;
-    launch_config.dynamicSmemBytes = shared_bytes;
-    launch_config.stream = 0;
-    launch_config.attrs = launch_attr;
-    launch_config.numAttrs = 1;
+        launch_config.gridDim = grid;
+        launch_config.blockDim = block;
+        launch_config.dynamicSmemBytes = shared_bytes;
+        launch_config.stream = 0;
+        launch_config.attrs = nullptr;
+        launch_config.numAttrs = 0;
 
 #ifndef NDEBUG
-    printf("DEBUG launch grid=(%d,%d) blockDim.x=%d shared_bytes=%zu M=%lld K=%lld L=%lld cluster=(2,1,1)\n",
-           grid_x, grid_y, kThreads, shared_bytes, (long long)M, (long long)K, (long long)L);
+        printf("DEBUG launch (rank-2 CTA) grid=(%d,%d) blockDim.x=%d shared_bytes=%zu M=%lld K=%lld L=%lld\n",
+               grid_x, grid_y, kThreads, shared_bytes, (long long)M, (long long)K, (long long)L);
 #endif
+    } else {
+        // Rank-3: Cluster launch with cta_group::2
+        // Round up grid_x to be divisible by cluster.x=2
+        grid_x = ((num_blocks + 1) / 2) * 2;
+        grid_y = static_cast<int>(L);
+        grid = dim3(grid_x, grid_y);
+        block = dim3(kThreads);
+        cluster = dim3(2, 1, 1);
+
+        // Enable non-portable cluster size
+        cudaError_t cluster_enable = cudaFuncSetAttribute(
+            kernel_ptr,
+            cudaFuncAttributeNonPortableClusterSizeAllowed,
+            1
+        );
+        if (cluster_enable != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaFuncSetAttribute NonPortableCluster failed: ") + cudaGetErrorString(cluster_enable));
+        }
+
+        // Set up cluster launch configuration
+        cudaLaunchAttribute launch_attr[1];
+        launch_attr[0].id = cudaLaunchAttributeClusterDimension;
+        launch_attr[0].val.clusterDim.x = cluster.x;
+        launch_attr[0].val.clusterDim.y = cluster.y;
+        launch_attr[0].val.clusterDim.z = cluster.z;
+
+        launch_config.gridDim = grid;
+        launch_config.blockDim = block;
+        launch_config.dynamicSmemBytes = shared_bytes;
+        launch_config.stream = 0;
+        launch_config.attrs = launch_attr;
+        launch_config.numAttrs = 1;
+
+#ifndef NDEBUG
+        printf("DEBUG launch (rank-3 cluster) grid=(%d,%d) blockDim.x=%d shared_bytes=%zu M=%lld K=%lld L=%lld cluster=(2,1,1)\n",
+               grid_x, grid_y, kThreads, shared_bytes, (long long)M, (long long)K, (long long)L);
+#endif
+    }
 
     int M_int = static_cast<int>(M);
     int K_int = static_cast<int>(K);
