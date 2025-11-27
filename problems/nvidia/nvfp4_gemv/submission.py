@@ -1183,17 +1183,18 @@ void launch_fp4_gemv_optimized(
     shared_bytes += static_cast<size_t>(K) * sizeof(__half); // b_vec_smem
     shared_bytes = align_up(shared_bytes, 16);
 
-    // Match 128-byte alignment for TMA/TC regions in shared memory
-    shared_bytes = align_up(shared_bytes, 128); // for a_packed_stage[0]
+    // 1024-byte alignment for SWIZZLE_128B TMA regions
+    shared_bytes = align_up(shared_bytes, 1024); // for a_packed_stage[0] (SWIZZLE_128B)
     for (int s = 0; s < kStageCount; ++s) {
         shared_bytes += static_cast<size_t>(kTileM) * kTileKPacked; // a_packed_stage[s]
     }
 
-    shared_bytes = align_up(shared_bytes, 128); // for sfa_stage[0]
+    shared_bytes = align_up(shared_bytes, 1024); // for sfa_stage[0] (SWIZZLE_128B)
     for (int s = 0; s < kStageCount; ++s) {
         shared_bytes += static_cast<size_t>(kTileM) * kSfaBoxK; // sfa_stage[s]
     }
 
+    // 128-byte alignment for non-swizzled regions
     shared_bytes = align_up(shared_bytes, 128); // for a_f16_smem
     shared_bytes += static_cast<size_t>(kTileM) * kAStride * sizeof(__half); // a_f16_smem
     shared_bytes = align_up(shared_bytes, 128); // for b_tile_smem
