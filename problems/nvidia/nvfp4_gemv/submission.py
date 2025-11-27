@@ -1678,6 +1678,7 @@ def get_module():
             verbose=True,
             extra_cuda_cflags=[
                 "-O2",  # Enable optimizations to fix lambda stack issues
+                "-DNDEBUG",  # Disable debug output for performance testing
                 # "--use_fast_math",  # Disabled for debugging
                 "-std=c++17",
                 "-gencode=arch=compute_100a,code=sm_100a",
