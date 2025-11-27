@@ -658,6 +658,11 @@ fp4_gemv_streaming(
 
 #if __CUDA_ARCH__ >= 900
     if (tid == 0 && use_tma_a) {
+        // RANK-3: Need cluster fence before initializing cluster-scoped barriers
+        if (L > 1) {
+            asm volatile("fence.mbarrier_init.release.cluster;");
+        }
+
         for (int s = 0; s < StageCount; ++s) {
             mbarrier_init(mbar_stage(mbar_a, s));
         }
@@ -692,8 +697,25 @@ fp4_gemv_streaming(
         uint32_t total_sfb_bytes = static_cast<uint32_t>(K >> 4);  // SFB not padded
 
         // Set barrier to expect all bytes at once
-        mbarrier_arrive_expect_tx(mbar_b, total_b_bytes);
-        mbarrier_arrive_expect_tx(mbar_sfb, total_sfb_bytes);
+        if (L == 1) {
+            // RANK-2: Use .shared scope (CTA-local) - DO NOT TOUCH
+            mbarrier_arrive_expect_tx(mbar_b, total_b_bytes);
+            mbarrier_arrive_expect_tx(mbar_sfb, total_sfb_bytes);
+        } else {
+            // RANK-3: Use .shared::cluster scope for cluster-scoped barriers
+            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
+            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
+            asm volatile(
+                "mbarrier.arrive.expect_tx.shared::cluster.b64 _, [%0], %1;\n"
+                :
+                : "r"(mbar_b_addr), "r"(total_b_bytes)
+            );
+            asm volatile(
+                "mbarrier.arrive.expect_tx.shared::cluster.b64 _, [%0], %1;\n"
+                :
+                : "r"(mbar_sfb_addr), "r"(total_sfb_bytes)
+            );
+        }
 
         // Issue all TMA loads (barrier expects total bytes from all loads)
         for (int tile_idx = 0; tile_idx < b_chunks; ++tile_idx) {
@@ -771,29 +793,37 @@ fp4_gemv_streaming(
     }
 
     // All threads wait on barriers
-    mbarrier_wait_parity(mbar_b, 0);
-    mbarrier_wait_parity(mbar_sfb, 0);
+    if (L == 1) {
+        // RANK-2: Use .shared scope - DO NOT TOUCH
+        mbarrier_wait_parity(mbar_b, 0);
+        mbarrier_wait_parity(mbar_sfb, 0);
+    } else {
+        // RANK-3: Wait with .shared::cta (local wait on cluster-scoped barrier)
+        mbarrier_wait_parity(mbar_b, 0);
+        mbarrier_wait_parity(mbar_sfb, 0);
+    }
 #endif
     __syncthreads();
 
         // DEBUG: Print first 4 SFB scale bytes and first 4 B packed bytes (first tile only)
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        printf("=== KERNEL DEBUG (block 0,0) ===\n");
-        printf("SFB raw bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
-               sfb_smem[0], sfb_smem[1], sfb_smem[2], sfb_smem[3]);
-        printf("SFB decoded FP8 [0-3]: %.6f %.6f %.6f %.6f\n",
-               decode_fp8_e4m3(sfb_smem[0]), decode_fp8_e4m3(sfb_smem[1]),
-               decode_fp8_e4m3(sfb_smem[2]), decode_fp8_e4m3(sfb_smem[3]));
-        printf("B packed bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
-               b_packed_smem[0], b_packed_smem[1], b_packed_smem[2], b_packed_smem[3]);
-
-        const int K_sfb = (K >> 4);  // SFB not padded
-        for (int i = 0; i < 4; i++) {
-            size_t sfb_idx = static_cast<size_t>(batch) * 128 * K_sfb + static_cast<size_t>(i);
-            printf("SFB contiguous_idx[row=0,col=%d,batch=%d] = %llu\n",
-                   i, batch, (unsigned long long)sfb_idx);
-        }
-        }
+        // DISABLED FOR PERFORMANCE: Excessive kernel printf statements cause hang
+        // if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+        // printf("=== KERNEL DEBUG (block 0,0) ===\n");
+        // printf("SFB raw bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
+        //        sfb_smem[0], sfb_smem[1], sfb_smem[2], sfb_smem[3]);
+        // printf("SFB decoded FP8 [0-3]: %.6f %.6f %.6f %.6f\n",
+        //        decode_fp8_e4m3(sfb_smem[0]), decode_fp8_e4m3(sfb_smem[1]),
+        //        decode_fp8_e4m3(sfb_smem[2]), decode_fp8_e4m3(sfb_smem[3]));
+        // printf("B packed bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
+        //        b_packed_smem[0], b_packed_smem[1], b_packed_smem[2], b_packed_smem[3]);
+        //
+        // const int K_sfb = (K >> 4);  // SFB not padded
+        // for (int i = 0; i < 4; i++) {
+        //     size_t sfb_idx = static_cast<size_t>(batch) * 128 * K_sfb + static_cast<size_t>(i);
+        //     printf("SFB contiguous_idx[row=0,col=%d,batch=%d] = %llu\n",
+        //            i, batch, (unsigned long long)sfb_idx);
+        // }
+        // }
     __syncthreads();
 
     // Decode B vector
@@ -842,14 +872,15 @@ fp4_gemv_streaming(
     __syncthreads();
 
     // DEBUG: Print first 8 decoded b_vec_smem values (first tile only)
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        printf("b_vec_smem decoded [0-7]: %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
-               __half2float(b_vec_smem[0]), __half2float(b_vec_smem[1]),
-               __half2float(b_vec_smem[2]), __half2float(b_vec_smem[3]),
-               __half2float(b_vec_smem[4]), __half2float(b_vec_smem[5]),
-               __half2float(b_vec_smem[6]), __half2float(b_vec_smem[7]));
-        printf("DEBUG: After b_vec_smem decode print, about to syncthreads\n");
-    }
+    // DISABLED FOR PERFORMANCE: Excessive kernel printf statements cause hang
+    // if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+    //     printf("b_vec_smem decoded [0-7]: %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
+    //            __half2float(b_vec_smem[0]), __half2float(b_vec_smem[1]),
+    //            __half2float(b_vec_smem[2]), __half2float(b_vec_smem[3]),
+    //            __half2float(b_vec_smem[4]), __half2float(b_vec_smem[5]),
+    //            __half2float(b_vec_smem[6]), __half2float(b_vec_smem[7]));
+    //     printf("DEBUG: After b_vec_smem decode print, about to syncthreads\n");
+    // }
     __syncthreads();
 
 #ifndef NDEBUG
@@ -1063,40 +1094,41 @@ fp4_gemv_streaming(
         __syncthreads();
 
         // DEBUG: Print first 8 decoded A[row=0-7] values and first 4 SFA raw bytes (first tile only)
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0 && k_tile == 0) {
-            printf("SFA raw bytes [row=0, 0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
-                   sfa_stage[stage][0], sfa_stage[stage][1],
-                   sfa_stage[stage][2], sfa_stage[stage][3]);
-            printf("SFA decoded FP8 [row=0, 0-3]: %.6f %.6f %.6f %.6f\n",
-                   decode_fp8_e4m3(sfa_stage[stage][0]), decode_fp8_e4m3(sfa_stage[stage][1]),
-                   decode_fp8_e4m3(sfa_stage[stage][2]), decode_fp8_e4m3(sfa_stage[stage][3]));
-            printf("A packed bytes [row=0, 0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
-                   a_packed_stage[stage][0], a_packed_stage[stage][1],
-                   a_packed_stage[stage][2], a_packed_stage[stage][3]);
-
-            // Print decoded A for rows 0-7 (first 8 elements of each row)
-            for (int r = 0; r < 8; r++) {
-                half* a_row = a_f16_smem + r * a_stride;
-                printf("A_f16_smem[row=%d, 0-7]: %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
-                       r,
-                       __half2float(a_row[0]), __half2float(a_row[1]),
-                       __half2float(a_row[2]), __half2float(a_row[3]),
-                       __half2float(a_row[4]), __half2float(a_row[5]),
-                       __half2float(a_row[6]), __half2float(a_row[7]));
-            }
-
-            // Print CuTe blocked indices for SFA at this tile origin
-            int nmblocks_sfa = (M + 127) / 128;
-            int nkblocks_sfa = (K_scales_padded + 3) / 4;
-        for (int i = 0; i < 4; i++) {
-        size_t sfa_idx = static_cast<size_t>(batch) * M * K_scales_padded
-                       + static_cast<size_t>(m_tile) * K_scales_padded
-                       + static_cast<size_t>(i);
-        printf("SFA contiguous_idx[row=%d,col=%d,batch=%d] = %llu\n",
-               m_tile, i, batch, (unsigned long long)sfa_idx);
-        }
-            printf("=== END KERNEL DEBUG ===\n");
-        }
+        // DISABLED FOR PERFORMANCE: Excessive kernel printf statements cause hang
+        // if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0 && k_tile == 0) {
+        //     printf("SFA raw bytes [row=0, 0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
+        //            sfa_stage[stage][0], sfa_stage[stage][1],
+        //            sfa_stage[stage][2], sfa_stage[stage][3]);
+        //     printf("SFA decoded FP8 [row=0, 0-3]: %.6f %.6f %.6f %.6f\n",
+        //            decode_fp8_e4m3(sfa_stage[stage][0]), decode_fp8_e4m3(sfa_stage[stage][1]),
+        //            decode_fp8_e4m3(sfa_stage[stage][2]), decode_fp8_e4m3(sfa_stage[stage][3]));
+        //     printf("A packed bytes [row=0, 0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
+        //            a_packed_stage[stage][0], a_packed_stage[stage][1],
+        //            a_packed_stage[stage][2], a_packed_stage[stage][3]);
+        //
+        //     // Print decoded A for rows 0-7 (first 8 elements of each row)
+        //     for (int r = 0; r < 8; r++) {
+        //         half* a_row = a_f16_smem + r * a_stride;
+        //         printf("A_f16_smem[row=%d, 0-7]: %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
+        //                r,
+        //                __half2float(a_row[0]), __half2float(a_row[1]),
+        //                __half2float(a_row[2]), __half2float(a_row[3]),
+        //                __half2float(a_row[4]), __half2float(a_row[5]),
+        //                __half2float(a_row[6]), __half2float(a_row[7]));
+        //     }
+        //
+        //     // Print CuTe blocked indices for SFA at this tile origin
+        //     int nmblocks_sfa = (M + 127) / 128;
+        //     int nkblocks_sfa = (K_scales_padded + 3) / 4;
+        // for (int i = 0; i < 4; i++) {
+        // size_t sfa_idx = static_cast<size_t>(batch) * M * K_scales_padded
+        //                + static_cast<size_t>(m_tile) * K_scales_padded
+        //                + static_cast<size_t>(i);
+        // printf("SFA contiguous_idx[row=%d,col=%d,batch=%d] = %llu\n",
+        //        m_tile, i, batch, (unsigned long long)sfa_idx);
+        // }
+        //     printf("=== END KERNEL DEBUG ===\n");
+        // }
         __syncthreads();
 
         if (is_producer && warp_id == 1) {
@@ -1238,15 +1270,16 @@ fp4_gemv_streaming(
 #endif
 
     // DEBUG: Print ALL fragments for lanes 0,4,8 to understand output distribution
-    if (blockIdx.x == 0 && blockIdx.y == 0 && is_consumer && warp_id == 2) {
-        int octet = lane_id / 4;
-        int tid_in_octet = lane_id % 4;
-        if (tid_in_octet == 0 && (lane_id == 0 || lane_id == 4 || lane_id == 8)) {
-            printf("FINAL_SM100: lane=%d octet=%d ALL_FRAGS: c0=%.2f c1=%.2f c2=%.2f c3=%.2f (rows %d,%d)\n",
-                   lane_id, octet, c_frag_0, c_frag_1, c_frag_2, c_frag_3,
-                   m_tile + (warp_id-2)*16 + octet, m_tile + (warp_id-2)*16 + octet + 8);
-        }
-    }
+    // DISABLED FOR PERFORMANCE: Excessive kernel printf statements cause hang
+    // if (blockIdx.x == 0 && blockIdx.y == 0 && is_consumer && warp_id == 2) {
+    //     int octet = lane_id / 4;
+    //     int tid_in_octet = lane_id % 4;
+    //     if (tid_in_octet == 0 && (lane_id == 0 || lane_id == 4 || lane_id == 8)) {
+    //         printf("FINAL_SM100: lane=%d octet=%d ALL_FRAGS: c0=%.2f c1=%.2f c2=%.2f c3=%.2f (rows %d,%d)\n",
+    //                lane_id, octet, c_frag_0, c_frag_1, c_frag_2, c_frag_3,
+    //                m_tile + (warp_id-2)*16 + octet, m_tile + (warp_id-2)*16 + octet + 8);
+    //     }
+    // }
 
     // m16n8k16.row.col.f32 output fragment layout per PTX ISA:
     // C matrix is 16 rows x 8 cols, distributed across 32 threads with 4 floats each.
