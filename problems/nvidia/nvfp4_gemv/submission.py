@@ -478,7 +478,9 @@ fp4_gemv_streaming(
 #if __CUDA_ARCH__ >= 700
     constexpr int TileKPacked = TileK / 2;
     constexpr int TileScaleCount = TileK / 16;
-    constexpr int SfaBoxK = 16;  // TMA minimum box size constraint  // TMA box size - reverted to 16 due to TMA descriptor constraints
+    // CRITICAL: SfaBoxK must match TMA descriptor box_sfa_k!
+    // Rank-2 (L=1): box_sfa_k=16, Rank-3 (L>1): box_sfa_k=128
+    constexpr int SfaBoxK = (L == 1) ? 16 : 128;
     constexpr int StageCount = 3;
     constexpr int a_stride = TileK + 8;
     constexpr int ProducerThreads = 64;
@@ -1320,12 +1322,13 @@ fp4_gemv_streaming(
             printf("DEBUG RANK-3: Before sync at end of k_tile\n");
         }
 
-        // Use cluster barrier for rank-3, CTA barrier for rank-2 (CUTLASS pattern)
+        // Use cluster barrier for rank-3, CTA barrier for rank-2
         if (L > 1) {
-            // RANK-3: Cluster barrier sync (CUTLASS cluster_sm90.hpp:75-79)
-            // cluster_sync() = cluster_arrive() + cluster_wait()
-            asm volatile("barrier.cluster.arrive.aligned;\n" : : );
-            asm volatile("barrier.cluster.wait.aligned;\n" : : );
+            // RANK-3: Cluster-wide synchronization for SM_100a (Blackwell)
+            // NOT Hopper style! SM_100a uses fence.sc.cluster, not barrier.cluster.arrive/wait
+            __syncthreads();  // First sync within CTA
+            asm volatile("fence.sc.cluster;" ::: "memory");  // Cluster fence
+            __syncthreads();  // Then sync within CTA again
         } else {
             // RANK-2: Standard CTA barrier
             __syncthreads();
