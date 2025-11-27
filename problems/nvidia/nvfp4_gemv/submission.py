@@ -231,6 +231,120 @@ __device__ __forceinline__ uint64_t* mbar_stage(uint64_t* base, int stage) {
     // Each mbarrier occupies 16 bytes (two uint64_t slots)
     return base + stage * 2;
 }
+
+// Prefetch tile using TMA - extracted from lambda for better performance
+template<int TileM, int TileK>
+__device__ __forceinline__ void prefetch_tile(
+    int stage, int k_tile_base,
+    bool use_tma_a, bool is_producer, int warp_id, int lane_id,
+    int m_tile, int K_packed, int K_scales_padded, int M, int L, int batch,
+    uint8_t** a_packed_stage, uint8_t** sfa_stage, uint64_t* mbar_a,
+    const CUtensorMap* desc_A, const CUtensorMap* desc_SFA
+) {
+    constexpr int TileKPacked = TileK / 2;
+    constexpr int SfaBoxK = 16;
+
+    if (use_tma_a && is_producer) {
+        if (warp_id == 0 && lane_id == 0) {
+            // Element-space coordinates: row and packed-K index
+            uint32_t c_m = static_cast<uint32_t>(m_tile);
+            uint32_t c_k_packed = static_cast<uint32_t>(k_tile_base >> 1);
+            uint32_t c_k_scales = static_cast<uint32_t>(k_tile_base >> 4);
+
+            if (L == 1) {
+                // Load A matrix tile (2D)
+                uint32_t c0 = c_k_packed;
+                uint32_t c1 = c_m;
+                bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
+                bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
+
+                // Load SFA scales tile (2D) using element-space coordinates
+                uint32_t sfa_c0 = c_k_scales;
+                uint32_t sfa_c1 = c_m;
+                bool valid_sfa_k = (c_k_scales + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
+                bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
+
+                // Calculate total bytes for mbarrier
+                uint32_t total_bytes = 0;
+                if (valid_m && valid_k) {
+                    total_bytes += (TileM * TileKPacked + 15) & ~15;
+                }
+                if (valid_sfa_m && valid_sfa_k) {
+                    total_bytes += TileM * SfaBoxK;
+                }
+
+                // Set expected bytes for mbarrier
+                mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), total_bytes);
+
+                // Issue TMA loads (they will complete to the same mbarrier)
+                if (valid_m && valid_k) {
+                    tma_load_2d_no_arrive(
+                        a_packed_stage[stage],
+                        desc_A,
+                        c0, c1,
+                        mbar_stage(mbar_a, stage)
+                    );
+                }
+
+                // if (valid_sfa_m && valid_sfa_k) {
+                //     tma_load_2d_no_arrive(
+                //         sfa_stage[stage],
+                //         desc_SFA,
+                //         sfa_c0, sfa_c1,
+                //         mbar_stage(mbar_a, stage)
+                //     );
+                // }
+            } else {
+                // Load A matrix tile (3D)
+                uint32_t c0 = c_k_packed;
+                uint32_t c1 = c_m;
+                uint32_t c2 = static_cast<uint32_t>(batch);
+                bool valid_batch = c2 < static_cast<uint32_t>(L);
+                bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
+                bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
+
+                // Load SFA scales tile (3D) using element-space coordinates
+                uint32_t sfa_c0 = c_k_scales;
+                uint32_t sfa_c1 = c_m;
+                uint32_t sfa_c2 = c2;
+                bool valid_sfa_k = (c_k_scales + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
+                bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
+
+                // Calculate total bytes for mbarrier
+                uint32_t total_bytes = 0;
+                if (valid_batch && valid_m && valid_k) {
+                    total_bytes += TileM * TileKPacked;
+                }
+                if (valid_batch && valid_sfa_m && valid_sfa_k) {
+                    total_bytes += TileM * SfaBoxK;
+                }
+
+                // TEMP: Test without TMA - signal mbarrier with 0 bytes
+                mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), 0);
+
+                // Issue TMA loads (they will complete to the same mbarrier)
+                // TEMP: Commented out to test if TMA is causing illegal instruction
+                // if (valid_batch && valid_m && valid_k) {
+                //     tma_load_3d_no_arrive(
+                //         a_packed_stage[stage],
+                //         desc_A,
+                //         c0, c1, c2,
+                //         mbar_stage(mbar_a, stage)
+                //     );
+                // }
+
+                // if (valid_batch && valid_sfa_m && valid_sfa_k) {
+                //     tma_load_3d_no_arrive(
+                //         sfa_stage[stage],
+                //         desc_SFA,
+                //         sfa_c0, sfa_c1, sfa_c2,
+                //         mbar_stage(mbar_a, stage)
+                //     );
+                // }
+            }
+        }
+    }
+}
 #endif
 
 template<int TileM, int TileK, int Threads>
@@ -592,156 +706,22 @@ fp4_gemv_streaming(
     }
     __syncthreads();
 
-    auto prefetch_tile = [=, &a_packed_stage, &sfa_stage, &mbar_a](int stage, int k_tile_base) {
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            printf("DEBUG: INSIDE prefetch_tile stage=%d k_tile_base=%d use_tma_a=%d is_producer=%d warp_id=%d lane_id=%d\n",
-                   stage, k_tile_base, use_tma_a, is_producer, warp_id, lane_id);
-        }
-#endif
-        if (use_tma_a && is_producer) {
-#ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                printf("DEBUG: Inside use_tma_a && is_producer block\n");
-            }
-#endif
-            if (warp_id == 0 && lane_id == 0) {
-#ifndef NDEBUG
-                if (blockIdx.x == 0 && blockIdx.y == 0) {
-                    printf("DEBUG: Inside warp_id==0 && lane_id==0 block\n");
-                }
-#endif
-                // Element-space coordinates: row and packed-K index
-                uint32_t c_m = static_cast<uint32_t>(m_tile);
-                uint32_t c_k_packed = static_cast<uint32_t>(k_tile_base >> 1);
-                uint32_t c_k_scales = static_cast<uint32_t>(k_tile_base >> 4);
-#ifndef NDEBUG
-                if (blockIdx.x == 0 && blockIdx.y == 0) {
-                    printf("DEBUG: TMA coords c_m=%u c_k_packed=%u c_k_scales=%u L=%d\n",
-                           c_m, c_k_packed, c_k_scales, L);
-                }
-#endif
-
-                if (L == 1) {
-                    // Load A matrix tile (2D)
-                    uint32_t c0 = c_k_packed;
-                    uint32_t c1 = c_m;
-                    bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
-                    bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
-
-                    // Load SFA scales tile (2D) using element-space coordinates
-                    uint32_t sfa_c0 = c_k_scales;
-                    uint32_t sfa_c1 = c_m;
-                    bool valid_sfa_k = (c_k_scales + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
-                    bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
-
-                    // Calculate total bytes for mbarrier
-                    uint32_t total_bytes = 0;
-                    if (valid_m && valid_k) {
-                        total_bytes += (TileM * TileKPacked + 15) & ~15;
-                    }
-                    if (valid_sfa_m && valid_sfa_k) {
-                        total_bytes += TileM * SfaBoxK;
-                    }
-
-#ifndef NDEBUG
-                    if (blockIdx.x == 0 && blockIdx.y == 0) {
-                        printf("DEBUG: TMA 2D loads: valid_m=%d valid_k=%d valid_sfa_m=%d valid_sfa_k=%d total_bytes=%u\n",
-                               valid_m, valid_k, valid_sfa_m, valid_sfa_k, total_bytes);
-                    }
-#endif
-
-                    // Set mbarrier expected bytes ONCE
-                    mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), total_bytes);
-
-                    // Issue TMA loads (they will complete to the same mbarrier)
-                    if (valid_m && valid_k) {
-#ifndef NDEBUG
-                        if (blockIdx.x == 0 && blockIdx.y == 0) {
-                            printf("DEBUG: Calling tma_load_2d for A matrix...\n");
-                        }
-#endif
-                        tma_load_2d_no_arrive(
-                            a_packed_stage[stage],
-                            desc_A,
-                            c0, c1,
-                            mbar_stage(mbar_a, stage)
-                        );
-                    }
-
-                    if (valid_sfa_m && valid_sfa_k) {
-#ifndef NDEBUG
-                        if (blockIdx.x == 0 && blockIdx.y == 0) {
-                            printf("DEBUG: Calling tma_load_2d for SFA...\n");
-                        }
-#endif
-                        tma_load_2d_no_arrive(
-                            sfa_stage[stage],
-                            desc_SFA,
-                            sfa_c0, sfa_c1,
-                            mbar_stage(mbar_a, stage)
-                        );
-                    }
-                } else {
-                    // Load A matrix tile (3D)
-                    uint32_t c0 = c_k_packed;
-                    uint32_t c1 = c_m;
-                    uint32_t c2 = static_cast<uint32_t>(batch);
-                    bool valid_batch = c2 < static_cast<uint32_t>(L);
-                    bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
-                    bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
-
-                    // Load SFA scales tile (3D) using element-space coordinates
-                    uint32_t sfa_c0 = c_k_scales;
-                    uint32_t sfa_c1 = c_m;
-                    uint32_t sfa_c2 = c2;
-                    bool valid_sfa_k = (c_k_scales + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
-                    bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
-
-                    // Calculate total bytes for mbarrier
-                    uint32_t total_bytes = 0;
-                    if (valid_batch && valid_m && valid_k) {
-                        total_bytes += TileM * TileKPacked;
-                    }
-                    if (valid_batch && valid_sfa_m && valid_sfa_k) {
-                        total_bytes += TileM * SfaBoxK;
-                    }
-
-                    // Set mbarrier expected bytes ONCE
-                    mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), total_bytes);
-
-                    // Issue TMA loads (they will complete to the same mbarrier)
-                    if (valid_batch && valid_m && valid_k) {
-                        tma_load_3d_no_arrive(
-                            a_packed_stage[stage],
-                            desc_A,
-                            c0, c1, c2,
-                            mbar_stage(mbar_a, stage)
-                        );
-                    }
-
-                    if (valid_batch && valid_sfa_m && valid_sfa_k) {
-                        tma_load_3d_no_arrive(
-                            sfa_stage[stage],
-                            desc_SFA,
-                            sfa_c0, sfa_c1, sfa_c2,
-                            mbar_stage(mbar_a, stage)
-                        );
-                    }
-                }
-            }
-        }
-        // All scale loading now done via TMA - no manual copies needed
-    };
-
-#ifndef NDEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        printf("DEBUG: About to call prefetch_tile(0, 0)\n");
-    }
-#endif
-    prefetch_tile(0, 0);
+    // Prefetch first tiles using TMA
+    prefetch_tile<TileM, TileK>(
+        0, 0,
+        use_tma_a, is_producer, warp_id, lane_id,
+        m_tile, K_packed, K_scales_padded, M, L, batch,
+        a_packed_stage, sfa_stage, mbar_a,
+        desc_A, desc_SFA
+    );
     if (TileK < K) {
-        prefetch_tile(1, TileK);
+        prefetch_tile<TileM, TileK>(
+            1, TileK,
+            use_tma_a, is_producer, warp_id, lane_id,
+            m_tile, K_packed, K_scales_padded, M, L, batch,
+            a_packed_stage, sfa_stage, mbar_a,
+            desc_A, desc_SFA
+        );
     }
 
     float c_frag_0 = 0.0f;
@@ -764,7 +744,13 @@ fp4_gemv_streaming(
         int next_k = k_tile + 2 * TileK;
 
         if (next_k < K) {
-            prefetch_tile(next_stage, next_k);
+            prefetch_tile<TileM, TileK>(
+                next_stage, next_k,
+                use_tma_a, is_producer, warp_id, lane_id,
+                m_tile, K_packed, K_scales_padded, M, L, batch,
+                a_packed_stage, sfa_stage, mbar_a,
+                desc_A, desc_SFA
+            );
         }
 
         if (use_tma_a) {
