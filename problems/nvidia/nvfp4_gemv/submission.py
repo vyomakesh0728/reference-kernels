@@ -853,12 +853,12 @@ fp4_gemv_streaming(
             );
         }
 
-        // Wait on CTA0's barrier - use .shared::cta scope (not ::cluster for wait)
+        // Wait on CTA0's barrier - address from mapa encodes cluster scope, use generic .shared
         asm volatile(
             "{\n\t"
             ".reg .pred P1; \n\t"
             "LAB_WAIT_B: \n\t"
-            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+            "mbarrier.try_wait.parity.shared.b64 P1, [%0], %1; \n\t"
             "@!P1 bra.uni LAB_WAIT_B; \n\t"
             "}"
             :
@@ -870,7 +870,7 @@ fp4_gemv_streaming(
             "{\n\t"
             ".reg .pred P1; \n\t"
             "LAB_WAIT_SFB: \n\t"
-            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+            "mbarrier.try_wait.parity.shared.b64 P1, [%0], %1; \n\t"
             "@!P1 bra.uni LAB_WAIT_SFB; \n\t"
             "}"
             :
