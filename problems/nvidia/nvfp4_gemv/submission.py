@@ -283,7 +283,7 @@ __device__ __forceinline__ void prefetch_tile(
                 // Issue TMA loads (they will complete to the same mbarrier)
                 if (valid_m && valid_k) {
 #ifndef NDEBUG
-                    if (k_tile_base == 128 && stage == 1) {
+                    if (k_tile_base == 256 && stage == 1) {  // Second tile with TileK=256
                         printf("DEBUG prefetch: About to TMA load A, c0=%u c1=%u valid_k=%d valid_m=%d\n",
                                c0, c1, valid_k, valid_m);
                     }
@@ -295,7 +295,7 @@ __device__ __forceinline__ void prefetch_tile(
                         mbar_stage(mbar_a, stage)
                     );
 #ifndef NDEBUG
-                    if (k_tile_base == 128 && stage == 1) {
+                    if (k_tile_base == 256 && stage == 1) {  // Second tile with TileK=256
                         printf("DEBUG prefetch: A TMA load completed\n");
                     }
 #endif
@@ -303,7 +303,7 @@ __device__ __forceinline__ void prefetch_tile(
 
                 if (valid_sfa_m && valid_sfa_k) {
 #ifndef NDEBUG
-                    if (k_tile_base == 128 && stage == 1) {
+                    if (k_tile_base == 256 && stage == 1) {  // Second tile with TileK=256
                         printf("DEBUG prefetch: About to TMA load SFA, sfa_c0=%u sfa_c1=%u valid_sfa_k=%d valid_sfa_m=%d\n",
                                sfa_c0, sfa_c1, valid_sfa_k, valid_sfa_m);
                     }
@@ -315,7 +315,7 @@ __device__ __forceinline__ void prefetch_tile(
                         mbar_stage(mbar_a, stage)
                     );
 #ifndef NDEBUG
-                    if (k_tile_base == 128 && stage == 1) {
+                    if (k_tile_base == 256 && stage == 1) {  // Second tile with TileK=256
                         printf("DEBUG prefetch: SFA TMA load completed\n");
                     }
 #endif
@@ -1788,7 +1788,7 @@ def custom_kernel(data: input_t) -> output_t:
     # Pad SFA tensor to support TMA loads from any tile position
     # TMA box size is 16, so we need K_scales_padded >= max_tile_start/16 + 16
     # where max_tile_start = K - TileK = last K tile starting position
-    TileK = 128
+    TileK = 256  # MUST match kTileK in kernel (256 elements = 128 packed bytes for SWIZZLE_128B)
     SfaBoxK = 16  # TMA minimum box size
     max_tile_start = K - TileK if K > TileK else 0
     max_scale_pos = max_tile_start // 16
