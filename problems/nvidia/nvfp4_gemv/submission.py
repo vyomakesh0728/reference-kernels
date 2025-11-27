@@ -658,9 +658,15 @@ fp4_gemv_streaming(
 
 #if __CUDA_ARCH__ >= 900
     if (tid == 0 && use_tma_a) {
-        // RANK-3: Need cluster fence before initializing cluster-scoped barriers
+        // RANK-3 ONLY: Cluster fence (CUTLASS pattern from barrier.h)
         if (L > 1) {
-            asm volatile("fence.mbarrier_init.release.cluster;");
+            asm volatile(
+                "{\n\t"
+                "fence.mbarrier_init.release.cluster; \n"
+                "}"
+                ::
+                : "memory"
+            );
         }
 
         for (int s = 0; s < StageCount; ++s) {
@@ -691,31 +697,50 @@ fp4_gemv_streaming(
     const int b_chunks = (K_packed + (kTMABoxLimit - 1)) / kTMABoxLimit;
     const int sfb_chunks = ((K >> 4) + (kTMABoxLimit - 1)) / kTMABoxLimit;  // SFB not padded
 
-    if (warp_id == 0 && lane_id == 0) {
-        // Calculate total expected bytes for all chunks
-        uint32_t total_b_bytes = static_cast<uint32_t>(K_packed);
-        uint32_t total_sfb_bytes = static_cast<uint32_t>(K >> 4);  // SFB not padded
+    // Calculate total expected bytes for all chunks
+    uint32_t total_b_bytes = static_cast<uint32_t>(K_packed);
+    uint32_t total_sfb_bytes = static_cast<uint32_t>(K >> 4);  // SFB not padded
 
-        // Set barrier to expect all bytes at once
-        if (L == 1) {
-            // RANK-2: Use .shared scope (CTA-local) - DO NOT TOUCH
+    // RANK-2 (L=1): Original code path - DO NOT TOUCH
+    if (L == 1) {
+        if (warp_id == 0 && lane_id == 0) {
             mbarrier_arrive_expect_tx(mbar_b, total_b_bytes);
             mbarrier_arrive_expect_tx(mbar_sfb, total_sfb_bytes);
-        } else {
-            // RANK-3: Use .shared::cluster scope for cluster-scoped barriers
-            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
-            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
+        }
+    }
+    // RANK-3 (L>1): Cluster barrier setup - Only CTA0 sets expect_tx
+    else {
+        uint32_t cta_rank = blockIdx.x % 2;
+        if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
+            // Only CTA0 sets expect_tx on its local barrier
+            // TMA from both CTAs will route to CTA0's barrier via peer mask
+            // Apply Sm100MmaPeerBitMask to barrier addresses (FIX #2)
+            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+
             asm volatile(
-                "mbarrier.arrive.expect_tx.shared::cluster.b64 _, [%0], %1;\n"
+                "{\n\t"
+                "mbarrier.arrive.expect_tx.shared::cluster.b64 _, [%0], %1; \n\t"
+                "}"
                 :
                 : "r"(mbar_b_addr), "r"(total_b_bytes)
+                : "memory"
             );
+
             asm volatile(
-                "mbarrier.arrive.expect_tx.shared::cluster.b64 _, [%0], %1;\n"
+                "{\n\t"
+                "mbarrier.arrive.expect_tx.shared::cluster.b64 _, [%0], %1; \n\t"
+                "}"
                 :
                 : "r"(mbar_sfb_addr), "r"(total_sfb_bytes)
+                : "memory"
             );
         }
+    }
+
+    // Issue TMA loads
+    if (warp_id == 0 && lane_id == 0) {
 
         // Issue all TMA loads (barrier expects total bytes from all loads)
         for (int tile_idx = 0; tile_idx < b_chunks; ++tile_idx) {
@@ -794,13 +819,63 @@ fp4_gemv_streaming(
 
     // All threads wait on barriers
     if (L == 1) {
-        // RANK-2: Use .shared scope - DO NOT TOUCH
+        // RANK-2: Wait locally (DO NOT TOUCH)
         mbarrier_wait_parity(mbar_b, 0);
         mbarrier_wait_parity(mbar_sfb, 0);
     } else {
-        // RANK-3: Wait with .shared::cta (local wait on cluster-scoped barrier)
-        mbarrier_wait_parity(mbar_b, 0);
-        mbarrier_wait_parity(mbar_sfb, 0);
+        // RANK-3: All CTAs wait on CTA0's barrier using mapa
+        uint32_t cta_rank = blockIdx.x % 2;
+        uint32_t mbar_b_addr_cta0;
+        uint32_t mbar_sfb_addr_cta0;
+        constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+
+        if (cta_rank == 0) {
+            // CTA0: use local address with peer mask (FIX #3)
+            mbar_b_addr_cta0 = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+            mbar_sfb_addr_cta0 = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+        } else {
+            // CTA1: use mapa to get CTA0's remote barrier address (FIX #3)
+            uint32_t mbar_b_local = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+            uint32_t mbar_sfb_local = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+            uint32_t cta0_id = 0;
+
+            asm volatile(
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(mbar_b_addr_cta0)
+                : "r"(mbar_b_local), "r"(cta0_id)
+            );
+
+            asm volatile(
+                "mapa.shared::cluster.u32 %0, %1, %2;\n"
+                : "=r"(mbar_sfb_addr_cta0)
+                : "r"(mbar_sfb_local), "r"(cta0_id)
+            );
+        }
+
+        // Wait on CTA0's barrier - use .shared::cta scope (not ::cluster for wait)
+        asm volatile(
+            "{\n\t"
+            ".reg .pred P1; \n\t"
+            "LAB_WAIT_B: \n\t"
+            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+            "@!P1 bra.uni LAB_WAIT_B; \n\t"
+            "}"
+            :
+            : "r"(mbar_b_addr_cta0), "r"(0)
+            : "memory"
+        );
+
+        asm volatile(
+            "{\n\t"
+            ".reg .pred P1; \n\t"
+            "LAB_WAIT_SFB: \n\t"
+            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+            "@!P1 bra.uni LAB_WAIT_SFB; \n\t"
+            "}"
+            :
+            : "r"(mbar_sfb_addr_cta0), "r"(0)
+            : "memory"
+        );
     }
 #endif
     __syncthreads();
