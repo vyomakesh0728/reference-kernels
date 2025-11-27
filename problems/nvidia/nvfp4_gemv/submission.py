@@ -334,8 +334,8 @@ __device__ __forceinline__ void prefetch_tile(
 
             // SFA box size must match TMA descriptor configuration:
             // rank-2 (L=1, CTA, SWIZZLE_NONE): box_k=16
-            // rank-3 (L=4,8, cluster, SWIZZLE_128B): box_k=K_scales_padded
-            int SfaBoxK = (L == 1) ? 16 : K_scales_padded;
+            // rank-3 (L=4,8, cluster, SWIZZLE_128B): box_k=128
+            int SfaBoxK = (L == 1) ? 16 : 128;
 
             if (L == 1) {
                 // Load A matrix tile (2D)
@@ -585,8 +585,8 @@ fp4_gemv_streaming(
     align_up_smem_1024();
     uint8_t* sfa_stage[StageCount];
     // For rank-2 (L=1): allocate TileM * 16 (matching TMA box_k)
-    // For rank-3 (L>1): allocate TileM * K_scales_padded (matching TMA box_k)
-    int sfa_stage_stride = (L == 1) ? (TileM * 16) : (TileM * K_scales_padded);
+    // For rank-3 (L>1): allocate TileM * 128 (matching TMA box_k)
+    int sfa_stage_stride = (L == 1) ? (TileM * 16) : (TileM * 128);
     for (int s = 0; s < StageCount; ++s) {
         sfa_stage[s] = smem + offset;
         offset += sfa_stage_stride;
@@ -1023,8 +1023,8 @@ fp4_gemv_streaming(
                     int scale_col = col_packed >> 3;
                     if (scale_col < scale_count) {
                         // For rank-2 (L=1): sfa_stage stride is SfaBoxK=16 (loaded width)
-                        // For rank-3 (L>1): sfa_stage stride is SfaBoxK=K_scales_padded (full width)
-                        int sfa_stride = (L == 1) ? 16 : K_scales_padded;
+                        // For rank-3 (L>1): sfa_stage stride is SfaBoxK=128 (loaded width)
+                        int sfa_stride = (L == 1) ? 16 : 128;
                         int sfa_idx = row * sfa_stride + scale_col;
                         int sfa_size = TileM * sfa_stride;
                         DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, sfa_size, sfa_stage[stage]);
@@ -1538,11 +1538,7 @@ void launch_fp4_gemv_optimized(
                 static_cast<cuuint64_t>(K_packed)  // Row stride in bytes
             };
 
-            printf("TMA Debug: Using RANK=2 for L=1\n");
-            printf("TMA Debug: dims = [K_packed=%llu, M=%llu], box = [%u, %u]\n",
-                   (unsigned long long)dims_A[0], (unsigned long long)dims_A[1],
-                   box_A[0], box_A[1]);
-            printf("TMA Debug: strides_A[0] = %llu bytes\n", (unsigned long long)strides_A[0]);
+            // Rank-2 descriptor creation (silent)
 
             // Validate box dimensions
             if (box_A[0] > 256 || box_A[1] > 256) {
@@ -1568,7 +1564,7 @@ void launch_fp4_gemv_optimized(
                     printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
                     tma_ok = false;
                 } else {
-                    printf("✅TMA Encode A (rank=2, SWIZZLE_NONE) SUCCESS!\n");
+                    // Rank-2 success (silent)
                 }
             }
         }
@@ -1657,7 +1653,7 @@ void launch_fp4_gemv_optimized(
             } else {
                 check_cuda(cudaMalloc(&d_map_B, sizeof(CUtensorMap)), "cudaMalloc d_map_B");
                 check_cuda(cudaMemcpy(d_map_B, map_B_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_B");
-                printf("✅TMA Encode B (rank=2) SUCCESS!\n");
+                // Rank-2 B success (silent)
             }
         } else {
             // B: rank-3, actual layout is [L, 128, K_packed]
@@ -1706,7 +1702,7 @@ void launch_fp4_gemv_optimized(
             } else {
                 check_cuda(cudaMalloc(&d_map_SFB, sizeof(CUtensorMap)), "cudaMalloc d_map_SFB");
                 check_cuda(cudaMemcpy(d_map_SFB, map_SFB_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFB");
-                printf("✅TMA Encode SFB (rank=2) SUCCESS!\n");
+                // Rank-2 SFB success (silent)
             }
         } else {
             // SFB: rank-3, actual layout is [L, 128, K_scales]
@@ -1739,8 +1735,9 @@ void launch_fp4_gemv_optimized(
         CUtensorMap* map_SFA_ptr = reinterpret_cast<CUtensorMap*>(map_SFA_aligned);
 
         // For rank-2 (L=1): Use SWIZZLE_NONE with box_k=16 (no padding needed, CTA launch)
-        // For rank-3 (L=4,8): Use SWIZZLE_128B with box_k=128 (requires padding, cluster launch)
-        cuuint32_t box_sfa_k = (L == 1) ? 16u : static_cast<cuuint32_t>(K_scales_padded);
+        // For rank-3 (L=4,8): Use SWIZZLE_128B with box_k=128 (optimal for swizzling, cluster launch)
+        // TMA hardware limit: box dimensions must not exceed 256
+        cuuint32_t box_sfa_k = (L == 1) ? 16u : 128u;
         cuuint32_t box_sfa_m = static_cast<cuuint32_t>(
             kTileM < M ?
                 (kTileM < 16ULL ? 16ULL : (kTileM < 256ULL ? kTileM : 256ULL)) :
@@ -1755,9 +1752,7 @@ void launch_fp4_gemv_optimized(
             cuuint32_t box_SFA[2] = {box_sfa_k, box_sfa_m};
             cuuint64_t strides_SFA[1] = {static_cast<cuuint64_t>(K_scales_padded)};
 
-            printf("TMA SFA (rank=2, SWIZZLE_NONE): dims=[%llu,%llu] box=[%u,%u] stride=[%llu] ptr=%p\n",
-                   (unsigned long long)dims_SFA[0], (unsigned long long)dims_SFA[1],
-                   box_SFA[0], box_SFA[1], (unsigned long long)strides_SFA[0], SFA_ptr);
+            // Rank-2 SFA descriptor creation (silent)
 
             uintptr_t sfa_addr = reinterpret_cast<uintptr_t>(SFA_ptr);
             if ((sfa_addr % 128) != 0) {
@@ -1776,7 +1771,7 @@ void launch_fp4_gemv_optimized(
             } else {
                 check_cuda(cudaMalloc(&d_map_SFA, sizeof(CUtensorMap)), "cudaMalloc d_map_SFA");
                 check_cuda(cudaMemcpy(d_map_SFA, map_SFA_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFA");
-                printf("✅TMA Encode SFA (rank=2) SUCCESS!\n");
+                // Rank-2 SFA success (silent)
             }
         } else {
             // SFA: rank-3, actual layout is [L, M, K_scales_padded]
@@ -1817,7 +1812,12 @@ void launch_fp4_gemv_optimized(
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         static_cast<int>(shared_bytes)
     );
-    if (set_err != cudaSuccess) throw std::runtime_error(std::string("cudaFuncSetAttribute failed"));
+    if (set_err != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaFuncSetAttribute MaxDynamicSharedMemorySize failed: ") + cudaGetErrorString(set_err));
+    }
+    if (L > 1) {
+        printf("✅cudaFuncSetAttribute MaxDynamicSharedMemorySize=%zu SUCCESS\n", shared_bytes);
+    }
 
     int num_blocks = static_cast<int>((M + kTileM - 1) / kTileM);
     void const* kernel_ptr = (void const*)fp4_gemv_streaming<kTileM, kTileK, kThreads>;
@@ -1825,6 +1825,7 @@ void launch_fp4_gemv_optimized(
     int grid_x, grid_y;
     dim3 grid, block, cluster;
     cudaLaunchConfig_t launch_config = {0};
+    cudaLaunchAttribute launch_attr[1] = {};  // Declare outside if/else to persist
 
     if (L == 1) {
         // Rank-2: Regular CTA launch (no cluster)
@@ -1839,11 +1840,6 @@ void launch_fp4_gemv_optimized(
         launch_config.stream = 0;
         launch_config.attrs = nullptr;
         launch_config.numAttrs = 0;
-
-#ifndef NDEBUG
-        printf("DEBUG launch (rank-2 CTA) grid=(%d,%d) blockDim.x=%d shared_bytes=%zu M=%lld K=%lld L=%lld\n",
-               grid_x, grid_y, kThreads, shared_bytes, (long long)M, (long long)K, (long long)L);
-#endif
     } else {
         // Rank-3: Cluster launch with cta_group::2
         // Round up grid_x to be divisible by cluster.x=2
@@ -1860,15 +1856,24 @@ void launch_fp4_gemv_optimized(
             1
         );
         if (cluster_enable != cudaSuccess) {
+            printf("ERROR: cudaFuncSetAttribute NonPortableCluster failed: %s\n", cudaGetErrorString(cluster_enable));
             throw std::runtime_error(std::string("cudaFuncSetAttribute NonPortableCluster failed: ") + cudaGetErrorString(cluster_enable));
         }
+        printf("✅cudaFuncSetAttribute NonPortableClusterSizeAllowed=1 SUCCESS\n");
 
         // Set up cluster launch configuration
-        cudaLaunchAttribute launch_attr[1];
         launch_attr[0].id = cudaLaunchAttributeClusterDimension;
         launch_attr[0].val.clusterDim.x = cluster.x;
         launch_attr[0].val.clusterDim.y = cluster.y;
         launch_attr[0].val.clusterDim.z = cluster.z;
+
+        printf("DEBUG: Immediately after setting launch_attr:\n");
+        printf("  cudaLaunchAttributeClusterDimension enum value=%d\n", (int)cudaLaunchAttributeClusterDimension);
+        printf("  launch_attr[0].id=%d\n", (int)launch_attr[0].id);
+        printf("  launch_attr[0].val.clusterDim=(%u,%u,%u)\n",
+               launch_attr[0].val.clusterDim.x,
+               launch_attr[0].val.clusterDim.y,
+               launch_attr[0].val.clusterDim.z);
 
         launch_config.gridDim = grid;
         launch_config.blockDim = block;
@@ -1877,10 +1882,31 @@ void launch_fp4_gemv_optimized(
         launch_config.attrs = launch_attr;
         launch_config.numAttrs = 1;
 
-#ifndef NDEBUG
-        printf("DEBUG launch (rank-3 cluster) grid=(%d,%d) blockDim.x=%d shared_bytes=%zu M=%lld K=%lld L=%lld cluster=(2,1,1)\n",
-               grid_x, grid_y, kThreads, shared_bytes, (long long)M, (long long)K, (long long)L);
-#endif
+        printf("DEBUG: After setting launch_config.attrs:\n");
+        printf("  launch_config.attrs=%p, launch_attr=%p\n", (void*)launch_config.attrs, (void*)launch_attr);
+        printf("  launch_config.attrs[0].id=%d\n", (int)launch_config.attrs[0].id);
+        printf("  launch_config.attrs[0].val.clusterDim=(%u,%u,%u)\n",
+               launch_config.attrs[0].val.clusterDim.x,
+               launch_config.attrs[0].val.clusterDim.y,
+               launch_config.attrs[0].val.clusterDim.z);
+
+        // Debug output for rank-3 only
+        printf("DEBUG launch (rank-3 cluster):\n");
+        printf("  grid=(%d,%d,%d)\n", grid_x, grid_y, 1);
+        printf("  block=(%d,%d,%d)\n", kThreads, 1, 1);
+        printf("  shared_bytes=%zu (%.1f KB)\n", shared_bytes, shared_bytes/1024.0);
+        printf("  cluster=(%d,%d,%d)\n", cluster.x, cluster.y, cluster.z);
+        printf("  M=%lld K=%lld L=%lld K_scales_padded=%lld\n",
+               (long long)M, (long long)K, (long long)L, (long long)K_scales_padded);
+        printf("  box_sfa_k=%d\n", (L == 1) ? 16 : 128);
+
+        // Check if grid is divisible by cluster
+        if (grid_x % cluster.x != 0) {
+            printf("WARNING: grid.x=%d not divisible by cluster.x=%d\n", grid_x, cluster.x);
+        }
+        if (grid_y % cluster.y != 0) {
+            printf("WARNING: grid.y=%d not divisible by cluster.y=%d\n", grid_y, cluster.y);
+        }
     }
 
     int M_int = static_cast<int>(M);
@@ -1904,9 +1930,63 @@ void launch_fp4_gemv_optimized(
         &K_scales_padded_int
     };
 
+    // For rank-3, query device properties before launch
+    if (L > 1) {
+        int device;
+        cudaGetDevice(&device);
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, device);
+        printf("Device limits:\n");
+        printf("  sharedMemPerBlock: %zu (%.1f KB)\n",
+               prop.sharedMemPerBlock, prop.sharedMemPerBlock/1024.0);
+        printf("  sharedMemPerBlockOptin: %zu (%.1f KB)\n",
+               prop.sharedMemPerBlockOptin, prop.sharedMemPerBlockOptin/1024.0);
+        printf("  maxBlocksPerMultiProcessor: %d\n", prop.maxBlocksPerMultiProcessor);
+        printf("  clusterDimSupported: %d\n", prop.clusterLaunch);
+        printf("  Requested shared_bytes: %zu (%.1f KB)\n",
+               shared_bytes, shared_bytes/1024.0);
+
+        // Check if shared memory exceeds limits
+        if (shared_bytes > prop.sharedMemPerBlockOptin) {
+            printf("ERROR: Requested shared memory exceeds device limit!\n");
+        }
+
+        // Check cluster support
+        if (!prop.clusterLaunch) {
+            printf("ERROR: Device does not support cluster launch!\n");
+        }
+
+        // Verify launch config
+        printf("Launch config verification:\n");
+        printf("  kernel_ptr=%p\n", kernel_ptr);
+        printf("  launch_config.gridDim=(%u,%u,%u)\n",
+               launch_config.gridDim.x, launch_config.gridDim.y, launch_config.gridDim.z);
+        printf("  launch_config.blockDim=(%u,%u,%u)\n",
+               launch_config.blockDim.x, launch_config.blockDim.y, launch_config.blockDim.z);
+        printf("  launch_config.dynamicSmemBytes=%zu\n", launch_config.dynamicSmemBytes);
+        printf("  launch_config.stream=%p\n", launch_config.stream);
+        printf("  launch_config.numAttrs=%d\n", launch_config.numAttrs);
+        if (launch_config.numAttrs > 0) {
+            printf("  launch_attr[0].id=%d (should be %d for ClusterDimension)\n",
+                   launch_config.attrs[0].id, cudaLaunchAttributeClusterDimension);
+            printf("  cluster dims=(%u,%u,%u)\n",
+                   launch_config.attrs[0].val.clusterDim.x,
+                   launch_config.attrs[0].val.clusterDim.y,
+                   launch_config.attrs[0].val.clusterDim.z);
+        }
+    }
+
     cudaError_t launch_err = cudaLaunchKernelExC(&launch_config, kernel_ptr, kernel_args);
     if (launch_err != cudaSuccess) {
+        if (L > 1) {
+            printf("Launch failed with error: %s\n", cudaGetErrorString(launch_err));
+            printf("This was a rank-3 (L=%lld) cluster launch\n", (long long)L);
+        }
         throw std::runtime_error(std::string("cudaLaunchKernelExC failed: ") + cudaGetErrorString(launch_err));
+    }
+
+    if (L > 1) {
+        printf("✓ Rank-3 kernel launched successfully!\n");
     }
 
     cudaError_t err = cudaDeviceSynchronize();
