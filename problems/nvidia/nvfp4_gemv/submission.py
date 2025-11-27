@@ -458,6 +458,13 @@ fp4_gemv_streaming(
         offset += static_cast<size_t>(aligned - addr);
     };
 
+    // Helper to align to 1024 bytes (required for SWIZZLE_128B TMA)
+    auto align_up_smem_1024 = [&] __device__() {
+        uint32_t addr = cvta_to_shared_u32(smem + offset);
+        uint32_t aligned = (addr + 1023u) & ~1023u;
+        offset += static_cast<size_t>(aligned - addr);
+    };
+
     uint64_t* mbar_a = alloc_mbar_array(StageCount);
     uint64_t* mbar_b = alloc_mbar_array(1);
     uint64_t* mbar_sfb = alloc_mbar_array(1);
@@ -478,16 +485,16 @@ fp4_gemv_streaming(
     offset += static_cast<size_t>(K) * sizeof(half);
     offset = align_up(offset, 16);
 
-    // Ensure TMA destinations are 128-byte aligned in shared memory
-    align_up_smem_128();
+    // Ensure TMA destinations with SWIZZLE_128B are 1024-byte aligned in shared memory
+    align_up_smem_1024();
     uint8_t* a_packed_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
         a_packed_stage[s] = smem + offset;
         offset += TileM * TileKPacked;
     }
 
-    // Scales used alongside TMA data keep them 128-byte aligned as well
-    align_up_smem_128();
+    // Scales with SWIZZLE_128B TMA also need 1024-byte alignment
+    align_up_smem_1024();
     uint8_t* sfa_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
         sfa_stage[s] = smem + offset;
@@ -530,13 +537,19 @@ fp4_gemv_streaming(
     }
 
 #ifndef NDEBUG
-    // Verify 128-byte alignment of key shared-memory regions used by TMA / Tensor Cores
+    // Verify alignment of shared-memory regions
+    // SWIZZLE_128B TMA regions need 1024-byte alignment
     if (tid == 0) {
         for (int s = 0; s < StageCount; ++s) {
             uint32_t addr = cvta_to_shared_u32(a_packed_stage[s]);
-            if (addr % 128 != 0) {
-                printf("SMEM ALIGN ERROR: a_packed_stage[%d] addr=%u not 128-byte aligned (mod128=%u)\n",
-                       s, addr, addr % 128);
+            if (addr % 1024 != 0) {
+                printf("SMEM ALIGN ERROR: a_packed_stage[%d] addr=%u not 1024-byte aligned (mod1024=%u)\n",
+                       s, addr, addr % 1024);
+            }
+            uint32_t sfa_addr = cvta_to_shared_u32(sfa_stage[s]);
+            if (sfa_addr % 1024 != 0) {
+                printf("SMEM ALIGN ERROR: sfa_stage[%d] addr=%u not 1024-byte aligned (mod1024=%u)\n",
+                       s, sfa_addr, sfa_addr % 1024);
             }
         }
         uint32_t a_f16_addr = cvta_to_shared_u32(a_f16_smem);
@@ -1233,7 +1246,8 @@ void launch_fp4_gemv_optimized(
                (unsigned long long)K_packed);
     }
 
-    auto encode_tma = [&](CUtensorMap* out,
+    // TMA encoder with SWIZZLE_128B for large 2D matrices (A, SFA)
+    auto encode_tma_matrix = [&](CUtensorMap* out,
                           CUtensorMapDataType type,
                           cuuint32_t rank,
                           const void* base,
@@ -1253,6 +1267,32 @@ void launch_fp4_gemv_optimized(
             elementStrides,
             CU_TENSOR_MAP_INTERLEAVE_NONE,
             CU_TENSOR_MAP_SWIZZLE_128B,  // Optimize for memory bandwidth
+            CU_TENSOR_MAP_L2_PROMOTION_NONE,
+            CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+        );
+    };
+
+    // TMA encoder with SWIZZLE_NONE for vectors/small dimensions (B, SFB)
+    auto encode_tma_vector = [&](CUtensorMap* out,
+                          CUtensorMapDataType type,
+                          cuuint32_t rank,
+                          const void* base,
+                          const cuuint64_t* dims,
+                          const cuuint64_t* globalStrides,
+                          const cuuint32_t* box) -> CUresult {
+
+        cuuint32_t elementStrides[5] = {1, 1, 1, 1, 1};
+        return cuTensorMapEncodeTiled(
+            out,
+            type,
+            rank,
+            const_cast<void*>(base),
+            dims,
+            globalStrides,
+            box,
+            elementStrides,
+            CU_TENSOR_MAP_INTERLEAVE_NONE,
+            CU_TENSOR_MAP_SWIZZLE_NONE,  // No swizzle for small dimensions
             CU_TENSOR_MAP_L2_PROMOTION_NONE,
             CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
         );
@@ -1315,7 +1355,7 @@ void launch_fp4_gemv_optimized(
             }
 
             if (tma_ok) {
-                CUresult resA = encode_tma(map_A_ptr,
+                CUresult resA = encode_tma_matrix(map_A_ptr,
                                            CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                            2,  // rank=2 for 2D access
                                            A_ptr,
@@ -1367,7 +1407,7 @@ void launch_fp4_gemv_optimized(
             }
 
             if (tma_ok) {
-                CUresult resA = encode_tma(map_A_ptr,
+                CUresult resA = encode_tma_matrix(map_A_ptr,
                                            CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                            3,
                                            A_ptr,
@@ -1408,7 +1448,7 @@ void launch_fp4_gemv_optimized(
             cuuint32_t box_B[2] = {static_cast<cuuint32_t>(K_packed < 256ULL ? K_packed : 256ULL), 1};  // Clamp to TMA 256 limit
             cuuint64_t strides_B[1] = {K_packed};  // Stride between rows
 
-            CUresult resB = encode_tma(map_B_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
+            CUresult resB = encode_tma_vector(map_B_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                        2, B_ptr, dims_B, strides_B, box_B);
             if (resB != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
@@ -1427,7 +1467,7 @@ void launch_fp4_gemv_optimized(
             cuuint32_t box_B[3] = {static_cast<cuuint32_t>(K_packed < 256ULL ? K_packed : 256ULL), 1, 1};  // Clamp to TMA 256 limit
             cuuint64_t strides_B[2] = {K_packed, 128 * K_packed};  // Row stride, batch stride
 
-            CUresult resB = encode_tma(map_B_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
+            CUresult resB = encode_tma_vector(map_B_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                        3, B_ptr, dims_B, strides_B, box_B);
             if (resB != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
@@ -1457,7 +1497,7 @@ void launch_fp4_gemv_optimized(
             cuuint32_t box_SFB[2] = {static_cast<cuuint32_t>(K_scales < 256ULL ? K_scales : 256ULL), 1};
             cuuint64_t strides_SFB[1] = {K_scales};
 
-            CUresult resSFB = encode_tma(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
+            CUresult resSFB = encode_tma_vector(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                          2, SFB_ptr, dims_SFB, strides_SFB, box_SFB);
             if (resSFB != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
@@ -1476,7 +1516,7 @@ void launch_fp4_gemv_optimized(
             cuuint32_t box_SFB[3] = {static_cast<cuuint32_t>(K_scales < 256ULL ? K_scales : 256ULL), 1, 1};
             cuuint64_t strides_SFB[2] = {K_scales, 128 * K_scales};
 
-            CUresult resSFB = encode_tma(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
+            CUresult resSFB = encode_tma_vector(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                          3, SFB_ptr, dims_SFB, strides_SFB, box_SFB);
             if (resSFB != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
@@ -1523,7 +1563,7 @@ void launch_fp4_gemv_optimized(
                        SFA_ptr, (unsigned long long)(sfa_addr % 128));
             }
 
-            CUresult resSFA = encode_tma(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
+            CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                          2, SFA_ptr, dims_SFA, strides_SFA, box_SFA);
             if (resSFA != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
@@ -1542,7 +1582,7 @@ void launch_fp4_gemv_optimized(
             cuuint32_t box_SFA[3] = {box_sfa_k, box_sfa_m, 1};
             cuuint64_t strides_SFA[2] = {static_cast<cuuint64_t>(K_scales_padded), static_cast<cuuint64_t>(M * K_scales_padded)};
 
-            CUresult resSFA = encode_tma(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
+            CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                          3, SFA_ptr, dims_SFA, strides_SFA, box_SFA);
             if (resSFA != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
