@@ -1349,12 +1349,11 @@ void launch_fp4_gemv_optimized(
 
     if (tma_ok) {
         // Ensure box dimensions don't exceed TMA hardware limit (256) or tensor dimensions
-        // For rank-2 (L=1) with SWIZZLE_NONE: use smaller box_k (64 bytes)
-        // For rank-3 (L>1) with SWIZZLE_128B: use larger box_k (128 bytes)
-        cuuint32_t max_box_k = (L == 1) ? 64u : kTileKPacked;  // 64 for SWIZZLE_NONE, 128 for SWIZZLE_128B
+        // Both rank-2 and rank-3 use kTileKPacked (128 bytes) for box_k
+        // The difference is in swizzle mode: SWIZZLE_NONE for rank-2, SWIZZLE_128B for rank-3
         cuuint32_t box_k = static_cast<cuuint32_t>(
-            max_box_k < K_packed ?
-                (max_box_k < kTMABoxLimit ? max_box_k : kTMABoxLimit) :
+            kTileKPacked < K_packed ?
+                (kTileKPacked < kTMABoxLimit ? kTileKPacked : kTMABoxLimit) :
                 (K_packed < kTMABoxLimit ? K_packed : kTMABoxLimit)
         );
         cuuint32_t box_m = static_cast<cuuint32_t>(
