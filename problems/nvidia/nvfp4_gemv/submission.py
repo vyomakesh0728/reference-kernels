@@ -162,20 +162,22 @@ __device__ __forceinline__ void tma_load_2d_no_arrive(void* smem_ptr,
                                                        uint32_t coord1,
                                                        uint64_t* mbar) {
     uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
-    uint32_t mbar_addr = cvta_to_shared_u32(mbar);
-
-    uint32_t c0 = coord0;
-    uint32_t c1 = coord1;
+    // SM100 cluster TMA: clear peer bit so transaction bytes update CTA0's barrier
+    constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+    uint32_t mbar_addr = cvta_to_shared_u32(mbar) & Sm100MmaPeerBitMask;
+    uint64_t cache_hint = 0;
 
     asm volatile(
-        "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
-        "[%0], [%1, {%2, %3}], [%4];\n"
+        "cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+        "[%0], [%1, {%3, %4}], [%2], %5;\n"
         :
         : "r"(smem_addr),
           "l"(desc),
-          "r"(c0),
-          "r"(c1),
-          "r"(mbar_addr)
+          "r"(mbar_addr),
+          "r"(coord0),
+          "r"(coord1),
+          "l"(cache_hint)
+        : "memory"
     );
 }
 
@@ -197,22 +199,23 @@ __device__ __forceinline__ void tma_load_3d_no_arrive(void* smem_ptr,
                                                        uint32_t coord2,
                                                        uint64_t* mbar) {
     uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
-    uint32_t mbar_addr = cvta_to_shared_u32(mbar);
-
-    uint32_t c0 = coord0;
-    uint32_t c1 = coord1;
-    uint32_t c2 = coord2;
+    // SM100 cluster TMA: clear peer bit so transaction bytes update CTA0's barrier
+    constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+    uint32_t mbar_addr = cvta_to_shared_u32(mbar) & Sm100MmaPeerBitMask;
+    uint64_t cache_hint = 0;
 
     asm volatile(
-        "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::bytes "
-        "[%0], [%1, {%2, %3, %4}], [%5];\n"
+        "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+        "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
         :
         : "r"(smem_addr),
           "l"(desc),
-          "r"(c0),
-          "r"(c1),
-          "r"(c2),
-          "r"(mbar_addr)
+          "r"(mbar_addr),
+          "r"(coord0),
+          "r"(coord1),
+          "r"(coord2),
+          "l"(cache_hint)
+        : "memory"
     );
 }
 
@@ -242,7 +245,7 @@ __device__ __forceinline__ void prefetch_tile(
     const CUtensorMap* desc_A, const CUtensorMap* desc_SFA
 ) {
     constexpr int TileKPacked = TileK / 2;
-    constexpr int SfaBoxK = 16;
+    constexpr int SfaBoxK = 16;  // TMA minimum box size constraint
 
     if (use_tma_a && is_producer) {
         if (warp_id == 0 && lane_id == 0) {
@@ -259,9 +262,10 @@ __device__ __forceinline__ void prefetch_tile(
                 bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
                 // Load SFA scales tile (2D) using element-space coordinates
-                uint32_t sfa_c0 = c_k_scales;
+                // TMA requires coordinates to be aligned to box size
+                uint32_t sfa_c0 = (c_k_scales / SfaBoxK) * SfaBoxK;  // Align to SfaBoxK
                 uint32_t sfa_c1 = c_m;
-                bool valid_sfa_k = (c_k_scales + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
+                bool valid_sfa_k = (sfa_c0 + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
                 bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
                 // Calculate total bytes for mbarrier
@@ -278,22 +282,44 @@ __device__ __forceinline__ void prefetch_tile(
 
                 // Issue TMA loads (they will complete to the same mbarrier)
                 if (valid_m && valid_k) {
+#ifndef NDEBUG
+                    if (k_tile_base == 128 && stage == 1) {
+                        printf("DEBUG prefetch: About to TMA load A, c0=%u c1=%u valid_k=%d valid_m=%d\n",
+                               c0, c1, valid_k, valid_m);
+                    }
+#endif
                     tma_load_2d_no_arrive(
                         a_packed_stage[stage],
                         desc_A,
                         c0, c1,
                         mbar_stage(mbar_a, stage)
                     );
+#ifndef NDEBUG
+                    if (k_tile_base == 128 && stage == 1) {
+                        printf("DEBUG prefetch: A TMA load completed\n");
+                    }
+#endif
                 }
 
-                // if (valid_sfa_m && valid_sfa_k) {
-                //     tma_load_2d_no_arrive(
-                //         sfa_stage[stage],
-                //         desc_SFA,
-                //         sfa_c0, sfa_c1,
-                //         mbar_stage(mbar_a, stage)
-                //     );
-                // }
+                if (valid_sfa_m && valid_sfa_k) {
+#ifndef NDEBUG
+                    if (k_tile_base == 128 && stage == 1) {
+                        printf("DEBUG prefetch: About to TMA load SFA, sfa_c0=%u sfa_c1=%u valid_sfa_k=%d valid_sfa_m=%d\n",
+                               sfa_c0, sfa_c1, valid_sfa_k, valid_sfa_m);
+                    }
+#endif
+                    tma_load_2d_no_arrive(
+                        sfa_stage[stage],
+                        desc_SFA,
+                        sfa_c0, sfa_c1,
+                        mbar_stage(mbar_a, stage)
+                    );
+#ifndef NDEBUG
+                    if (k_tile_base == 128 && stage == 1) {
+                        printf("DEBUG prefetch: SFA TMA load completed\n");
+                    }
+#endif
+                }
             } else {
                 // Load A matrix tile (3D)
                 uint32_t c0 = c_k_packed;
@@ -304,10 +330,11 @@ __device__ __forceinline__ void prefetch_tile(
                 bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
 
                 // Load SFA scales tile (3D) using element-space coordinates
-                uint32_t sfa_c0 = c_k_scales;
+                // TMA requires coordinates to be aligned to box size
+                uint32_t sfa_c0 = (c_k_scales / SfaBoxK) * SfaBoxK;  // Align to SfaBoxK
                 uint32_t sfa_c1 = c_m;
                 uint32_t sfa_c2 = c2;
-                bool valid_sfa_k = (c_k_scales + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
+                bool valid_sfa_k = (sfa_c0 + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
                 bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
                 // Calculate total bytes for mbarrier
@@ -319,28 +346,27 @@ __device__ __forceinline__ void prefetch_tile(
                     total_bytes += TileM * SfaBoxK;
                 }
 
-                // TEMP: Test without TMA - signal mbarrier with 0 bytes
-                mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), 0);
+                // Set mbarrier expected bytes
+                mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), total_bytes);
 
                 // Issue TMA loads (they will complete to the same mbarrier)
-                // TEMP: Commented out to test if TMA is causing illegal instruction
-                // if (valid_batch && valid_m && valid_k) {
-                //     tma_load_3d_no_arrive(
-                //         a_packed_stage[stage],
-                //         desc_A,
-                //         c0, c1, c2,
-                //         mbar_stage(mbar_a, stage)
-                //     );
-                // }
+                if (valid_batch && valid_m && valid_k) {
+                    tma_load_3d_no_arrive(
+                        a_packed_stage[stage],
+                        desc_A,
+                        c0, c1, c2,
+                        mbar_stage(mbar_a, stage)
+                    );
+                }
 
-                // if (valid_batch && valid_sfa_m && valid_sfa_k) {
-                //     tma_load_3d_no_arrive(
-                //         sfa_stage[stage],
-                //         desc_SFA,
-                //         sfa_c0, sfa_c1, sfa_c2,
-                //         mbar_stage(mbar_a, stage)
-                //     );
-                // }
+                if (valid_batch && valid_sfa_m && valid_sfa_k) {
+                    tma_load_3d_no_arrive(
+                        sfa_stage[stage],
+                        desc_SFA,
+                        sfa_c0, sfa_c1, sfa_c2,
+                        mbar_stage(mbar_a, stage)
+                    );
+                }
             }
         }
     }
@@ -364,7 +390,7 @@ fp4_gemv_streaming(
 #if __CUDA_ARCH__ >= 700
     constexpr int TileKPacked = TileK / 2;
     constexpr int TileScaleCount = TileK / 16;
-    constexpr int SfaBoxK = 16;  // TMA box size - reverted to 16 due to TMA descriptor constraints
+    constexpr int SfaBoxK = 16;  // TMA minimum box size constraint  // TMA box size - reverted to 16 due to TMA descriptor constraints
     constexpr int StageCount = 3;
     constexpr int a_stride = TileK + 8;
     constexpr int ProducerThreads = 64;
@@ -573,23 +599,29 @@ fp4_gemv_streaming(
             uint8_t* dst = b_packed_smem + elem_offset;
 
             uint32_t smem_addr = cvta_to_shared_u32(dst);
+            // SM100 cluster TMA: clear peer bit so transaction bytes update CTA0's barrier
+            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+            uint32_t mbar_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+            uint64_t cache_hint = 0;
             if (L == 1) {
                 asm volatile(
-                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
-                    "[%0], [%1, {%2, %3}], [%4];\n"
+                    "cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+                    "[%0], [%1, {%3, %4}], [%2], %5;\n"
                     :
-                    : "r"(smem_addr), "l"(desc_B),
+                    : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
                       "r"(static_cast<uint32_t>(elem_offset)), "r"(0u),
-                      "r"(cvta_to_shared_u32(mbar_b))
+                      "l"(cache_hint)
+                    : "memory"
                 );
             } else {
                 asm volatile(
-                    "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::bytes "
-                    "[%0], [%1, {%2, %3, %4}], [%5];\n"
+                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+                    "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
                     :
-                    : "r"(smem_addr), "l"(desc_B),
+                    : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
                       "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
-                      "r"(cvta_to_shared_u32(mbar_b))
+                      "l"(cache_hint)
+                    : "memory"
                 );
             }
         }
@@ -602,23 +634,29 @@ fp4_gemv_streaming(
             uint8_t* dst = sfb_smem + elem_offset;
 
             uint32_t smem_addr = cvta_to_shared_u32(dst);
+            // SM100 cluster TMA: clear peer bit so transaction bytes update CTA0's barrier
+            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+            uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+            uint64_t cache_hint = 0;
             if (L == 1) {
                 asm volatile(
-                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
-                    "[%0], [%1, {%2, %3}], [%4];\n"
+                    "cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+                    "[%0], [%1, {%3, %4}], [%2], %5;\n"
                     :
-                    : "r"(smem_addr), "l"(desc_SFB),
+                    : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
                       "r"(static_cast<uint32_t>(elem_offset)), "r"(0u),
-                      "r"(cvta_to_shared_u32(mbar_sfb))
+                      "l"(cache_hint)
+                    : "memory"
                 );
             } else {
                 asm volatile(
-                    "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::bytes "
-                    "[%0], [%1, {%2, %3, %4}], [%5];\n"
+                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+                    "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
                     :
-                    : "r"(smem_addr), "l"(desc_SFB),
+                    : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
                       "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
-                      "r"(cvta_to_shared_u32(mbar_sfb))
+                      "l"(cache_hint)
+                    : "memory"
                 );
             }
         }
@@ -706,6 +744,13 @@ fp4_gemv_streaming(
     }
     __syncthreads();
 
+#ifndef NDEBUG
+    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+        printf("DEBUG: About to call first prefetch_tile, use_tma_a=%d is_producer=%d m_tile=%d K_packed=%d\n",
+               use_tma_a, is_producer, m_tile, K_packed);
+    }
+#endif
+
     // Prefetch first tiles using TMA
     prefetch_tile<TileM, TileK>(
         0, 0,
@@ -714,7 +759,18 @@ fp4_gemv_streaming(
         a_packed_stage, sfa_stage, mbar_a,
         desc_A, desc_SFA
     );
+
+#ifndef NDEBUG
+    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+        printf("DEBUG: First prefetch_tile completed\n");
+    }
+#endif
     if (TileK < K) {
+#ifndef NDEBUG
+        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+            printf("DEBUG: About to call second prefetch_tile, TileK=%d K=%d\n", TileK, K);
+        }
+#endif
         prefetch_tile<TileM, TileK>(
             1, TileK,
             use_tma_a, is_producer, warp_id, lane_id,
@@ -722,7 +778,18 @@ fp4_gemv_streaming(
             a_packed_stage, sfa_stage, mbar_a,
             desc_A, desc_SFA
         );
+#ifndef NDEBUG
+        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+            printf("DEBUG: Second prefetch_tile completed\n");
+        }
+#endif
     }
+
+#ifndef NDEBUG
+    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+        printf("DEBUG: About to enter K-tile loop\n");
+    }
+#endif
 
     float c_frag_0 = 0.0f;
     float c_frag_1 = 0.0f;
@@ -1513,19 +1580,67 @@ void launch_fp4_gemv_optimized(
     int grid_x = num_blocks;
     int grid_y = static_cast<int>(L);
 
-#ifndef NDEBUG
-    // Debug mode: keep full grid to process all data, just add logging
-    printf("DEBUG launch grid=(%d,%d) blockDim.x=%d shared_bytes=%zu M=%lld K=%lld L=%lld\n",
-           grid_x, grid_y, kThreads, shared_bytes, (long long)M, (long long)K, (long long)L);
-#endif
     dim3 grid(grid_x, grid_y);
     dim3 block(kThreads);
+    dim3 cluster(2, 1, 1);  // cta_group::2
 
-    fp4_gemv_streaming<kTileM, kTileK, kThreads><<<grid, block, shared_bytes>>>(
-        A_ptr, B_ptr, SFA_ptr, SFB_ptr,
-        d_map_A, d_map_SFA, d_map_B, d_map_SFB,
-        D_ptr, static_cast<int>(M), static_cast<int>(K), static_cast<int>(L), static_cast<int>(K_scales_padded)
+    // Enable non-portable cluster size (required for cluster launch)
+    void const* kernel_ptr = (void const*)fp4_gemv_streaming<kTileM, kTileK, kThreads>;
+    cudaError_t cluster_enable = cudaFuncSetAttribute(
+        kernel_ptr,
+        cudaFuncAttributeNonPortableClusterSizeAllowed,
+        1
     );
+    if (cluster_enable != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaFuncSetAttribute NonPortableCluster failed: ") + cudaGetErrorString(cluster_enable));
+    }
+
+    // Set up cluster launch configuration
+    cudaLaunchConfig_t launch_config = {0};
+    cudaLaunchAttribute launch_attr[1];
+
+    launch_attr[0].id = cudaLaunchAttributeClusterDimension;
+    launch_attr[0].val.clusterDim.x = cluster.x;
+    launch_attr[0].val.clusterDim.y = cluster.y;
+    launch_attr[0].val.clusterDim.z = cluster.z;
+
+    launch_config.gridDim = grid;
+    launch_config.blockDim = block;
+    launch_config.dynamicSmemBytes = shared_bytes;
+    launch_config.stream = 0;
+    launch_config.attrs = launch_attr;
+    launch_config.numAttrs = 1;
+
+#ifndef NDEBUG
+    printf("DEBUG launch grid=(%d,%d) blockDim.x=%d shared_bytes=%zu M=%lld K=%lld L=%lld cluster=(2,1,1)\n",
+           grid_x, grid_y, kThreads, shared_bytes, (long long)M, (long long)K, (long long)L);
+#endif
+
+    int M_int = static_cast<int>(M);
+    int K_int = static_cast<int>(K);
+    int L_int = static_cast<int>(L);
+    int K_scales_padded_int = static_cast<int>(K_scales_padded);
+
+    void* kernel_args[] = {
+        const_cast<uint8_t**>(&A_ptr),
+        const_cast<uint8_t**>(&B_ptr),
+        const_cast<uint8_t**>(&SFA_ptr),
+        const_cast<uint8_t**>(&SFB_ptr),
+        &d_map_A,
+        &d_map_SFA,
+        &d_map_B,
+        &d_map_SFB,
+        &D_ptr,
+        &M_int,
+        &K_int,
+        &L_int,
+        &K_scales_padded_int
+    };
+
+    cudaError_t launch_err = cudaLaunchKernelExC(&launch_config, kernel_ptr, kernel_args);
+    if (launch_err != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaLaunchKernelExC failed: ") + cudaGetErrorString(launch_err));
+    }
 
     cudaError_t err = cudaDeviceSynchronize();
     if (d_map_A) cudaFree(d_map_A);
@@ -1632,10 +1747,12 @@ def custom_kernel(data: input_t) -> output_t:
     # TMA box size is 16, so we need K_scales_padded >= max_tile_start/16 + 16
     # where max_tile_start = K - TileK = last K tile starting position
     TileK = 128
-    SfaBoxK = 16
+    SfaBoxK = 16  # TMA minimum box size
     max_tile_start = K - TileK if K > TileK else 0
     max_scale_pos = max_tile_start // 16
-    K_scales_padded = ((max_scale_pos + SfaBoxK + 15) // 16) * 16  # Round up to multiple of 16
+    # TMA requires dims >= max_coord + box_size, and ensure at least 2x box size for safety
+    min_required = max_scale_pos + SfaBoxK
+    K_scales_padded = max(32, ((min_required + 15) // 16) * 16)  # At least 32, round up to multiple of 16
 
     if K_scales_padded > K_scales:
         pad_amount = K_scales_padded - K_scales
