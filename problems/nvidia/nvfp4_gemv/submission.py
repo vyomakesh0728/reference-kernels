@@ -301,6 +301,7 @@ fp4_gemv_streaming(
         return (x + align - 1) & ~(align - 1);
     };
 
+
     size_t offset = 0;
 
     auto alloc_mbar_array = [&] __device__(int count) -> uint64_t* {
@@ -365,8 +366,18 @@ fp4_gemv_streaming(
 
 #if __CUDA_ARCH__ >= 900
     const bool use_tma_a = (desc_A != nullptr);
+#ifndef NDEBUG
+    if (tid == 0 && blockIdx.x == 0) {
+        DEBUG_PRINT_ERROR("CUDA_ARCH=%d use_tma_a=%d desc_A=%p\n", __CUDA_ARCH__, use_tma_a, (const void*)desc_A);
+    }
+#endif
 #else
     const bool use_tma_a = false;
+#ifndef NDEBUG
+    if (tid == 0 && blockIdx.x == 0) {
+        DEBUG_PRINT_ERROR("CUDA_ARCH=%d < 900, TMA disabled\n", __CUDA_ARCH__);
+    }
+#endif
 #endif
 
     __shared__ uint32_t stage_phase_smem[StageCount];
@@ -581,15 +592,25 @@ fp4_gemv_streaming(
     }
     __syncthreads();
 
-    auto prefetch_tile = [&](int stage, int k_tile_base) {
+    auto prefetch_tile = [=, &a_packed_stage, &sfa_stage, &mbar_a](int stage, int k_tile_base) {
 #ifndef NDEBUG
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            printf("DEBUG: prefetch_tile stage=%d k_tile_base=%d use_tma_a=%d is_producer=%d\n",
-                   stage, k_tile_base, use_tma_a, is_producer);
+            printf("DEBUG: INSIDE prefetch_tile stage=%d k_tile_base=%d use_tma_a=%d is_producer=%d warp_id=%d lane_id=%d\n",
+                   stage, k_tile_base, use_tma_a, is_producer, warp_id, lane_id);
         }
 #endif
         if (use_tma_a && is_producer) {
+#ifndef NDEBUG
+            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+                printf("DEBUG: Inside use_tma_a && is_producer block\n");
+            }
+#endif
             if (warp_id == 0 && lane_id == 0) {
+#ifndef NDEBUG
+                if (blockIdx.x == 0 && blockIdx.y == 0) {
+                    printf("DEBUG: Inside warp_id==0 && lane_id==0 block\n");
+                }
+#endif
                 // Element-space coordinates: row and packed-K index
                 uint32_t c_m = static_cast<uint32_t>(m_tile);
                 uint32_t c_k_packed = static_cast<uint32_t>(k_tile_base >> 1);
