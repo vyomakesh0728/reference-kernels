@@ -834,11 +834,12 @@ fp4_gemv_streaming(
             mbar_b_addr_cta0 = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
             mbar_sfb_addr_cta0 = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
         } else {
-            // CTA1: use mapa to get CTA0's remote barrier address (FIX #3)
-            uint32_t mbar_b_local = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
-            uint32_t mbar_sfb_local = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+            // CTA1: use mapa to get CTA0's remote barrier address (FIXED - NO MASKING!)
+            uint32_t mbar_b_local = cvta_to_shared_u32(mbar_b);  // ✓ NO MASKING for mapa!
+            uint32_t mbar_sfb_local = cvta_to_shared_u32(mbar_sfb);  // ✓ NO MASKING for mapa!
             uint32_t cta0_id = 0;
 
+            // mapa will handle the CTA ID translation internally
             asm volatile(
                 "mapa.shared::cluster.u32 %0, %1, %2;\n"
                 : "=r"(mbar_b_addr_cta0)
