@@ -1010,17 +1010,11 @@ fp4_gemv_streaming(
                 DEBUG_OOB_SMEM_1D("a_f16_smem_tile", a_tile_base_idx, TileM * a_stride, a_f16_smem);
                 uint32_t a_base = cvta_to_shared_u32(a_tile_ptr);
 
-                // Which 8x8 sub-matrix this thread addresses (0-3)
-                int matrix_id = lane_id / 8;  // 0, 1, 2, or 3
+                // Original ldmatrix.x4 addressing pattern
+                int matrix_id = lane_id / 8;  // 0-3
                 int row_in_matrix = lane_id % 8;  // 0-7
-
-                // Matrix layout: bit0 of matrix_id selects the row block, bit1 selects the col block:
-                //   matrix_id 0 -> rows 0-7,  cols 0-7
-                //   matrix_id 1 -> rows 8-15, cols 0-7
-                //   matrix_id 2 -> rows 0-7,  cols 8-15
-                //   matrix_id 3 -> rows 8-15, cols 8-15
-                int block_row = (matrix_id & 1) ? 8 : 0;   // use LSB for row offset
-                int block_col = (matrix_id >= 2) ? 8 : 0;  // use MSB for col offset
+                int block_row = (matrix_id & 1) ? 8 : 0;
+                int block_col = (matrix_id >= 2) ? 8 : 0;
 
                 int a_row = block_row + row_in_matrix;
                 int a_col = block_col;
@@ -1034,13 +1028,19 @@ fp4_gemv_streaming(
                 );
 
 #ifndef NDEBUG
-                if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && lane_id == 0) {
-                    // Sample multiple positions to see if there's any non-zero data
-                    half s0 = a_tile_ptr[0];
-                    half s1 = warp_row < TileM ? a_f16_smem[warp_row * a_stride + 32] : __float2half(0.0f);  // mid-K position
-                    half s2 = warp_row < TileM ? a_f16_smem[warp_row * a_stride + 64] : __float2half(0.0f);  // later K position
-                    DEBUG_PRINT_ERROR("LDMATRIX warp=%d warp_row=%d samples: [0]=%.4f [32]=%.4f [64]=%.4f\n",
-                                      warp_id, warp_row, __half2float(s0), __half2float(s1), __half2float(s2));
+                if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id < 16) {
+                    // Print ldmatrix fragments for all lanes 0-15 to see full distribution pattern
+                    // This helps understand SM_100a specific ldmatrix behavior
+                    half* a0_h = reinterpret_cast<half*>(&a0);
+                    half* a1_h = reinterpret_cast<half*>(&a1);
+                    half* a2_h = reinterpret_cast<half*>(&a2);
+                    half* a3_h = reinterpret_cast<half*>(&a3);
+                    printf("LDMTX_SM100: lane=%d octet=%d a_row=%d a0=[%.2f,%.2f] a1=[%.2f,%.2f] a2=[%.2f,%.2f] a3=[%.2f,%.2f]\n",
+                           lane_id, lane_id/4, a_row,
+                           __half2float(a0_h[0]), __half2float(a0_h[1]),
+                           __half2float(a1_h[0]), __half2float(a1_h[1]),
+                           __half2float(a2_h[0]), __half2float(a2_h[1]),
+                           __half2float(a3_h[0]), __half2float(a3_h[1]));
                 }
 #endif
 
@@ -1098,13 +1098,13 @@ fp4_gemv_streaming(
 #endif
     }
 
-    // DEBUG: Print final accumulator before store
-    if (blockIdx.x == 0 && blockIdx.y == 0 && is_consumer && (warp_id - 2) < ((tile_rows + 15) / 16)) {
+    // DEBUG: Print ALL fragments for lanes 0,4,8 to understand output distribution
+    if (blockIdx.x == 0 && blockIdx.y == 0 && is_consumer && warp_id == 2) {
         int octet = lane_id / 4;
         int tid_in_octet = lane_id % 4;
-        if (tid_in_octet == 0 && octet == 0 && warp_id == 2) {
-            printf("FINAL ACCUM: warp=%d lane=%d c_frag_0=%.4f c_frag_2=%.4f (rows %d,%d)\n",
-                   warp_id, lane_id, c_frag_0, c_frag_2,
+        if (tid_in_octet == 0 && (lane_id == 0 || lane_id == 4 || lane_id == 8)) {
+            printf("FINAL_SM100: lane=%d octet=%d ALL_FRAGS: c0=%.2f c1=%.2f c2=%.2f c3=%.2f (rows %d,%d)\n",
+                   lane_id, octet, c_frag_0, c_frag_1, c_frag_2, c_frag_3,
                    m_tile + (warp_id-2)*16 + octet, m_tile + (warp_id-2)*16 + octet + 8);
         }
     }
@@ -1349,9 +1349,12 @@ void launch_fp4_gemv_optimized(
 
     if (tma_ok) {
         // Ensure box dimensions don't exceed TMA hardware limit (256) or tensor dimensions
+        // For rank-2 (L=1) with SWIZZLE_NONE: use smaller box_k (64 bytes)
+        // For rank-3 (L>1) with SWIZZLE_128B: use larger box_k (128 bytes)
+        cuuint32_t max_box_k = (L == 1) ? 64u : kTileKPacked;  // 64 for SWIZZLE_NONE, 128 for SWIZZLE_128B
         cuuint32_t box_k = static_cast<cuuint32_t>(
-            kTileKPacked < K_packed ?
-                (kTileKPacked < kTMABoxLimit ? kTileKPacked : kTMABoxLimit) :
+            max_box_k < K_packed ?
+                (max_box_k < kTMABoxLimit ? max_box_k : kTMABoxLimit) :
                 (K_packed < kTMABoxLimit ? K_packed : kTMABoxLimit)
         );
         cuuint32_t box_m = static_cast<cuuint32_t>(
@@ -1404,7 +1407,8 @@ void launch_fp4_gemv_optimized(
             }
 
             if (tma_ok) {
-                CUresult resA = encode_tma_matrix(map_A_ptr,
+                // For rank-2 (L=1): use SWIZZLE_NONE (CTA launch)
+                CUresult resA = encode_tma_vector(map_A_ptr,
                                            CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                            2,  // rank=2 for 2D access
                                            A_ptr,
@@ -1419,7 +1423,7 @@ void launch_fp4_gemv_optimized(
                     printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
                     tma_ok = false;
                 } else {
-                    printf("✅TMA Encode A (rank=2) SUCCESS!\n");
+                    printf("✅TMA Encode A (rank=2, SWIZZLE_NONE) SUCCESS!\n");
                 }
             }
         }
@@ -1456,6 +1460,7 @@ void launch_fp4_gemv_optimized(
             }
 
             if (tma_ok) {
+                // For rank-3 (L>1): use SWIZZLE_128B (cluster launch)
                 CUresult resA = encode_tma_matrix(map_A_ptr,
                                            CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                            3,
@@ -1471,7 +1476,7 @@ void launch_fp4_gemv_optimized(
                     printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
                     tma_ok = false;
                 } else {
-                    printf("✅TMA Encode A (rank=3) SUCCESS!\n");
+                    printf("✅TMA Encode A (rank=3, SWIZZLE_128B) SUCCESS!\n");
                 }
             }
         }
