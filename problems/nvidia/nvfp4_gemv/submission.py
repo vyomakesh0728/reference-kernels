@@ -478,9 +478,7 @@ fp4_gemv_streaming(
 #if __CUDA_ARCH__ >= 700
     constexpr int TileKPacked = TileK / 2;
     constexpr int TileScaleCount = TileK / 16;
-    // CRITICAL: SfaBoxK must match TMA descriptor box_sfa_k!
-    // Rank-2 (L=1): box_sfa_k=16, Rank-3 (L>1): box_sfa_k=128
-    constexpr int SfaBoxK = (L == 1) ? 16 : 128;
+    constexpr int SfaBoxK = 16;  // Hardcoded for testing
     constexpr int StageCount = 3;
     constexpr int a_stride = TileK + 8;
     constexpr int ProducerThreads = 64;
@@ -1107,10 +1105,13 @@ fp4_gemv_streaming(
                 if (row < tile_rows) {
                     int scale_col = col_packed >> 3;
                     if (scale_col < scale_count) {
-                        // For rank-2 (L=1): sfa_stage stride is SfaBoxK=16 (loaded width)
-                        // For rank-3 (L>1): sfa_stage stride is SfaBoxK=128 (loaded width)
+                        // Calculate stride based on L (rank-2: 16, rank-3: 128)
                         int sfa_stride = (L == 1) ? 16 : 128;
-                        int sfa_idx = row * sfa_stride + scale_col;
+                        // For rank-3: adjust for offset within loaded 128-scale slice
+                        // TMA loads aligned to sfa_stride boundaries, need to offset into that slice
+                        int sfa_base_scale = k_tile >> 4;  // First scale index for this k_tile
+                        int sfa_offset = (L == 1) ? 0 : (sfa_base_scale % sfa_stride);
+                        int sfa_idx = row * sfa_stride + sfa_offset + scale_col;
                         int sfa_size = TileM * sfa_stride;
                         DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, sfa_size, sfa_stage[stage]);
                         scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][sfa_idx]));
