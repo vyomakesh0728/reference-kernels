@@ -191,7 +191,7 @@ __device__ __forceinline__ void tma_load_2d_cluster_no_arrive(void* smem_ptr,
     uint64_t cache_hint = 0;
 
     asm volatile(
-        "cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+        "cp.async.bulk.tensor.2d.cta_group::2.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint "
         "[%0], [%1, {%3, %4}], [%2], %5;\n"
         :
         : "r"(smem_addr),
@@ -268,7 +268,7 @@ __device__ __forceinline__ void tma_load_3d_cluster_no_arrive(void* smem_ptr,
     uint64_t cache_hint = 0;
 
     asm volatile(
-        "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+        "cp.async.bulk.tensor.3d.cta_group::2.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint "
         "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
         :
         : "r"(smem_addr),
@@ -721,7 +721,7 @@ fp4_gemv_streaming(
 
             asm volatile(
                 "{\n\t"
-                "mbarrier.arrive.expect_tx.shared::cluster.b64 _, [%0], %1; \n\t"
+                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
                 "}"
                 :
                 : "r"(mbar_b_addr), "r"(total_b_bytes)
@@ -730,7 +730,7 @@ fp4_gemv_streaming(
 
             asm volatile(
                 "{\n\t"
-                "mbarrier.arrive.expect_tx.shared::cluster.b64 _, [%0], %1; \n\t"
+                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
                 "}"
                 :
                 : "r"(mbar_sfb_addr), "r"(total_sfb_bytes)
@@ -768,7 +768,7 @@ fp4_gemv_streaming(
                 uint32_t mbar_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
                 uint64_t cache_hint = 0;
                 asm volatile(
-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint "
                     "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
                     :
                     : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
@@ -805,7 +805,7 @@ fp4_gemv_streaming(
                 uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
                 uint64_t cache_hint = 0;
                 asm volatile(
-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint "
                     "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
                     :
                     : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
@@ -823,22 +823,24 @@ fp4_gemv_streaming(
         mbarrier_wait_parity(mbar_b, 0);
         mbarrier_wait_parity(mbar_sfb, 0);
     } else {
-        // RANK-3: All CTAs wait on CTA0's barrier using peer bit mask
-        // The peer bit mask (& 0xFEFFFFFF) routes all CTAs to CTA0's address - no mapa needed!
-        constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
-        uint32_t mbar_b_addr_cta0 = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
-        uint32_t mbar_sfb_addr_cta0 = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+        // RANK-3: Each CTA waits on its OWN local barrier (cannot wait on remote barriers!)
+        // Per LLVM NVPTX docs: "Threads can perform only arrive operations but NOT *_wait
+        // on an mbarrier located in shared::cluster space"
+        // TMA multicast automatically arrives on all CTAs' barriers via mcast_mask
+        uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
+        uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
 
-        // All CTAs wait on the same masked address (automatically routes to CTA0)
+        // Each CTA waits on its own local barrier
+        // Use .shared::cta.b64 for cluster mode (CUTLASS pattern)
         asm volatile(
             "{\n\t"
             ".reg .pred P1; \n\t"
             "LAB_WAIT_B: \n\t"
-            "mbarrier.try_wait.parity.shared.b64 P1, [%0], %1; \n\t"
+            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
             "@!P1 bra.uni LAB_WAIT_B; \n\t"
             "}"
             :
-            : "r"(mbar_b_addr_cta0), "r"(0)
+            : "r"(mbar_b_addr), "r"(0)
             : "memory"
         );
 
@@ -846,11 +848,11 @@ fp4_gemv_streaming(
             "{\n\t"
             ".reg .pred P1; \n\t"
             "LAB_WAIT_SFB: \n\t"
-            "mbarrier.try_wait.parity.shared.b64 P1, [%0], %1; \n\t"
+            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
             "@!P1 bra.uni LAB_WAIT_SFB; \n\t"
             "}"
             :
-            : "r"(mbar_sfb_addr_cta0), "r"(0)
+            : "r"(mbar_sfb_addr), "r"(0)
             : "memory"
         );
     }
@@ -1323,17 +1325,8 @@ fp4_gemv_streaming(
             printf("DEBUG RANK-3: Before sync at end of k_tile\n");
         }
 
-        // Use cluster barrier for rank-3, CTA barrier for rank-2
-        if (L > 1) {
-            // RANK-3: Cluster-wide synchronization for SM_100a (Blackwell)
-            // NOT Hopper style! SM_100a uses fence.sc.cluster, not barrier.cluster.arrive/wait
-            __syncthreads();  // First sync within CTA
-            asm volatile("fence.sc.cluster;" ::: "memory");  // Cluster fence
-            __syncthreads();  // Then sync within CTA again
-        } else {
-            // RANK-2: Standard CTA barrier
-            __syncthreads();
-        }
+        // SM_100a has NO cluster-wide sync - CTAs coordinate through TMA mbarriers only
+        __syncthreads();
 
         // RANK-3 DEBUG: After sync
         if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
