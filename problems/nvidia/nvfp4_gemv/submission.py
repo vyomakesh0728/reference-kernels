@@ -823,37 +823,13 @@ fp4_gemv_streaming(
         mbarrier_wait_parity(mbar_b, 0);
         mbarrier_wait_parity(mbar_sfb, 0);
     } else {
-        // RANK-3: All CTAs wait on CTA0's barrier using mapa
-        uint32_t cta_rank = blockIdx.x % 2;
-        uint32_t mbar_b_addr_cta0;
-        uint32_t mbar_sfb_addr_cta0;
+        // RANK-3: All CTAs wait on CTA0's barrier using peer bit mask
+        // The peer bit mask (& 0xFEFFFFFF) routes all CTAs to CTA0's address - no mapa needed!
         constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+        uint32_t mbar_b_addr_cta0 = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+        uint32_t mbar_sfb_addr_cta0 = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
 
-        if (cta_rank == 0) {
-            // CTA0: use local address with peer mask (FIX #3)
-            mbar_b_addr_cta0 = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
-            mbar_sfb_addr_cta0 = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
-        } else {
-            // CTA1: use mapa to get CTA0's remote barrier address (FIXED - NO MASKING!)
-            uint32_t mbar_b_local = cvta_to_shared_u32(mbar_b);  // ✓ NO MASKING for mapa!
-            uint32_t mbar_sfb_local = cvta_to_shared_u32(mbar_sfb);  // ✓ NO MASKING for mapa!
-            uint32_t cta0_id = 0;
-
-            // mapa will handle the CTA ID translation internally
-            asm volatile(
-                "mapa.shared::cluster.u32 %0, %1, %2;\n"
-                : "=r"(mbar_b_addr_cta0)
-                : "r"(mbar_b_local), "r"(cta0_id)
-            );
-
-            asm volatile(
-                "mapa.shared::cluster.u32 %0, %1, %2;\n"
-                : "=r"(mbar_sfb_addr_cta0)
-                : "r"(mbar_sfb_local), "r"(cta0_id)
-            );
-        }
-
-        // Wait on CTA0's barrier - address from mapa encodes cluster scope, use generic .shared
+        // All CTAs wait on the same masked address (automatically routes to CTA0)
         asm volatile(
             "{\n\t"
             ".reg .pred P1; \n\t"
@@ -1316,34 +1292,61 @@ fp4_gemv_streaming(
                     : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1)
                 );
 
+                // RANK-3 DEBUG: Immediately after MMA instruction
+                if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id == 0) {
+                    printf("DEBUG RANK-3: MMA instruction completed for kk=%d\n", kk);
+                }
+
                 // DEBUG: Print accumulator after first MMA in first K tile
                 if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id == 0) {
                     printf("MMA DEBUG: k_tile=%d kk=%d warp=%d lane=%d c_frag=[%.4f, %.4f, %.4f, %.4f]\n",
                            k_tile, kk, warp_id, lane_id, c_frag_0, c_frag_1, c_frag_2, c_frag_3);
                 }
+
+                // RANK-3 DEBUG: After debug print
+                if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && tid == 0) {
+                    printf("DEBUG RANK-3: After MMA DEBUG print, kk=%d\n", kk);
+                }
+            }
+
+            // RANK-3 DEBUG: After kk loop iteration
+            if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
+                printf("DEBUG RANK-3: Finished kk loop (all kk iterations)\n");
             }
         }
 
-        __syncthreads();
-
-#ifndef NDEBUG
-        // Debug accumulated values after each K tile
-        if (blockIdx.x == 0 && blockIdx.y == 0 && warp_id == 2 && lane_id == 0) {
-            printf("ACCUM after k_tile=%d: c_frag_0=%.4f c_frag_2=%.4f\n",
-                   k_tile, c_frag_0, c_frag_2);
+        // RANK-3 DEBUG: Before sync
+        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
+            printf("DEBUG RANK-3: Before sync at end of k_tile\n");
         }
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            printf("K-TILE LOOP END: Completed k_tile=%d, next will be k_tile=%d\n",
+
+        // Use cluster barrier for rank-3, CTA barrier for rank-2 (CUTLASS pattern)
+        if (L > 1) {
+            // RANK-3: Cluster barrier sync (CUTLASS cluster_sm90.hpp:75-79)
+            // cluster_sync() = cluster_arrive() + cluster_wait()
+            asm volatile("barrier.cluster.arrive.aligned;\n" : : );
+            asm volatile("barrier.cluster.wait.aligned;\n" : : );
+        } else {
+            // RANK-2: Standard CTA barrier
+            __syncthreads();
+        }
+
+        // RANK-3 DEBUG: After sync
+        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
+            printf("DEBUG RANK-3: After cluster sync\n");
+        }
+
+        // RANK-3 DEBUG: End of each K-tile iteration
+        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+            printf("DEBUG RANK-3: K-TILE %d completed, next k_tile=%d\n",
                    k_tile, k_tile + TileK);
         }
-#endif
     }
 
-#ifndef NDEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        printf("EXITED K-TILE LOOP: All K tiles completed\n");
+    // RANK-3 DEBUG: Track where illegal instruction occurs
+    if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+        printf("DEBUG RANK-3: EXITED K-TILE LOOP - All K tiles completed\n");
     }
-#endif
 
     // DEBUG: Print ALL fragments for lanes 0,4,8 to understand output distribution
     // DISABLED FOR PERFORMANCE: Excessive kernel printf statements cause hang
@@ -1412,6 +1415,11 @@ fp4_gemv_streaming(
             }
 #endif
 
+            // RANK-3 DEBUG: Before writeback
+            if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
+                printf("DEBUG RANK-3: BEFORE WRITEBACK to global memory\n");
+            }
+
             if (global_row0 < M) {
                 DEBUG_OOB_GLOBAL_1D("D_batch", global_row0, M, D_batch);
                 D_batch[global_row0] = __float2half(c_frag_0);
@@ -1420,15 +1428,18 @@ fp4_gemv_streaming(
                 DEBUG_OOB_GLOBAL_1D("D_batch", global_row1, M, D_batch);
                 D_batch[global_row1] = __float2half(c_frag_2);
             }
+
+            // RANK-3 DEBUG: After writeback
+            if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
+                printf("DEBUG RANK-3: AFTER WRITEBACK to global memory\n");
+            }
         }
     }
 
-#ifndef NDEBUG
-    if (tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        DEBUG_PRINT_ERROR("KERNEL FINISHED: grid=(%d,%d,%d) blockDim.x=%d\n",
-                          gridDim.x, gridDim.y, gridDim.z, blockDim.x);
+    // RANK-3 DEBUG: Kernel completion
+    if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        printf("DEBUG RANK-3: KERNEL FINISHED successfully\n");
     }
-#endif
 #endif
 }
 
