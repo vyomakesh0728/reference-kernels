@@ -245,7 +245,6 @@ __device__ __forceinline__ void prefetch_tile(
     const CUtensorMap* desc_A, const CUtensorMap* desc_SFA
 ) {
     constexpr int TileKPacked = TileK / 2;
-    constexpr int SfaBoxK = 16;  // TMA minimum box size constraint
 
     if (use_tma_a && is_producer) {
         if (warp_id == 0 && lane_id == 0) {
@@ -253,6 +252,11 @@ __device__ __forceinline__ void prefetch_tile(
             uint32_t c_m = static_cast<uint32_t>(m_tile);
             uint32_t c_k_packed = static_cast<uint32_t>(k_tile_base >> 1);
             uint32_t c_k_scales = static_cast<uint32_t>(k_tile_base >> 4);
+
+            // SFA box size: K_scales_padded for both rank-2 and rank-3
+            // rank-2 (L=1): uses SWIZZLE_NONE, K_scales_padded may be small (16-32)
+            // rank-3 (L=4,8): uses SWIZZLE_128B, K_scales_padded >= 128
+            int SfaBoxK = K_scales_padded;
 
             if (L == 1) {
                 // Load A matrix tile (2D)
@@ -263,9 +267,9 @@ __device__ __forceinline__ void prefetch_tile(
 
                 // Load SFA scales tile (2D) using element-space coordinates
                 // TMA requires coordinates to be aligned to box size
-                uint32_t sfa_c0 = (c_k_scales / SfaBoxK) * SfaBoxK;  // Align to SfaBoxK
+                uint32_t sfa_c0 = 0;  // For rank-2, always start at 0 (load full padded width)
                 uint32_t sfa_c1 = c_m;
-                bool valid_sfa_k = (sfa_c0 + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
+                bool valid_sfa_k = (sfa_c0 + K_scales_padded) <= static_cast<uint32_t>(K_scales_padded);
                 bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
                 // Calculate total bytes for mbarrier
@@ -274,7 +278,7 @@ __device__ __forceinline__ void prefetch_tile(
                     total_bytes += (TileM * TileKPacked + 15) & ~15;
                 }
                 if (valid_sfa_m && valid_sfa_k) {
-                    total_bytes += TileM * SfaBoxK;
+                    total_bytes += TileM * K_scales_padded;
                 }
 
                 // Set expected bytes for mbarrier
@@ -498,7 +502,7 @@ fp4_gemv_streaming(
     uint8_t* sfa_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
         sfa_stage[s] = smem + offset;
-        offset += TileM * SfaBoxK;
+        offset += TileM * K_scales_padded;  // Use runtime K_scales_padded (16 for rank-2, 128 for rank-3)
     }
 
     // Tensor Core operand tiles in shared memory: also 128-byte aligned
@@ -846,6 +850,28 @@ fp4_gemv_streaming(
         }
         __syncthreads();
 
+#ifndef NDEBUG
+        // Dump first few bytes of SFA shared memory after TMA load
+        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0 && k_tile == 0) {
+            printf("SFA_SMEM_DUMP stage=%d:\n", stage);
+            printf("  [0-15]  = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                   sfa_stage[stage][0], sfa_stage[stage][1], sfa_stage[stage][2], sfa_stage[stage][3],
+                   sfa_stage[stage][4], sfa_stage[stage][5], sfa_stage[stage][6], sfa_stage[stage][7],
+                   sfa_stage[stage][8], sfa_stage[stage][9], sfa_stage[stage][10], sfa_stage[stage][11],
+                   sfa_stage[stage][12], sfa_stage[stage][13], sfa_stage[stage][14], sfa_stage[stage][15]);
+            printf("  [16-31] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                   sfa_stage[stage][16], sfa_stage[stage][17], sfa_stage[stage][18], sfa_stage[stage][19],
+                   sfa_stage[stage][20], sfa_stage[stage][21], sfa_stage[stage][22], sfa_stage[stage][23],
+                   sfa_stage[stage][24], sfa_stage[stage][25], sfa_stage[stage][26], sfa_stage[stage][27],
+                   sfa_stage[stage][28], sfa_stage[stage][29], sfa_stage[stage][30], sfa_stage[stage][31]);
+            printf("  [32-47] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                   sfa_stage[stage][32], sfa_stage[stage][33], sfa_stage[stage][34], sfa_stage[stage][35],
+                   sfa_stage[stage][36], sfa_stage[stage][37], sfa_stage[stage][38], sfa_stage[stage][39],
+                   sfa_stage[stage][40], sfa_stage[stage][41], sfa_stage[stage][42], sfa_stage[stage][43],
+                   sfa_stage[stage][44], sfa_stage[stage][45], sfa_stage[stage][46], sfa_stage[stage][47]);
+        }
+#endif
+
         int curr_k = (K - k_tile) < TileK ? (K - k_tile) : TileK;
         int curr_cols = (curr_k + 1) >> 1;
         int scale_count = (curr_k + 15) >> 4;
@@ -871,8 +897,8 @@ fp4_gemv_streaming(
                 if (row < tile_rows) {
                     int scale_col = col_packed >> 3;
                     if (scale_col < scale_count) {
-                        int sfa_idx = row * SfaBoxK + scale_col;
-                        DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, TileM * SfaBoxK, sfa_stage[stage]);
+                        int sfa_idx = row * K_scales_padded + scale_col;
+                        DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, TileM * K_scales_padded, sfa_stage[stage]);
                         scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][sfa_idx]));
                     }
                 }
@@ -887,10 +913,12 @@ fp4_gemv_streaming(
                 }
 
 #ifndef NDEBUG
-                // Debug: print first few A decode values for row 0
-                if (blockIdx.x == 0 && blockIdx.y == 0 && row == 0 && col_packed < 8) {
-                    DEBUG_PRINT_ERROR("A_decode k_tile=%d stage=%d: row=%d col=%d k_base=%d packed=0x%02x scale=%.4f v0=%.4f v1=%.4f\n",
-                                      k_tile, stage, row, col_packed, k_base, packed, __half2float(scale_h), __half2float(v0), __half2float(v1));
+                // Debug: print A decode for first few rows at col=0
+                if (blockIdx.x == 0 && blockIdx.y == 0 && col_packed == 0 && row < 5) {
+                    int sfa_idx_check = row * K_scales_padded + (col_packed >> 3);
+                    uint8_t sfa_byte = sfa_stage[stage][sfa_idx_check];
+                    DEBUG_PRINT_ERROR("A_decode k_tile=%d stage=%d: row=%d col=%d k_base=%d packed=0x%02x scale=%.4f sfa_idx=%d sfa_byte=0x%02x v0=%.4f v1=%.4f\n",
+                                      k_tile, stage, row, col_packed, k_base, packed, __half2float(scale_h), sfa_idx_check, sfa_byte, __half2float(v0), __half2float(v1));
                 }
 #endif
 
@@ -1000,6 +1028,17 @@ fp4_gemv_streaming(
                     : "r"(a_addr)
                 );
 
+#ifndef NDEBUG
+                if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && lane_id == 0) {
+                    // Sample multiple positions to see if there's any non-zero data
+                    half s0 = a_tile_ptr[0];
+                    half s1 = warp_row < TileM ? a_f16_smem[warp_row * a_stride + 32] : __float2half(0.0f);  // mid-K position
+                    half s2 = warp_row < TileM ? a_f16_smem[warp_row * a_stride + 64] : __float2half(0.0f);  // later K position
+                    DEBUG_PRINT_ERROR("LDMATRIX warp=%d warp_row=%d samples: [0]=%.4f [32]=%.4f [64]=%.4f\n",
+                                      warp_id, warp_row, __half2float(s0), __half2float(s1), __half2float(s2));
+                }
+#endif
+
                 // Load B matrix tile (16x8) using ldmatrix with transpose
                 // B is stored as 16 rows x 8 cols (but we broadcast the vector to 8 cols)
                 // ldmatrix.x2.trans loads 2 8x8 matrices with transpose
@@ -1105,7 +1144,7 @@ fp4_gemv_streaming(
             int global_row1 = m_tile + warp_row_offset + row1;
 
 #ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && warp_id == 2) {
+            if (blockIdx.x == 0 && blockIdx.y == 0 && octet == 0 && tid_in_octet == 0) {
                 DEBUG_PRINT_ERROR("D_STORE: warp=%d lane=%d octet=%d row0=%d row1=%d g0=%d g1=%d c0=%.2f c2=%.2f\n",
                                   warp_id, lane_id, octet, row0, row1,
                                   global_row0, global_row1, c_frag_0, c_frag_2);
@@ -1149,7 +1188,7 @@ void launch_fp4_gemv_optimized(
     constexpr int kThreads = 320;
     constexpr int kTileKPacked = kTileK / 2;  // 128 bytes
     constexpr int kTileScaleCount = kTileK / 16;  // 16 scales
-    constexpr int kSfaBoxK = 16;  // TMA box size - must match device-side SfaBoxK
+    // SFA box size is determined at runtime based on K_scales_padded (not a constant)
     constexpr int kStageCount = 3;
     constexpr int kAStride = kTileK + 8;
 
@@ -1190,8 +1229,11 @@ void launch_fp4_gemv_optimized(
     }
 
     shared_bytes = align_up(shared_bytes, 1024); // for sfa_stage[0] (SWIZZLE_128B)
+    // SFA box size: use K_scales_padded (16 for rank-2, 128 for rank-3)
+    // Allocate worst-case: 128 bytes per row
+    constexpr int kSfaBoxKWorstCase = 128;
     for (int s = 0; s < kStageCount; ++s) {
-        shared_bytes += static_cast<size_t>(kTileM) * kSfaBoxK; // sfa_stage[s]
+        shared_bytes += static_cast<size_t>(kTileM) * kSfaBoxKWorstCase; // sfa_stage[s]
     }
 
     // 128-byte alignment for non-swizzled regions
@@ -1540,7 +1582,9 @@ void launch_fp4_gemv_optimized(
         std::memset(map_SFA_aligned, 0, sizeof(CUtensorMap));
         CUtensorMap* map_SFA_ptr = reinterpret_cast<CUtensorMap*>(map_SFA_aligned);
 
-        cuuint32_t box_sfa_k = static_cast<cuuint32_t>(std::min<int64_t>(kSfaBoxK, K_scales_padded));
+        // For rank-2 (L=1): Use SWIZZLE_NONE with box_k=16 (no padding needed, CTA launch)
+        // For rank-3 (L=4,8): Use SWIZZLE_128B with box_k=128 (requires padding, cluster launch)
+        cuuint32_t box_sfa_k = (L == 1) ? 16u : static_cast<cuuint32_t>(K_scales_padded);
         cuuint32_t box_sfa_m = static_cast<cuuint32_t>(
             kTileM < M ?
                 (kTileM < 16ULL ? 16ULL : (kTileM < 256ULL ? kTileM : 256ULL)) :
@@ -1548,13 +1592,14 @@ void launch_fp4_gemv_optimized(
         );
 
         if (L == 1) {
-            // SFA: rank-2, actual layout is [1, M, K_scales_padded] but L=1 collapses to [M, K_scales_padded]
-            // TMA dims order: [K_scales_padded, M] (innermost to outermost)
+            // SFA: rank-2, use SWIZZLE_NONE (encode_tma_vector) for small dimensions
+            // TMA load passes (K_coord, M_coord) so dims must be [K, M]
+            // Global memory is row-major: element[row,k] at offset row*K_scales_padded + k
             cuuint64_t dims_SFA[2] = {static_cast<cuuint64_t>(K_scales_padded), static_cast<cuuint64_t>(M)};
             cuuint32_t box_SFA[2] = {box_sfa_k, box_sfa_m};
             cuuint64_t strides_SFA[1] = {static_cast<cuuint64_t>(K_scales_padded)};
 
-            printf("TMA SFA (rank=2): dims=[%llu,%llu] box=[%u,%u] stride=[%llu] ptr=%p\n",
+            printf("TMA SFA (rank=2, SWIZZLE_NONE): dims=[%llu,%llu] box=[%u,%u] stride=[%llu] ptr=%p\n",
                    (unsigned long long)dims_SFA[0], (unsigned long long)dims_SFA[1],
                    box_SFA[0], box_SFA[1], (unsigned long long)strides_SFA[0], SFA_ptr);
 
@@ -1564,7 +1609,8 @@ void launch_fp4_gemv_optimized(
                        SFA_ptr, (unsigned long long)(sfa_addr % 128));
             }
 
-            CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
+            // Use SWIZZLE_NONE for rank-2 (CTA launch)
+            CUresult resSFA = encode_tma_vector(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                          2, SFA_ptr, dims_SFA, strides_SFA, box_SFA);
             if (resSFA != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
@@ -1618,12 +1664,14 @@ void launch_fp4_gemv_optimized(
     if (set_err != cudaSuccess) throw std::runtime_error(std::string("cudaFuncSetAttribute failed"));
 
     int num_blocks = static_cast<int>((M + kTileM - 1) / kTileM);
-    int grid_x = num_blocks;
+    // Round up grid_x to be divisible by cluster.x=2 (required for cta_group::2 TMA)
+    // Extra blocks will check bounds and exit early - negligible overhead
+    int grid_x = ((num_blocks + 1) / 2) * 2;  // Round up to next even number
     int grid_y = static_cast<int>(L);
 
     dim3 grid(grid_x, grid_y);
     dim3 block(kThreads);
-    dim3 cluster(2, 1, 1);  // cta_group::2
+    dim3 cluster(2, 1, 1);  // cta_group::2 for TMA
 
     // Enable non-portable cluster size (required for cluster launch)
     void const* kernel_ptr = (void const*)fp4_gemv_streaming<kTileM, kTileK, kThreads>;
@@ -1719,7 +1767,7 @@ def get_module():
             verbose=True,
             extra_cuda_cflags=[
                 "-O2",  # Enable optimizations to fix lambda stack issues
-                "-DNDEBUG",  # Disable debug output for performance testing
+                # "-DNDEBUG",  # Disable debug output for performance testing
                 # "--use_fast_math",  # Disabled for debugging
                 "-std=c++17",
                 "-gencode=arch=compute_100a,code=sm_100a",
@@ -1785,16 +1833,15 @@ def custom_kernel(data: input_t) -> output_t:
     sfa_linear = sfa_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda()
     sfb_linear = sfb_ref_cpu.clone().permute(2, 0, 1).contiguous().cuda()
 
-    # Pad SFA tensor to support TMA loads from any tile position
-    # TMA box size is 16, so we need K_scales_padded >= max_tile_start/16 + 16
-    # where max_tile_start = K - TileK = last K tile starting position
-    TileK = 256  # MUST match kTileK in kernel (256 elements = 128 packed bytes for SWIZZLE_128B)
-    SfaBoxK = 16  # TMA minimum box size
-    max_tile_start = K - TileK if K > TileK else 0
-    max_scale_pos = max_tile_start // 16
-    # TMA requires dims >= max_coord + box_size, and ensure at least 2x box size for safety
-    min_required = max_scale_pos + SfaBoxK
-    K_scales_padded = max(32, ((min_required + 15) // 16) * 16)  # At least 32, round up to multiple of 16
+    # Pad SFA tensor based on rank:
+    # rank-2 (L=1): Minimal padding for SWIZZLE_NONE (just round to 16)
+    # rank-3 (L=4,8): Pad to at least 128 for SWIZZLE_128B
+    if L == 1:
+        # rank-2: Minimal padding for SWIZZLE_NONE
+        K_scales_padded = ((K_scales + 15) // 16) * 16
+    else:
+        # rank-3: Pad to at least 128 for SWIZZLE_128B
+        K_scales_padded = max(128, ((K_scales + 15) // 16) * 16)
 
     if K_scales_padded > K_scales:
         pad_amount = K_scales_padded - K_scales
@@ -1827,6 +1874,11 @@ def custom_kernel(data: input_t) -> output_t:
     dump_tensor_info("b_bytes", b_bytes)
     dump_tensor_info("sfa_bytes", sfa_bytes)
     dump_tensor_info("sfb_bytes", sfb_bytes)
+
+    # Debug: Print first bytes of scale factors for multiple rows
+    for r in range(min(5, sfa_bytes.shape[1])):
+        print(f"[DEBUG] sfa_bytes[0,{r},:8] (batch 0, row {r}, first 8 scales): {sfa_bytes[0,r,:min(8,sfa_bytes.shape[2])].cpu().tolist()}")
+    print(f"[DEBUG] sfb_bytes[0,0,:8] (batch 0, row 0, first 8 scales): {sfb_bytes[0,0,:min(8,sfb_bytes.shape[2])].cpu().tolist()}")
 
     # Compute base/end ranges and check for overlap between all byte tensors
     tensors = {
