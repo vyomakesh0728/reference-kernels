@@ -253,10 +253,10 @@ __device__ __forceinline__ void prefetch_tile(
             uint32_t c_k_packed = static_cast<uint32_t>(k_tile_base >> 1);
             uint32_t c_k_scales = static_cast<uint32_t>(k_tile_base >> 4);
 
-            // SFA box size: K_scales_padded for both rank-2 and rank-3
-            // rank-2 (L=1): uses SWIZZLE_NONE, K_scales_padded may be small (16-32)
-            // rank-3 (L=4,8): uses SWIZZLE_128B, K_scales_padded >= 128
-            int SfaBoxK = K_scales_padded;
+            // SFA box size must match TMA descriptor configuration:
+            // rank-2 (L=1, CTA, SWIZZLE_NONE): box_k=16
+            // rank-3 (L=4,8, cluster, SWIZZLE_128B): box_k=K_scales_padded
+            int SfaBoxK = (L == 1) ? 16 : K_scales_padded;
 
             if (L == 1) {
                 // Load A matrix tile (2D)
@@ -267,9 +267,9 @@ __device__ __forceinline__ void prefetch_tile(
 
                 // Load SFA scales tile (2D) using element-space coordinates
                 // TMA requires coordinates to be aligned to box size
-                uint32_t sfa_c0 = 0;  // For rank-2, always start at 0 (load full padded width)
+                uint32_t sfa_c0 = 0;  // For rank-2, always start at 0 (load box_k=16)
                 uint32_t sfa_c1 = c_m;
-                bool valid_sfa_k = (sfa_c0 + K_scales_padded) <= static_cast<uint32_t>(K_scales_padded);
+                bool valid_sfa_k = (sfa_c0 + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
                 bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
                 // Calculate total bytes for mbarrier
@@ -278,7 +278,7 @@ __device__ __forceinline__ void prefetch_tile(
                     total_bytes += (TileM * TileKPacked + 15) & ~15;
                 }
                 if (valid_sfa_m && valid_sfa_k) {
-                    total_bytes += TileM * K_scales_padded;
+                    total_bytes += TileM * SfaBoxK;
                 }
 
                 // Set expected bytes for mbarrier
@@ -500,9 +500,12 @@ fp4_gemv_streaming(
     // Scales with SWIZZLE_128B TMA also need 1024-byte alignment
     align_up_smem_1024();
     uint8_t* sfa_stage[StageCount];
+    // For rank-2 (L=1): allocate TileM * 16 (matching TMA box_k)
+    // For rank-3 (L>1): allocate TileM * K_scales_padded (matching TMA box_k)
+    int sfa_stage_stride = (L == 1) ? (TileM * 16) : (TileM * K_scales_padded);
     for (int s = 0; s < StageCount; ++s) {
         sfa_stage[s] = smem + offset;
-        offset += TileM * K_scales_padded;  // Use runtime K_scales_padded (16 for rank-2, 128 for rank-3)
+        offset += sfa_stage_stride;
     }
 
     // Tensor Core operand tiles in shared memory: also 128-byte aligned
@@ -819,13 +822,20 @@ fp4_gemv_streaming(
 
 #ifndef NDEBUG
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            printf("K-TILE LOOP: k_tile=%d tile_idx=%d stage=%d K=%d TileK=%d\n",
+            printf("K-TILE LOOP START: k_tile=%d tile_idx=%d stage=%d K=%d TileK=%d\n",
                    k_tile, tile_idx, stage, K, TileK);
         }
 #endif
 
         int next_stage = (stage + 2) % StageCount;
         int next_k = k_tile + 2 * TileK;
+
+#ifndef NDEBUG
+        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+            printf("K-TILE: About to prefetch, next_k=%d next_stage=%d (condition: %d)\n",
+                   next_k, next_stage, next_k < K);
+        }
+#endif
 
         if (next_k < K) {
             prefetch_tile<TileM, TileK>(
@@ -835,12 +845,33 @@ fp4_gemv_streaming(
                 a_packed_stage, sfa_stage, mbar_a,
                 desc_A, desc_SFA
             );
+#ifndef NDEBUG
+            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+                printf("K-TILE: Prefetch completed for next_k=%d\n", next_k);
+            }
+#endif
         }
+
+#ifndef NDEBUG
+        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+            printf("K-TILE: About to wait on mbarrier, use_tma_a=%d stage=%d\n", use_tma_a, stage);
+        }
+#endif
 
         if (use_tma_a) {
 #if __CUDA_ARCH__ >= 900
             mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
+#ifndef NDEBUG
+            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+                printf("K-TILE: Mbarrier wait completed, about to syncthreads\n");
+            }
+#endif
             __syncthreads();
+#ifndef NDEBUG
+            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+                printf("K-TILE: After syncthreads, updating phase\n");
+            }
+#endif
             if (tid == 0) {
                 stage_phase_smem[stage] ^= 1;
             }
@@ -849,6 +880,12 @@ fp4_gemv_streaming(
             cp_async_wait();
         }
         __syncthreads();
+
+#ifndef NDEBUG
+        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+            printf("K-TILE: After final syncthreads, starting decode at k_tile=%d\n", k_tile);
+        }
+#endif
 
 #ifndef NDEBUG
         // Dump first few bytes of SFA shared memory after TMA load
@@ -897,8 +934,12 @@ fp4_gemv_streaming(
                 if (row < tile_rows) {
                     int scale_col = col_packed >> 3;
                     if (scale_col < scale_count) {
-                        int sfa_idx = row * K_scales_padded + scale_col;
-                        DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, TileM * K_scales_padded, sfa_stage[stage]);
+                        // For rank-2 (L=1): sfa_stage stride is SfaBoxK=16 (loaded width)
+                        // For rank-3 (L>1): sfa_stage stride is SfaBoxK=K_scales_padded (full width)
+                        int sfa_stride = (L == 1) ? 16 : K_scales_padded;
+                        int sfa_idx = row * sfa_stride + scale_col;
+                        int sfa_size = TileM * sfa_stride;
+                        DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, sfa_size, sfa_stage[stage]);
                         scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][sfa_idx]));
                     }
                 }
@@ -1095,8 +1136,18 @@ fp4_gemv_streaming(
             printf("ACCUM after k_tile=%d: c_frag_0=%.4f c_frag_2=%.4f\n",
                    k_tile, c_frag_0, c_frag_2);
         }
+        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+            printf("K-TILE LOOP END: Completed k_tile=%d, next will be k_tile=%d\n",
+                   k_tile, k_tile + TileK);
+        }
 #endif
     }
+
+#ifndef NDEBUG
+    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+        printf("EXITED K-TILE LOOP: All K tiles completed\n");
+    }
+#endif
 
     // DEBUG: Print ALL fragments for lanes 0,4,8 to understand output distribution
     if (blockIdx.x == 0 && blockIdx.y == 0 && is_consumer && warp_id == 2) {
@@ -1777,7 +1828,7 @@ def get_module():
             verbose=True,
             extra_cuda_cflags=[
                 "-O2",  # Enable optimizations to fix lambda stack issues
-                # "-DNDEBUG",  # Disable debug output for performance testing
+                "-DNDEBUG",  # Disable debug output for performance testing
                 # "--use_fast_math",  # Disabled for debugging
                 "-std=c++17",
                 "-gencode=arch=compute_100a,code=sm_100a",
