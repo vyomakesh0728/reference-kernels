@@ -1145,10 +1145,10 @@ void launch_fp4_gemv_optimized(
     half* D_ptr = reinterpret_cast<half*>(D.data_ptr<at::Half>());
 
     constexpr int kTileM = 128;
-    constexpr int kTileK = 128;
+    constexpr int kTileK = 256;  // 256 elements = 128 packed bytes (required for SWIZZLE_128B)
     constexpr int kThreads = 320;
-    constexpr int kTileKPacked = kTileK / 2;
-    constexpr int kTileScaleCount = kTileK / 16;
+    constexpr int kTileKPacked = kTileK / 2;  // 128 bytes
+    constexpr int kTileScaleCount = kTileK / 16;  // 16 scales
     constexpr int kSfaBoxK = 16;  // TMA box size - must match device-side SfaBoxK
     constexpr int kStageCount = 3;
     constexpr int kAStride = kTileK + 8;
