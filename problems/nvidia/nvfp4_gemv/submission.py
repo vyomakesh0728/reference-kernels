@@ -933,7 +933,7 @@ fp4_gemv_streaming(
         }
         __syncthreads();
 
-        // DEBUG: Print first 8 decoded A[row=0] values and first 4 SFA raw bytes (first tile only)
+        // DEBUG: Print first 8 decoded A[row=0-7] values and first 4 SFA raw bytes (first tile only)
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0 && k_tile == 0) {
             printf("SFA raw bytes [row=0, 0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
                    sfa_stage[stage][0], sfa_stage[stage][1],
@@ -944,12 +944,17 @@ fp4_gemv_streaming(
             printf("A packed bytes [row=0, 0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
                    a_packed_stage[stage][0], a_packed_stage[stage][1],
                    a_packed_stage[stage][2], a_packed_stage[stage][3]);
-            half* a_row0 = a_f16_smem;
-            printf("A decoded [row=0, 0-7]: %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
-                   __half2float(a_row0[0]), __half2float(a_row0[1]),
-                   __half2float(a_row0[2]), __half2float(a_row0[3]),
-                   __half2float(a_row0[4]), __half2float(a_row0[5]),
-                   __half2float(a_row0[6]), __half2float(a_row0[7]));
+
+            // Print decoded A for rows 0-7 (first 8 elements of each row)
+            for (int r = 0; r < 8; r++) {
+                half* a_row = a_f16_smem + r * a_stride;
+                printf("A_f16_smem[row=%d, 0-7]: %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
+                       r,
+                       __half2float(a_row[0]), __half2float(a_row[1]),
+                       __half2float(a_row[2]), __half2float(a_row[3]),
+                       __half2float(a_row[4]), __half2float(a_row[5]),
+                       __half2float(a_row[6]), __half2float(a_row[7]));
+            }
 
             // Print CuTe blocked indices for SFA at this tile origin
             int nmblocks_sfa = (M + 127) / 128;
@@ -1144,9 +1149,10 @@ fp4_gemv_streaming(
             int global_row1 = m_tile + warp_row_offset + row1;
 
 #ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && octet == 0 && tid_in_octet == 0) {
-                DEBUG_PRINT_ERROR("D_STORE: warp=%d lane=%d octet=%d row0=%d row1=%d g0=%d g1=%d c0=%.2f c2=%.2f\n",
-                                  warp_id, lane_id, octet, row0, row1,
+            // Debug ALL lanes that write (col==0) to see what they're storing
+            if (blockIdx.x == 0 && blockIdx.y == 0 && warp_id == 2) {
+                DEBUG_PRINT_ERROR("D_STORE: warp=%d lane=%d octet=%d tid_in_oct=%d col=%d row0=%d row1=%d g0=%d g1=%d c0=%.2f c2=%.2f\n",
+                                  warp_id, lane_id, octet, tid_in_octet, col, row0, row1,
                                   global_row0, global_row1, c_frag_0, c_frag_2);
             }
 #endif
