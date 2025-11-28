@@ -482,7 +482,7 @@ __device__ __forceinline__ void prefetch_tile(
 
 template<int TileM, int TileK, int Threads>
 __global__ void __launch_bounds__(Threads)
-fp4_gemv_streaming(
+fp4_gemv_steaming(
     const uint8_t* __restrict__ A_packed,
     const uint8_t* __restrict__ B_packed,
     const uint8_t* __restrict__ SFA_packed,
@@ -1958,11 +1958,11 @@ void launch_fp4_gemv_optimized(
     }
 
     cudaFuncAttributes attr;
-    cudaError_t attr_err = cudaFuncGetAttributes(&attr, fp4_gemv_streaming<kTileM, kTileK, kThreads>);
+    cudaError_t attr_err = cudaFuncGetAttributes(&attr, fp4_gemv_steaming<kTileM, kTileK, kThreads>);
     if (attr_err != cudaSuccess) throw std::runtime_error(std::string("cudaFuncGetAttributes failed"));
 
     cudaError_t set_err = cudaFuncSetAttribute(
-        fp4_gemv_streaming<kTileM, kTileK, kThreads>,
+        fp4_gemv_steaming<kTileM, kTileK, kThreads>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         static_cast<int>(shared_bytes)
     );
@@ -1974,7 +1974,7 @@ void launch_fp4_gemv_optimized(
     }
 
     int num_blocks = static_cast<int>((M + kTileM - 1) / kTileM);
-    void const* kernel_ptr = (void const*)fp4_gemv_streaming<kTileM, kTileK, kThreads>;
+    void const* kernel_ptr = (void const*)fp4_gemv_steaming<kTileM, kTileK, kThreads>;
 
     int grid_x, grid_y;
     dim3 grid, block, cluster;
@@ -1991,7 +1991,6 @@ void launch_fp4_gemv_optimized(
         launch_config.gridDim = grid;
         launch_config.blockDim = block;
         launch_config.dynamicSmemBytes = shared_bytes;
-        launch_config.stream = 0;
         launch_config.attrs = nullptr;
         launch_config.numAttrs = 0;
     } else {
@@ -2032,7 +2031,6 @@ void launch_fp4_gemv_optimized(
         launch_config.gridDim = grid;
         launch_config.blockDim = block;
         launch_config.dynamicSmemBytes = shared_bytes;
-        launch_config.stream = 0;
         launch_config.attrs = launch_attr;
         launch_config.numAttrs = 1;
 
@@ -2118,7 +2116,6 @@ void launch_fp4_gemv_optimized(
         printf("  launch_config.blockDim=(%u,%u,%u)\n",
                launch_config.blockDim.x, launch_config.blockDim.y, launch_config.blockDim.z);
         printf("  launch_config.dynamicSmemBytes=%zu\n", launch_config.dynamicSmemBytes);
-        printf("  launch_config.stream=%p\n", launch_config.stream);
         printf("  launch_config.numAttrs=%d\n", launch_config.numAttrs);
         if (launch_config.numAttrs > 0) {
             printf("  launch_attr[0].id=%d (should be %d for ClusterDimension)\n",
