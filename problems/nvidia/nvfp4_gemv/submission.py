@@ -12,6 +12,7 @@ cuda_source = r"""
 #include <cuda_fp16.h>
 #include <cuda.h>
 #include <cuda/pipeline>
+#include <cooperative_groups.h>
 #include <cstdio>
 #include <cstdint>
 #include <vector>
@@ -191,7 +192,7 @@ __device__ __forceinline__ void tma_load_2d_cluster_no_arrive(void* smem_ptr,
     uint64_t cache_hint = 0;
 
     asm volatile(
-        "cp.async.bulk.tensor.2d.cta_group::2.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+        "cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
         "[%0], [%1, {%3, %4}], [%2], %5;\n"
         :
         : "r"(smem_addr),
@@ -268,7 +269,7 @@ __device__ __forceinline__ void tma_load_3d_cluster_no_arrive(void* smem_ptr,
     uint64_t cache_hint = 0;
 
     asm volatile(
-        "cp.async.bulk.tensor.3d.cta_group::2.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+        "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
         "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
         :
         : "r"(smem_addr),
@@ -407,53 +408,57 @@ __device__ __forceinline__ void prefetch_tile(
 #endif
                 }
             } else {
-                // Load A matrix tile (3D)
-                uint32_t c0 = c_k_packed;
-                uint32_t c1 = c_m;
-                uint32_t c2 = static_cast<uint32_t>(batch);
-                bool valid_batch = c2 < static_cast<uint32_t>(L);
-                bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
-                bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
+                // RANK-3: Only CTA0 sets expect_tx and issues TMA (with shared::cluster, routes to CTA0's barrier)
+                uint32_t cta_rank = blockIdx.x % 2;
+                if (cta_rank == 0) {
+                    // Load A matrix tile (3D)
+                    uint32_t c0 = c_k_packed;
+                    uint32_t c1 = c_m;
+                    uint32_t c2 = static_cast<uint32_t>(batch);
+                    bool valid_batch = c2 < static_cast<uint32_t>(L);
+                    bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
+                    bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
 
-                // Load SFA scales tile (3D) using element-space coordinates
-                // TMA requires coordinates to be aligned to box size
-                uint32_t sfa_c0 = (c_k_scales / SfaBoxK) * SfaBoxK;  // Align to SfaBoxK
-                uint32_t sfa_c1 = c_m;
-                uint32_t sfa_c2 = c2;
-                bool valid_sfa_k = (sfa_c0 + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
-                bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
+                    // Load SFA scales tile (3D) using element-space coordinates
+                    // TMA requires coordinates to be aligned to box size
+                    uint32_t sfa_c0 = (c_k_scales / SfaBoxK) * SfaBoxK;  // Align to SfaBoxK
+                    uint32_t sfa_c1 = c_m;
+                    uint32_t sfa_c2 = c2;
+                    bool valid_sfa_k = (sfa_c0 + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
+                    bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
-                // Calculate total bytes for mbarrier
-                uint32_t total_bytes = 0;
-                if (valid_batch && valid_m && valid_k) {
-                    total_bytes += TileM * TileKPacked;
-                }
-                if (valid_batch && valid_sfa_m && valid_sfa_k) {
-                    total_bytes += TileM * SfaBoxK;
-                }
+                    // Calculate total bytes for mbarrier
+                    uint32_t total_bytes = 0;
+                    if (valid_batch && valid_m && valid_k) {
+                        total_bytes += TileM * TileKPacked;
+                    }
+                    if (valid_batch && valid_sfa_m && valid_sfa_k) {
+                        total_bytes += TileM * SfaBoxK;
+                    }
 
-                // Set mbarrier expected bytes
-                mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), total_bytes);
+                    // Set mbarrier expected bytes (only CTA0)
+                    mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), total_bytes);
 
-                // Issue TMA loads (they will complete to the same mbarrier)
-                if (valid_batch && valid_m && valid_k) {
-                    tma_load_3d_no_arrive(
-                        a_packed_stage[stage],
-                        desc_A,
-                        c0, c1, c2,
-                        mbar_stage(mbar_a, stage),
-                        L
-                    );
-                }
+                    // Issue TMA loads (they will complete to the same mbarrier)
+                    if (valid_batch && valid_m && valid_k) {
+                        tma_load_3d_no_arrive(
+                            a_packed_stage[stage],
+                            desc_A,
+                            c0, c1, c2,
+                            mbar_stage(mbar_a, stage),
+                            L
+                        );
+                    }
 
-                if (valid_batch && valid_sfa_m && valid_sfa_k) {
-                    tma_load_3d_no_arrive(
-                        sfa_stage[stage],
-                        desc_SFA,
-                        sfa_c0, sfa_c1, sfa_c2,
-                        mbar_stage(mbar_a, stage),
-                        L
-                    );
+                    if (valid_batch && valid_sfa_m && valid_sfa_k) {
+                        tma_load_3d_no_arrive(
+                            sfa_stage[stage],
+                            desc_SFA,
+                            sfa_c0, sfa_c1, sfa_c2,
+                            mbar_stage(mbar_a, stage),
+                            L
+                        );
+                    }
                 }
             }
         }
@@ -476,6 +481,10 @@ fp4_gemv_streaming(
     const int M, const int K, const int L, const int K_scales_padded
 ) {
 #if __CUDA_ARCH__ >= 700
+    // RANK-3: Initialize cluster group for cluster-wide synchronization
+    namespace cg = cooperative_groups;
+    cg::cluster_group cluster = cg::this_cluster();
+
     constexpr int TileKPacked = TileK / 2;
     constexpr int TileScaleCount = TileK / 16;
     constexpr int SfaBoxK = 16;  // Hardcoded for testing
@@ -677,7 +686,12 @@ fp4_gemv_streaming(
         mbarrier_init(mbar_sfb);
     }
 #endif
-    __syncthreads();
+    // Sync to ensure remote barriers are initialized (cluster-wide for RANK-3)
+    if (L > 1) {
+        cluster.sync();
+    } else {
+        __syncthreads();
+    }
 
     // Verify TMA descriptors are valid
     if (!desc_A || !desc_SFA || !desc_B || !desc_SFB) {
@@ -768,7 +782,7 @@ fp4_gemv_streaming(
                 uint32_t mbar_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
                 uint64_t cache_hint = 0;
                 asm volatile(
-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
                     "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
                     :
                     : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
@@ -805,7 +819,7 @@ fp4_gemv_streaming(
                 uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
                 uint64_t cache_hint = 0;
                 asm volatile(
-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
                     "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
                     :
                     : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
@@ -823,38 +837,40 @@ fp4_gemv_streaming(
         mbarrier_wait_parity(mbar_b, 0);
         mbarrier_wait_parity(mbar_sfb, 0);
     } else {
-        // RANK-3: Each CTA waits on its OWN local barrier (cannot wait on remote barriers!)
-        // Per LLVM NVPTX docs: "Threads can perform only arrive operations but NOT *_wait
-        // on an mbarrier located in shared::cluster space"
-        // TMA multicast automatically arrives on all CTAs' barriers via mcast_mask
-        uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
-        uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
+        // RANK-3: With shared::cluster TMA + peer mask, only CTA0's barrier gets updated
+        // Only CTA0 waits on barrier, then all CTAs sync via cluster_arrive/cluster_wait
+        uint32_t cta_rank = blockIdx.x % 2;
+        if (cta_rank == 0) {
+            // Only CTA0 waits on the barrier
+            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
+            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
 
-        // Each CTA waits on its own local barrier
-        // Use .shared::cta.b64 for cluster mode (CUTLASS pattern)
-        asm volatile(
-            "{\n\t"
-            ".reg .pred P1; \n\t"
-            "LAB_WAIT_B: \n\t"
-            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
-            "@!P1 bra.uni LAB_WAIT_B; \n\t"
-            "}"
-            :
-            : "r"(mbar_b_addr), "r"(0)
-            : "memory"
-        );
+            asm volatile(
+                "{\n\t"
+                ".reg .pred P1; \n\t"
+                "LAB_WAIT_B: \n\t"
+                "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+                "@!P1 bra.uni LAB_WAIT_B; \n\t"
+                "}"
+                :
+                : "r"(mbar_b_addr), "r"(0)
+                : "memory"
+            );
 
-        asm volatile(
-            "{\n\t"
-            ".reg .pred P1; \n\t"
-            "LAB_WAIT_SFB: \n\t"
-            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
-            "@!P1 bra.uni LAB_WAIT_SFB; \n\t"
-            "}"
-            :
-            : "r"(mbar_sfb_addr), "r"(0)
-            : "memory"
-        );
+            asm volatile(
+                "{\n\t"
+                ".reg .pred P1; \n\t"
+                "LAB_WAIT_SFB: \n\t"
+                "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+                "@!P1 bra.uni LAB_WAIT_SFB; \n\t"
+                "}"
+                :
+                : "r"(mbar_sfb_addr), "r"(0)
+                : "memory"
+            );
+        }
+        // RANK-3: Cluster-wide sync after CTA0 waited for TMA (using cooperative_groups)
+        cluster.sync();
     }
 #endif
     __syncthreads();
@@ -1033,13 +1049,27 @@ fp4_gemv_streaming(
 
         if (use_tma_a) {
 #if __CUDA_ARCH__ >= 900
-            mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
+            if (L == 1) {
+                // RANK-2: All threads wait on their own CTA's barrier
+                mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
+            } else {
+                // RANK-3: Only CTA0 waits, then sync all CTAs
+                uint32_t cta_rank = blockIdx.x % 2;
+                if (cta_rank == 0) {
+                    mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
+                }
+            }
 #ifndef NDEBUG
             if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                printf("K-TILE: Mbarrier wait completed, about to syncthreads\n");
+                printf("K-TILE: Mbarrier wait completed, about to cluster sync\n");
             }
 #endif
-            __syncthreads();
+            // RANK-3: Cluster-wide sync after CTA0 waited - prevents CTA1 from racing ahead
+            if (L > 1) {
+                cluster.sync();
+            } else {
+                __syncthreads();
+            }
 #ifndef NDEBUG
             if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
                 printf("K-TILE: After syncthreads, updating phase\n");
@@ -1325,8 +1355,14 @@ fp4_gemv_streaming(
             printf("DEBUG RANK-3: Before sync at end of k_tile\n");
         }
 
-        // SM_100a has NO cluster-wide sync - CTAs coordinate through TMA mbarriers only
-        __syncthreads();
+        // Synchronize at end of k_tile: cluster-wide for RANK-3, CTA-local for RANK-2
+        if (L > 1) {
+            // RANK-3: Cluster-wide sync using cooperative_groups
+            cluster.sync();
+        } else {
+            // RANK-2: CTA-local sync
+            __syncthreads();
+        }
 
         // RANK-3 DEBUG: After sync
         if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
