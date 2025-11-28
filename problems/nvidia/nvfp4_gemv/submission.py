@@ -100,6 +100,20 @@ __device__ unsigned int g_debug_thread_error_counts[1024];
 #define DEBUG_MAX_ERRORS 0u
 #endif
 
+// Helper function for cluster-aware synchronization
+// Only calls cg::this_cluster() for cluster launches (L > 1)
+__device__ __forceinline__ void sync_cluster_or_block(int L) {
+    if (L > 1) {
+        // RANK-3: Cluster-wide sync
+        namespace cg = cooperative_groups;
+        cg::cluster_group cluster = cg::this_cluster();
+        cluster.sync();
+    } else {
+        // RANK-2: CTA-local sync
+        __syncthreads();
+    }
+}
+
 #if __CUDA_ARCH__ >= 900
 __device__ __forceinline__ void cp_async_16b(void* dst, const void* src, bool pred) {
     if (pred) {
@@ -481,10 +495,6 @@ fp4_gemv_streaming(
     const int M, const int K, const int L, const int K_scales_padded
 ) {
 #if __CUDA_ARCH__ >= 700
-    // RANK-3: Initialize cluster group for cluster-wide synchronization
-    namespace cg = cooperative_groups;
-    cg::cluster_group cluster = cg::this_cluster();
-
     constexpr int TileKPacked = TileK / 2;
     constexpr int TileScaleCount = TileK / 16;
     constexpr int SfaBoxK = 16;  // Hardcoded for testing
@@ -687,11 +697,7 @@ fp4_gemv_streaming(
     }
 #endif
     // Sync to ensure remote barriers are initialized (cluster-wide for RANK-3)
-    if (L > 1) {
-        cluster.sync();
-    } else {
-        __syncthreads();
-    }
+    sync_cluster_or_block(L);
 
     // Verify TMA descriptors are valid
     if (!desc_A || !desc_SFA || !desc_B || !desc_SFB) {
@@ -870,7 +876,7 @@ fp4_gemv_streaming(
             );
         }
         // RANK-3: Cluster-wide sync after CTA0 waited for TMA (using cooperative_groups)
-        cluster.sync();
+        sync_cluster_or_block(L);
     }
 #endif
     __syncthreads();
@@ -1065,11 +1071,7 @@ fp4_gemv_streaming(
             }
 #endif
             // RANK-3: Cluster-wide sync after CTA0 waited - prevents CTA1 from racing ahead
-            if (L > 1) {
-                cluster.sync();
-            } else {
-                __syncthreads();
-            }
+            sync_cluster_or_block(L);
 #ifndef NDEBUG
             if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
                 printf("K-TILE: After syncthreads, updating phase\n");
@@ -1356,13 +1358,7 @@ fp4_gemv_streaming(
         }
 
         // Synchronize at end of k_tile: cluster-wide for RANK-3, CTA-local for RANK-2
-        if (L > 1) {
-            // RANK-3: Cluster-wide sync using cooperative_groups
-            cluster.sync();
-        } else {
-            // RANK-2: CTA-local sync
-            __syncthreads();
-        }
+        sync_cluster_or_block(L);
 
         // RANK-3 DEBUG: After sync
         if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
@@ -1472,6 +1468,11 @@ fp4_gemv_streaming(
     // RANK-3 DEBUG: Kernel completion
     if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
         printf("DEBUG RANK-3: KERNEL FINISHED successfully\n");
+    }
+
+    // Debug: Print for ALL CTAs to verify they all exit
+    if (L > 1 && tid == 0) {
+        printf("DEBUG: CTA(%d,%d,%d) exiting\n", blockIdx.x, blockIdx.y, blockIdx.z);
     }
 #endif
 }
@@ -2204,10 +2205,11 @@ def custom_kernel(data: input_t) -> output_t:
     """
     # Workaround for multiprocessing setting sys.stdout to None
     import sys
+
     if sys.stdout is None:
-        sys.stdout = open('/dev/null', 'w')
+        sys.stdout = open("/dev/null", "w")
     if sys.stderr is None:
-        sys.stderr = open('/dev/null', 'w')
+        sys.stderr = open("/dev/null", "w")
 
     a, b, sfa_ref_cpu, sfb_ref_cpu, sfa_permuted, sfb_permuted, c = data
 
@@ -2258,7 +2260,9 @@ def custom_kernel(data: input_t) -> output_t:
         pad_amount = K_scales_padded - K_scales
         # Pad with zeros in the K_scales dimension (dimension 2 of [L, M, K_scales])
         sfa_linear = torch.nn.functional.pad(sfa_linear, (0, pad_amount), value=0)
-        print(f"[DEBUG] Padded SFA from K_scales={K_scales} to K_scales_padded={K_scales_padded}")
+        print(
+            f"[DEBUG] Padded SFA from K_scales={K_scales} to K_scales_padded={K_scales_padded}"
+        )
     else:
         K_scales_padded = K_scales
         print(f"[DEBUG] No padding needed, K_scales={K_scales}")
@@ -2288,8 +2292,12 @@ def custom_kernel(data: input_t) -> output_t:
 
     # Debug: Print first bytes of scale factors for multiple rows
     for r in range(min(5, sfa_bytes.shape[1])):
-        print(f"[DEBUG] sfa_bytes[0,{r},:8] (batch 0, row {r}, first 8 scales): {sfa_bytes[0,r,:min(8,sfa_bytes.shape[2])].cpu().tolist()}")
-    print(f"[DEBUG] sfb_bytes[0,0,:8] (batch 0, row 0, first 8 scales): {sfb_bytes[0,0,:min(8,sfb_bytes.shape[2])].cpu().tolist()}")
+        print(
+            f"[DEBUG] sfa_bytes[0,{r},:8] (batch 0, row {r}, first 8 scales): {sfa_bytes[0, r, : min(8, sfa_bytes.shape[2])].cpu().tolist()}"
+        )
+    print(
+        f"[DEBUG] sfb_bytes[0,0,:8] (batch 0, row 0, first 8 scales): {sfb_bytes[0, 0, : min(8, sfb_bytes.shape[2])].cpu().tolist()}"
+    )
 
     # Compute base/end ranges and check for overlap between all byte tensors
     tensors = {
@@ -2351,7 +2359,9 @@ def custom_kernel(data: input_t) -> output_t:
 
     # Launch SM100 tensor core kernel
     mod = get_module()
-    mod.launch_fp4_gemv_optimized(a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L, K_scales_padded)
+    mod.launch_fp4_gemv_optimized(
+        a_bytes, b_bytes, sfa_bytes, sfb_bytes, c, M, K, L, K_scales_padded
+    )
 
     # Permute output back
     c = c.permute(1, 2, 0).contiguous()  # [M, 1, L]
