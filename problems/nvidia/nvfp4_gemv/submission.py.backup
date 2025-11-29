@@ -480,169 +480,262 @@ __device__ __forceinline__ void prefetch_tile(
 }
 #endif
 
-// Minimal per-tile helper: decode + MMA only (no K-loop, no prefetch, no wait/sync)
-// Lifted directly from sahasra_copy.py lines 1117-1347
-template<int TileM, int TileK, int Threads, int sfa_stride>
-__device__ __forceinline__ void process_tile(
-    int k_tile, int stage, int tile_rows,
-    uint8_t** a_packed_stage, uint8_t** sfa_stage,
-    half* b_vec_smem, half* a_f16_smem, half* b_tile_smem,
-    const int M, const int K, const int K_scales_padded,
+// Common decode + MMA + writeback logic shared by both rank-2 and rank-3 kernels
+template<int TileM, int TileK, int Threads, int StageCount, int a_stride>
+__device__ __forceinline__ void fp4_gemv_core_logic(
+    uint8_t** a_packed_stage,
+    uint8_t** sfa_stage,
+    uint64_t* mbar_a,
+    half* b_vec_smem,
+    half* a_f16_smem,
+    half* b_tile_smem,
+    half* D_batch,
+    const int M, const int K, const int L, const int K_scales_padded,
+    const int m_tile, const int tile_rows,
     const int tid, const int warp_id, const int lane_id,
     const bool is_producer, const bool is_consumer,
-    float& c_frag_0, float& c_frag_1, float& c_frag_2, float& c_frag_3
+    uint32_t* stage_phase_smem,
+    const bool use_tma_a,
+    const int sfa_stage_stride
 ) {
+#if __CUDA_ARCH__ >= 700
     constexpr int TileKPacked = TileK / 2;
-    constexpr int a_stride = TileK + 8;
+    const int K_packed = K >> 1;
 
-    int curr_k = (K - k_tile) < TileK ? (K - k_tile) : TileK;
-    int curr_cols = (curr_k + 1) >> 1;
-    int scale_count = (curr_k + 15) >> 4;
+    float c_frag_0 = 0.0f;
+    float c_frag_1 = 0.0f;
+    float c_frag_2 = 0.0f;
+    float c_frag_3 = 0.0f;
 
-    {
-        uint8_t* a_stage = a_packed_stage[stage];
+    for (int k_tile = 0; k_tile < K; k_tile += TileK) {
+        int tile_idx = k_tile / TileK;
+        int stage = tile_idx % StageCount;
+
+        // Wait for data (caller handles TMA waits and sync)
+        // This function only does decode + compute + writeback
+
+        int curr_k = (K - k_tile) < TileK ? (K - k_tile) : TileK;
+        int curr_cols = (curr_k + 1) >> 1;
+        int scale_count = (curr_k + 15) >> 4;
+
+        {
+            uint8_t* a_stage = a_packed_stage[stage];
+
+            for (int idx = tid; idx < tile_rows * curr_cols; idx += Threads) {
+                int row = idx / curr_cols;
+                int col_packed = idx - row * curr_cols;
+                int k_base = k_tile + col_packed * 2;
+                int a_smem_idx = row * TileKPacked + col_packed;
+                DEBUG_OOB_SMEM_1D("a_packed_stage", a_smem_idx, TileM * TileKPacked, a_stage);
+                uint8_t packed = a_stage[a_smem_idx];
+                half scale_h = __float2half(0.0f);
+                if (row < tile_rows) {
+                    int scale_col = col_packed >> 3;
+                    if (scale_col < scale_count) {
+                        int sfa_base_scale = k_tile >> 4;
+                        int sfa_offset = (L == 1) ? 0 : (sfa_base_scale % 128);
+                        int sfa_idx = row * sfa_stage_stride + sfa_offset + scale_col;
+                        int sfa_size = TileM * sfa_stage_stride;
+                        DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, sfa_size, sfa_stage[stage]);
+                        scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][sfa_idx]));
+                    }
+                }
+                half v0 = __float2half(0.0f);
+                half v1 = __float2half(0.0f);
+                if (row < tile_rows && k_base < K) {
+                    v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+                }
+                if (row < tile_rows && (k_base + 1) < K) {
+                    v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+                }
 
 #ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            /* printf("DECODE LOOP START: k_tile=%d tile_rows=%d curr_cols=%d loop_limit=%d\n",
-                   k_tile, tile_rows, curr_cols, tile_rows * curr_cols); */
-        }
+                if (blockIdx.x == 0 && blockIdx.y == 0 && col_packed == 0 && row < 5) {
+                    int sfa_idx_check = row * K_scales_padded + (col_packed >> 3);
+                    uint8_t sfa_byte = sfa_stage[stage][sfa_idx_check];
+                    DEBUG_PRINT_ERROR("A_decode k_tile=%d stage=%d: row=%d col=%d k_base=%d packed=0x%02x scale=%.4f sfa_idx=%d sfa_byte=0x%02x v0=%.4f v1=%.4f\n",
+                                      k_tile, stage, row, col_packed, k_base, packed, __half2float(scale_h), sfa_idx_check, sfa_byte, __half2float(v0), __half2float(v1));
+                }
 #endif
 
-        for (int idx = tid; idx < tile_rows * curr_cols; idx += Threads) {
-            int row = idx / curr_cols;
-            int col_packed = idx - row * curr_cols;
-            int k_base = k_tile + col_packed * 2;
-            int a_smem_idx = row * TileKPacked + col_packed;
-            DEBUG_OOB_SMEM_1D("a_packed_stage", a_smem_idx, TileM * TileKPacked, a_stage);
-            uint8_t packed = a_stage[a_smem_idx];
-            half scale_h = __float2half(0.0f);
-            if (row < tile_rows) {
-                int scale_col = col_packed >> 3;
-                if (scale_col < scale_count) {
-                    // Use template parameter sfa_stride instead of runtime (L == 1) ? 16 : 128
-                    int sfa_base_scale = k_tile >> 4;
-                    int sfa_offset = (sfa_stride == 16) ? 0 : (sfa_base_scale % sfa_stride);
-                    int sfa_idx = row * sfa_stride + sfa_offset + scale_col;
-                    int sfa_size = TileM * sfa_stride;
-                    DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, sfa_size, sfa_stage[stage]);
-                    scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][sfa_idx]));
+                half* a_dst = a_f16_smem + row * a_stride;
+                int dst_idx0 = col_packed * 2;
+                int dst_idx1 = col_packed * 2 + 1;
+                DEBUG_OOB_SMEM_1D("a_f16_smem", row * a_stride + dst_idx0, TileM * a_stride, a_f16_smem);
+                a_dst[dst_idx0] = v0;
+                DEBUG_OOB_SMEM_1D("a_f16_smem", row * a_stride + dst_idx1, TileM * a_stride, a_f16_smem);
+                a_dst[dst_idx1] = v1;
+            }
+        }
+        __syncthreads();
+
+        if (is_producer && warp_id == 1) {
+            for (int kk = lane_id; kk < curr_k; kk += 32) {
+                half v = __float2half(0.0f);
+                if (k_tile + kk < K) {
+                    int b_vec_idx = k_tile + kk;
+                    DEBUG_OOB_SMEM_1D("b_vec_smem", b_vec_idx, K, b_vec_smem);
+                    v = b_vec_smem[b_vec_idx];
+                }
+                half* b_row = b_tile_smem + kk * 8;
+#pragma unroll
+                for (int n = 0; n < 8; ++n) {
+                    int b_tile_idx = kk * 8 + n;
+                    DEBUG_OOB_SMEM_1D("b_tile_smem", b_tile_idx, TileK * 8, b_tile_smem);
+                    b_row[n] = v;
                 }
             }
-            half v0 = __float2half(0.0f);
-            half v1 = __float2half(0.0f);
-            if (row < tile_rows && k_base < K) {
-                v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
-            }
-            if (row < tile_rows && (k_base + 1) < K) {
-                v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
-            }
+        }
+        __syncthreads();
+
+        int active_warps = (tile_rows + 15) / 16;
+        if (is_consumer && (warp_id - 2) < active_warps) {
+            int warp_row = (warp_id - 2) * 16;
+            for (int kk = 0; kk < curr_k; kk += 16) {
+                const half* a_tile_ptr = a_f16_smem + warp_row * a_stride + kk;
+                int a_tile_base_idx = warp_row * a_stride + kk;
+                DEBUG_OOB_SMEM_1D("a_f16_smem_tile", a_tile_base_idx, TileM * a_stride, a_f16_smem);
+                uint32_t a_base = cvta_to_shared_u32(a_tile_ptr);
+
+                int matrix_id = lane_id / 8;
+                int row_in_matrix = lane_id % 8;
+                int block_row = (matrix_id & 1) ? 8 : 0;
+                int block_col = (matrix_id >= 2) ? 8 : 0;
+
+                int a_row = block_row + row_in_matrix;
+                int a_col = block_col;
+
+                uint32_t a_addr = a_base + (static_cast<uint32_t>(a_row) * a_stride + a_col) * sizeof(half);
+                unsigned a0, a1, a2, a3;
+                asm volatile(
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16 { %0, %1, %2, %3 }, [%4];\n"
+                    : "=r"(a0), "=r"(a1), "=r"(a2), "=r"(a3)
+                    : "r"(a_addr)
+                );
 
 #ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && col_packed == 0 && row < 5) {
-                int sfa_idx_check = row * K_scales_padded + (col_packed >> 3);
-                uint8_t sfa_byte = sfa_stage[stage][sfa_idx_check];
-                DEBUG_PRINT_ERROR("A_decode k_tile=%d stage=%d: row=%d col=%d k_base=%d packed=0x%02x scale=%.4f sfa_idx=%d sfa_byte=0x%02x v0=%.4f v1=%.4f\n",
-                                  k_tile, stage, row, col_packed, k_base, packed, __half2float(scale_h), sfa_idx_check, sfa_byte, __half2float(v0), __half2float(v1));
+                if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id < 16) {
+                    half* a0_h = reinterpret_cast<half*>(&a0);
+                    half* a1_h = reinterpret_cast<half*>(&a1);
+                    half* a2_h = reinterpret_cast<half*>(&a2);
+                    half* a3_h = reinterpret_cast<half*>(&a3);
+                }
+#endif
+
+                const half* b_tile_ptr = b_tile_smem + kk * 8;
+                DEBUG_OOB_SMEM_1D("b_tile_smem_tile", kk * 8, TileK * 8, b_tile_smem);
+                uint32_t b_base = cvta_to_shared_u32(b_tile_ptr);
+
+                int b_matrix_id = (lane_id / 8) % 2;
+                int b_row_in_matrix = lane_id % 8;
+                int b_row = b_matrix_id * 8 + b_row_in_matrix;
+
+                uint32_t b_addr = b_base + static_cast<uint32_t>(b_row) * 8 * sizeof(half);
+                unsigned b0, b1;
+                asm volatile(
+                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 { %0, %1 }, [%2];\n"
+                    : "=r"(b0), "=r"(b1)
+                    : "r"(b_addr)
+                );
+
+                asm volatile(
+                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                    "{ %0, %1, %2, %3 }, "
+                    "{ %4, %5, %6, %7 }, "
+                    "{ %8, %9 }, "
+                    "{ %0, %1, %2, %3 };\n"
+                    : "+f"(c_frag_0), "+f"(c_frag_1), "+f"(c_frag_2), "+f"(c_frag_3)
+                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1)
+                );
+
+                if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id == 0) {
+                }
+
+                if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id == 0) {
+                }
+
+                if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && tid == 0) {
+                }
+            }
+
+            if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
+            }
+        }
+
+        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
+        }
+
+        // Caller handles sync between tiles
+        __syncthreads();
+
+        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
+        }
+
+        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+        }
+    }
+
+    if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+    }
+
+    // Writeback
+    int active_warps_total = (tile_rows + 15) / 16;
+    if (is_consumer && (warp_id - 2) < active_warps_total) {
+        int warp_row_offset = (warp_id - 2) * 16;
+
+        int octet = lane_id / 4;
+        int tid_in_octet = lane_id % 4;
+
+        int row0 = octet;
+        int row1 = octet + 8;
+
+        int col = tid_in_octet * 2;
+
+#ifndef NDEBUG
+        if (blockIdx.x == 0 && blockIdx.y == 0 && warp_id == 2 && lane_id < 4) {
+            DEBUG_PRINT_ERROR("PRE_STORE_CHECK: lane=%d octet=%d tid_in_oct=%d col=%d\n",
+                              lane_id, octet, tid_in_octet, col);
+        }
+#endif
+
+        if (col == 0) {
+            int global_row0 = m_tile + warp_row_offset + row0;
+            int global_row1 = m_tile + warp_row_offset + row1;
+
+#ifndef NDEBUG
+            if (blockIdx.x == 0 && blockIdx.y == 0 && warp_id == 2) {
+                DEBUG_PRINT_ERROR("D_STORE: warp=%d lane=%d octet=%d tid_in_oct=%d col=%d row0=%d row1=%d g0=%d g1=%d c0=%.2f c2=%.2f\n",
+                                  warp_id, lane_id, octet, tid_in_octet, col, row0, row1,
+                                  global_row0, global_row1, c_frag_0, c_frag_2);
             }
 #endif
 
-            half* a_dst = a_f16_smem + row * a_stride;
-            int dst_idx0 = col_packed * 2;
-            int dst_idx1 = col_packed * 2 + 1;
-            DEBUG_OOB_SMEM_1D("a_f16_smem", row * a_stride + dst_idx0, TileM * a_stride, a_f16_smem);
-            a_dst[dst_idx0] = v0;
-            DEBUG_OOB_SMEM_1D("a_f16_smem", row * a_stride + dst_idx1, TileM * a_stride, a_f16_smem);
-            a_dst[dst_idx1] = v1;
-        }
-    }
-    __syncthreads();
-    __syncthreads();
-
-    if (is_producer && warp_id == 1) {
-        for (int kk = lane_id; kk < curr_k; kk += 32) {
-            half v = __float2half(0.0f);
-            if (k_tile + kk < K) {
-                int b_vec_idx = k_tile + kk;
-                DEBUG_OOB_SMEM_1D("b_vec_smem", b_vec_idx, K, b_vec_smem);
-                v = b_vec_smem[b_vec_idx];
+            if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
             }
-            half* b_row = b_tile_smem + kk * 8;
-#pragma unroll
-            for (int n = 0; n < 8; ++n) {
-                int b_tile_idx = kk * 8 + n;
-                DEBUG_OOB_SMEM_1D("b_tile_smem", b_tile_idx, TileK * 8, b_tile_smem);
-                b_row[n] = v;
+
+            if (global_row0 < M) {
+                DEBUG_OOB_GLOBAL_1D("D_batch", global_row0, M, D_batch);
+                D_batch[global_row0] = __float2half(c_frag_0);
+            }
+            if (global_row1 < M) {
+                DEBUG_OOB_GLOBAL_1D("D_batch", global_row1, M, D_batch);
+                D_batch[global_row1] = __float2half(c_frag_2);
+            }
+
+            if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
             }
         }
     }
-    __syncthreads();
 
-    int active_warps = (tile_rows + 15) / 16;
-    if (is_consumer && (warp_id - 2) < active_warps) {
-        int warp_row = (warp_id - 2) * 16;
-        for (int kk = 0; kk < curr_k; kk += 16) {
-            const half* a_tile_ptr = a_f16_smem + warp_row * a_stride + kk;
-            int a_tile_base_idx = warp_row * a_stride + kk;
-            DEBUG_OOB_SMEM_1D("a_f16_smem_tile", a_tile_base_idx, TileM * a_stride, a_f16_smem);
-            uint32_t a_base = cvta_to_shared_u32(a_tile_ptr);
+    if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+    }
 
-            int matrix_id = lane_id / 8;
-            int row_in_matrix = lane_id % 8;
-            int block_row = (matrix_id & 1) ? 8 : 0;
-            int block_col = (matrix_id >= 2) ? 8 : 0;
-
-            int a_row = block_row + row_in_matrix;
-            int a_col = block_col;
-
-            uint32_t a_addr = a_base + (static_cast<uint32_t>(a_row) * a_stride + a_col) * sizeof(half);
-            unsigned a0, a1, a2, a3;
-            asm volatile(
-                "ldmatrix.sync.aligned.m8n8.x4.shared.b16 { %0, %1, %2, %3 }, [%4];\n"
-                : "=r"(a0), "=r"(a1), "=r"(a2), "=r"(a3)
-                : "r"(a_addr)
-            );
-
-#ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id < 16) {
-                half* a0_h = reinterpret_cast<half*>(&a0);
-                half* a1_h = reinterpret_cast<half*>(&a1);
-                half* a2_h = reinterpret_cast<half*>(&a2);
-                half* a3_h = reinterpret_cast<half*>(&a3);
-            }
+    if (L > 1 && tid == 0) {
+    }
 #endif
-
-            const half* b_tile_ptr = b_tile_smem + kk * 8;
-            DEBUG_OOB_SMEM_1D("b_tile_smem_tile", kk * 8, TileK * 8, b_tile_smem);
-            uint32_t b_base = cvta_to_shared_u32(b_tile_ptr);
-
-            int b_matrix_id = (lane_id / 8) % 2;
-            int b_row_in_matrix = lane_id % 8;
-            int b_row = b_matrix_id * 8 + b_row_in_matrix;
-
-            uint32_t b_addr = b_base + static_cast<uint32_t>(b_row) * 8 * sizeof(half);
-            unsigned b0, b1;
-            asm volatile(
-                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 { %0, %1 }, [%2];\n"
-                : "=r"(b0), "=r"(b1)
-                : "r"(b_addr)
-            );
-
-            asm volatile(
-                "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                "{ %0, %1, %2, %3 }, "
-                "{ %4, %5, %6, %7 }, "
-                "{ %8, %9 }, "
-                "{ %0, %1, %2, %3 };\n"
-                : "+f"(c_frag_0), "+f"(c_frag_1), "+f"(c_frag_2), "+f"(c_frag_3)
-                : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1)
-            );
-
-            if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id == 0) {
-            }
-        }
-    }
 }
+
+// RANK-2 kernel: CTA-only launch (L == 1)
 template<int TileM, int TileK, int Threads>
 __global__ void __launch_bounds__(Threads)
 fp4gemv_rank2_cta(
@@ -660,7 +753,7 @@ fp4gemv_rank2_cta(
 #if __CUDA_ARCH__ >= 700
     constexpr int TileKPacked = TileK / 2;
     constexpr int TileScaleCount = TileK / 16;
-    constexpr int SfaBoxK = 16;  // Rank-2: SWIZZLE_NONE
+    constexpr int SfaBoxK = 16;  // Rank-2: SWIZZLE_NONE, small box
     constexpr int StageCount = 3;
     constexpr int a_stride = TileK + 8;
     constexpr int ProducerThreads = 64;
@@ -676,9 +769,7 @@ fp4gemv_rank2_cta(
     if (batch >= L || m_tile >= M) return;
 
     const int K_packed = K >> 1;
-    // K_scales_padded is passed as parameter - use it for tensor access and validity checks
-    // Keep K_scales as local variable for lambda capture compatibility (though we use K_scales_padded for SFA)
-    const int K_scales = K >> 4;  // Used for SFB (not padded) - lambda needs this
+    const int K_scales = K >> 4;
     const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
 
     const uint8_t* A_batch = A_packed + static_cast<size_t>(batch) * M * K_packed;
@@ -691,26 +782,14 @@ fp4gemv_rank2_cta(
 
 #ifndef NDEBUG
     if (tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        DEBUG_PRINT_ERROR("KERNEL STARTING: grid=(%d,%d,%d) blockDim.x=%d M=%d K=%d L=%d\n",
+        DEBUG_PRINT_ERROR("KERNEL STARTING (RANK-2 CTA): grid=(%d,%d,%d) blockDim.x=%d M=%d K=%d L=%d\n",
                           gridDim.x, gridDim.y, gridDim.z, blockDim.x, M, K, L);
-    }
-    if (tid == 0) {
-        DEBUG_PRINT_ERROR("DBG block=(%d,%d,%d) tid=%d warp_id=%d lane_id=%d batch=%d m_tile=%d tile_rows=%d M=%d K=%d L=%d K_packed=%d K_scales_padded=%d\n",
-                          blockIdx.x, blockIdx.y, blockIdx.z,
-                          tid, warp_id, lane_id,
-                          batch, m_tile, tile_rows,
-                          M, K, L, K_packed, K_scales_padded);
-        DEBUG_PRINT_ERROR("DBG A_batch=%p B_batch=%p SFA_batch=%p SFB_batch=%p D_batch=%p smem=%p\n",
-                          (const void*)A_batch, (const void*)B_batch,
-                          (const void*)SFA_batch, (const void*)SFB_batch,
-                          (const void*)D_batch, (void*)smem);
     }
 #endif
 
     auto align_up = [] __device__(size_t x, size_t align) {
         return (x + align - 1) & ~(align - 1);
     };
-
 
     size_t offset = 0;
 
@@ -721,14 +800,12 @@ fp4gemv_rank2_cta(
         return reinterpret_cast<uint64_t*>(base);
     };
 
-    // Helper to align the *absolute* shared address (cvta_to_shared) to 128 bytes
     auto align_up_smem_128 = [&] __device__() {
         uint32_t addr = cvta_to_shared_u32(smem + offset);
         uint32_t aligned = (addr + 127u) & ~127u;
         offset += static_cast<size_t>(aligned - addr);
     };
 
-    // Helper to align to 1024 bytes (required for SWIZZLE_128B TMA)
     auto align_up_smem_1024 = [&] __device__() {
         uint32_t addr = cvta_to_shared_u32(smem + offset);
         uint32_t aligned = (addr + 1023u) & ~1023u;
@@ -739,23 +816,19 @@ fp4gemv_rank2_cta(
     uint64_t* mbar_b = alloc_mbar_array(1);
     uint64_t* mbar_sfb = alloc_mbar_array(1);
 
-    // TMA requires 128-byte alignment for destination addresses
     align_up_smem_128();
-
     uint8_t* b_packed_smem = smem + offset;
     offset += K_packed;
 
     align_up_smem_128();
-
     uint8_t* sfb_smem = smem + offset;
-    offset += (K >> 4);  // SFB scale factors (not padded)
+    offset += (K >> 4);
     offset = align_up(offset, 16);
 
     half* b_vec_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(K) * sizeof(half);
     offset = align_up(offset, 16);
 
-    // Ensure TMA destinations with SWIZZLE_128B are 1024-byte aligned in shared memory
     align_up_smem_1024();
     uint8_t* a_packed_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
@@ -763,18 +836,14 @@ fp4gemv_rank2_cta(
         offset += TileM * TileKPacked;
     }
 
-    // Scales with SWIZZLE_128B TMA also need 1024-byte alignment
     align_up_smem_1024();
     uint8_t* sfa_stage[StageCount];
-    // For rank-2 (L=1): allocate TileM * 16 (matching TMA box_k)
-    // For rank-3 (L>1): allocate TileM * 128 (matching TMA box_k)
-    int sfa_stage_stride = (L == 1) ? (TileM * 16) : (TileM * 128);
+    int sfa_stage_stride = TileM * SfaBoxK;
     for (int s = 0; s < StageCount; ++s) {
         sfa_stage[s] = smem + offset;
         offset += sfa_stage_stride;
     }
 
-    // Tensor Core operand tiles in shared memory: also 128-byte aligned
     align_up_smem_128();
     half* a_f16_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(TileM) * a_stride * sizeof(half);
@@ -786,18 +855,8 @@ fp4gemv_rank2_cta(
 
 #if __CUDA_ARCH__ >= 900
     const bool use_tma_a = (desc_A != nullptr);
-#ifndef NDEBUG
-    if (tid == 0 && blockIdx.x == 0) {
-        DEBUG_PRINT_ERROR("CUDA_ARCH=%d use_tma_a=%d desc_A=%p\n", __CUDA_ARCH__, use_tma_a, (const void*)desc_A);
-    }
-#endif
 #else
     const bool use_tma_a = false;
-#ifndef NDEBUG
-    if (tid == 0 && blockIdx.x == 0) {
-        DEBUG_PRINT_ERROR("CUDA_ARCH=%d < 900, TMA disabled\n", __CUDA_ARCH__);
-    }
-#endif
 #endif
 
     __shared__ uint32_t stage_phase_smem[StageCount];
@@ -806,63 +865,20 @@ fp4gemv_rank2_cta(
         for (int s = 0; s < StageCount; ++s) {
             stage_phase_smem[s] = 0;
         }
-        __threadfence_block();  // Ensure stage_phase init visible to all warps
+        __threadfence_block();
     }
-
-#ifndef NDEBUG
-    // Verify alignment of shared-memory regions
-    // SWIZZLE_128B TMA regions need 1024-byte alignment
-    if (tid == 0) {
-        for (int s = 0; s < StageCount; ++s) {
-            uint32_t addr = cvta_to_shared_u32(a_packed_stage[s]);
-            if (addr % 1024 != 0) {
-                /* printf("SMEM ALIGN ERROR: a_packed_stage[%d] addr=%u not 1024-byte aligned (mod1024=%u)\n",
-                       s, addr, addr % 1024); */
-            }
-            uint32_t sfa_addr = cvta_to_shared_u32(sfa_stage[s]);
-            if (sfa_addr % 1024 != 0) {
-                /* printf("SMEM ALIGN ERROR: sfa_stage[%d] addr=%u not 1024-byte aligned (mod1024=%u)\n",
-                       s, sfa_addr, sfa_addr % 1024); */
-            }
-        }
-        uint32_t a_f16_addr = cvta_to_shared_u32(a_f16_smem);
-        if (a_f16_addr % 128 != 0) {
-            DEBUG_PRINT_ERROR("SMEM ALIGN ERROR: a_f16_smem addr=%u not 128-byte aligned (mod128=%u)\n",
-                              a_f16_addr, a_f16_addr % 128);
-        }
-        uint32_t b_tile_addr = cvta_to_shared_u32(b_tile_smem);
-        if (b_tile_addr % 128 != 0) {
-            DEBUG_PRINT_ERROR("SMEM ALIGN ERROR: b_tile_smem addr=%u not 128-byte aligned (mod128=%u)\n",
-                              b_tile_addr, b_tile_addr % 128);
-        }
-    }
-#endif
 
 #if __CUDA_ARCH__ >= 900
     if (tid == 0 && use_tma_a) {
-        // RANK-3 ONLY: Cluster fence (CUTLASS pattern from barrier.h)
-        if (L > 1) {
-            asm volatile(
-                "{\n\t"
-                "fence.mbarrier_init.release.cluster; \n"
-                "}"
-                ::
-                : "memory"
-            );
-        }
-
         for (int s = 0; s < StageCount; ++s) {
             mbarrier_init(mbar_stage(mbar_a, s));
         }
-        // Initialize barriers for B and SFB
         mbarrier_init(mbar_b);
         mbarrier_init(mbar_sfb);
     }
 #endif
-    // Sync to ensure remote barriers are initialized (cluster-wide for RANK-3)
-    sync_cluster_or_block(L);
+    __syncthreads();
 
-    // Verify TMA descriptors are valid
     if (!desc_A || !desc_SFA || !desc_B || !desc_SFB) {
 #ifndef NDEBUG
         if (tid == 0) {
@@ -871,202 +887,67 @@ fp4gemv_rank2_cta(
                               (const void*)desc_B, (const void*)desc_SFB);
         }
 #endif
-        return;  // Abort kernel execution
+        return;
     }
 
 #if __CUDA_ARCH__ >= 900
-    // Use TMA for B and SFB - need proper barrier management for multi-tile loads
     constexpr int kTMABoxLimit = 256;
     const int b_chunks = (K_packed + (kTMABoxLimit - 1)) / kTMABoxLimit;
-    const int sfb_chunks = ((K >> 4) + (kTMABoxLimit - 1)) / kTMABoxLimit;  // SFB not padded
+    const int sfb_chunks = ((K >> 4) + (kTMABoxLimit - 1)) / kTMABoxLimit;
 
-    // Calculate total expected bytes for all chunks
     uint32_t total_b_bytes = static_cast<uint32_t>(K_packed);
-    uint32_t total_sfb_bytes = static_cast<uint32_t>(K >> 4);  // SFB not padded
+    uint32_t total_sfb_bytes = static_cast<uint32_t>(K >> 4);
 
-    // RANK-2 (L=1): Original code path - DO NOT TOUCH
-    if (L == 1) {
-        if (warp_id == 0 && lane_id == 0) {
-            mbarrier_arrive_expect_tx(mbar_b, total_b_bytes);
-            mbarrier_arrive_expect_tx(mbar_sfb, total_sfb_bytes);
-        }
-    }
-    // RANK-3 (L>1): Cluster barrier setup - Only CTA0 sets expect_tx
-    else {
-        uint32_t cta_rank = blockIdx.x % 2;
-        if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
-            // Only CTA0 sets expect_tx on its local barrier
-            // TMA from both CTAs will route to CTA0's barrier via peer mask
-            // Apply Sm100MmaPeerBitMask to barrier addresses (FIX #2)
-            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
-            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
-            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
-
-            asm volatile(
-                "{\n\t"
-                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
-                "}"
-                :
-                : "r"(mbar_b_addr), "r"(total_b_bytes)
-                : "memory"
-            );
-
-            asm volatile(
-                "{\n\t"
-                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
-                "}"
-                :
-                : "r"(mbar_sfb_addr), "r"(total_sfb_bytes)
-                : "memory"
-            );
-        }
-    }
-
-    // Issue TMA loads
     if (warp_id == 0 && lane_id == 0) {
+        mbarrier_arrive_expect_tx(mbar_b, total_b_bytes);
+        mbarrier_arrive_expect_tx(mbar_sfb, total_sfb_bytes);
+    }
 
-        // Issue all TMA loads (barrier expects total bytes from all loads)
+    if (warp_id == 0 && lane_id == 0) {
         for (int tile_idx = 0; tile_idx < b_chunks; ++tile_idx) {
             int elem_offset = tile_idx * kTMABoxLimit;
             int chunk_size = (elem_offset + kTMABoxLimit <= K_packed) ? kTMABoxLimit : (K_packed - elem_offset);
             (void)chunk_size;
             uint8_t* dst = b_packed_smem + elem_offset;
-
             uint32_t smem_addr = cvta_to_shared_u32(dst);
-
-            if (L == 1) {
-                // Rank-2: CTA launch (no cluster)
-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_b);
-                asm volatile(
-                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
-                    "[%0], [%1, {%3, %4}], [%2];\n"
-                    :
-                    : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
-                    : "memory"
-                );
-            } else {
-                // Rank-3: Cluster launch with cta_group::2
-                constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
-                uint64_t cache_hint = 0;
-                asm volatile(
-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
-                    "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
-                    :
-                    : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
-                      "l"(cache_hint)
-                    : "memory"
-                );
-            }
+            uint32_t mbar_addr = cvta_to_shared_u32(mbar_b);
+            asm volatile(
+                "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+                "[%0], [%1, {%3, %4}], [%2];\n"
+                :
+                : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
+                  "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
+                : "memory"
+            );
         }
 
         for (int tile_idx = 0; tile_idx < sfb_chunks; ++tile_idx) {
             int elem_offset = tile_idx * kTMABoxLimit;
-            const int K_sfb = (K >> 4);  // SFB not padded
+            const int K_sfb = (K >> 4);
             int chunk_size = (elem_offset + kTMABoxLimit <= K_sfb) ? kTMABoxLimit : (K_sfb - elem_offset);
             (void)chunk_size;
             uint8_t* dst = sfb_smem + elem_offset;
-
             uint32_t smem_addr = cvta_to_shared_u32(dst);
-
-            if (L == 1) {
-                // Rank-2: CTA launch (no cluster)
-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb);
-                asm volatile(
-                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
-                    "[%0], [%1, {%3, %4}], [%2];\n"
-                    :
-                    : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
-                    : "memory"
-                );
-            } else {
-                // Rank-3: Cluster launch with cta_group::2
-                constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
-                uint64_t cache_hint = 0;
-                asm volatile(
-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
-                    "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
-                    :
-                    : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
-                      "l"(cache_hint)
-                    : "memory"
-                );
-            }
-        }
-    }
-
-    // All threads wait on barriers
-    if (L == 1) {
-        // RANK-2: Wait locally (DO NOT TOUCH)
-        mbarrier_wait_parity(mbar_b, 0);
-        mbarrier_wait_parity(mbar_sfb, 0);
-    } else {
-        // RANK-3: With shared::cluster TMA + peer mask, only CTA0's barrier gets updated
-        // Only CTA0 waits on barrier, then all CTAs sync via cluster_arrive/cluster_wait
-        uint32_t cta_rank = blockIdx.x % 2;
-        if (cta_rank == 0) {
-            // Only CTA0 waits on the barrier
-            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
-            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
-
+            uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb);
             asm volatile(
-                "{\n\t"
-                ".reg .pred P1; \n\t"
-                "LAB_WAIT_B: \n\t"
-                "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
-                "@!P1 bra.uni LAB_WAIT_B; \n\t"
-                "}"
+                "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+                "[%0], [%1, {%3, %4}], [%2];\n"
                 :
-                : "r"(mbar_b_addr), "r"(0)
-                : "memory"
-            );
-
-            asm volatile(
-                "{\n\t"
-                ".reg .pred P1; \n\t"
-                "LAB_WAIT_SFB: \n\t"
-                "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
-                "@!P1 bra.uni LAB_WAIT_SFB; \n\t"
-                "}"
-                :
-                : "r"(mbar_sfb_addr), "r"(0)
+                : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
+                  "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
                 : "memory"
             );
         }
-        // RANK-3: Cluster-wide sync after CTA0 waited for TMA (using cooperative_groups)
-        sync_cluster_or_block(L);
     }
+
+    mbarrier_wait_parity(mbar_b, 0);
+    mbarrier_wait_parity(mbar_sfb, 0);
 #endif
     __syncthreads();
 
-        // DEBUG: Print first 4 SFB scale bytes and first 4 B packed bytes (first tile only)
-        // DISABLED FOR PERFORMANCE: Excessive kernel // printf statements cause hang
-        // if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        // // printf("=== KERNEL DEBUG (block 0,0) ===\n");
-        // // printf("SFB raw bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
-        //        sfb_smem[0], sfb_smem[1], sfb_smem[2], sfb_smem[3]);
-        // // printf("SFB decoded FP8 [0-3]: %.6f %.6f %.6f %.6f\n",
-        //        decode_fp8_e4m3(sfb_smem[0]), decode_fp8_e4m3(sfb_smem[1]),
-        //        decode_fp8_e4m3(sfb_smem[2]), decode_fp8_e4m3(sfb_smem[3]));
-        // // printf("B packed bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
-        //        b_packed_smem[0], b_packed_smem[1], b_packed_smem[2], b_packed_smem[3]);
-        //
-        // const int K_sfb = (K >> 4);  // SFB not padded
-        // for (int i = 0; i < 4; i++) {
-        //     size_t sfb_idx = static_cast<size_t>(batch) * 128 * K_sfb + static_cast<size_t>(i);
-        //     // printf("SFB contiguous_idx[row=0,col=%d,batch=%d] = %llu\n",
-        //            i, batch, (unsigned long long)sfb_idx);
-        // }
-        // }
     __syncthreads();
 
-    // Decode B vector
-    const int K_sfb_decode = (K >> 4);  // SFB not padded
+    const int K_sfb_decode = (K >> 4);
     for (int idx = tid; idx < K_packed; idx += Threads) {
         int k_base = idx * 2;
         int scale_idx = idx >> 3;
@@ -1077,12 +958,10 @@ fp4gemv_rank2_cta(
             DEBUG_OOB_SMEM_1D("sfb_smem", scale_idx, K_sfb_decode, sfb_smem);
             scale_h = __float2half(decode_fp8_e4m3(sfb_smem[scale_idx]));
         }
-        // FIXED: LOW nibble = element 0, HIGH nibble = element 1 (matches reference implementation)
-        half v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);         // LOW nibble -> element 0
-        half v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);  // HIGH nibble -> element 1
+        half v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+        half v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
 
 #ifndef NDEBUG
-        // Debug: print first few B decode values
         if (blockIdx.x == 0 && blockIdx.y == 0 && idx < 4) {
             DEBUG_PRINT_ERROR("B_decode: idx=%d packed=0x%02x scale_idx=%d scale=%.4f v0=%.4f v1=%.4f\n",
                               idx, packed, scale_idx, __half2float(scale_h), __half2float(v0), __half2float(v1));
@@ -1092,44 +971,17 @@ fp4gemv_rank2_cta(
         if (k_base < K) {
             DEBUG_OOB_SMEM_1D("b_vec_smem", k_base, K, b_vec_smem);
             b_vec_smem[k_base] = v0;
-        } else {
-#ifndef NDEBUG
-            DEBUG_PRINT_ERROR("WARN: b_vec_smem store OOB: k_base=%d K=%d at %s:%d\n",
-                              k_base, K, __FILE__, __LINE__);
-#endif
         }
         if (k_base + 1 < K) {
             DEBUG_OOB_SMEM_1D("b_vec_smem", k_base + 1, K, b_vec_smem);
             b_vec_smem[k_base + 1] = v1;
-        } else {
-#ifndef NDEBUG
-            DEBUG_PRINT_ERROR("WARN: b_vec_smem store OOB: k_base+1=%d K=%d at %s:%d\n",
-                              k_base + 1, K, __FILE__, __LINE__);
-#endif
         }
     }
     __syncthreads();
 
-    // DEBUG: Print first 8 decoded b_vec_smem values (first tile only)
-    // DISABLED FOR PERFORMANCE: Excessive kernel // printf statements cause hang
-    // if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-    //     // printf("b_vec_smem decoded [0-7]: %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
-    //            __half2float(b_vec_smem[0]), __half2float(b_vec_smem[1]),
-    //            __half2float(b_vec_smem[2]), __half2float(b_vec_smem[3]),
-    //            __half2float(b_vec_smem[4]), __half2float(b_vec_smem[5]),
-    //            __half2float(b_vec_smem[6]), __half2float(b_vec_smem[7]));
-    //     // printf("DEBUG: After b_vec_smem decode print, about to syncthreads\n");
-    // }
     __syncthreads();
 
-#ifndef NDEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        /* printf("DEBUG: About to call first prefetch_tile, use_tma_a=%d is_producer=%d m_tile=%d K_packed=%d\n",
-               use_tma_a, is_producer, m_tile, K_packed); */
-    }
-#endif
-
-    // Prefetch first tiles using TMA
+    // Prefetch first tiles using TMA (rank-2 CTA path)
     prefetch_tile<TileM, TileK>(
         0, 0,
         use_tma_a, is_producer, warp_id, lane_id,
@@ -1138,17 +990,7 @@ fp4gemv_rank2_cta(
         desc_A, desc_SFA
     );
 
-#ifndef NDEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        // printf("DEBUG: First prefetch_tile completed\n");
-    }
-#endif
     if (TileK < K) {
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            // printf("DEBUG: About to call second prefetch_tile, TileK=%d K=%d\n", TileK, K);
-        }
-#endif
         prefetch_tile<TileM, TileK>(
             1, TileK,
             use_tma_a, is_producer, warp_id, lane_id,
@@ -1156,44 +998,14 @@ fp4gemv_rank2_cta(
             a_packed_stage, sfa_stage, mbar_a,
             desc_A, desc_SFA
         );
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            // printf("DEBUG: Second prefetch_tile completed\n");
-        }
-#endif
     }
-
-#ifndef NDEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        // printf("DEBUG: About to enter K-tile loop\n");
-    }
-#endif
-
-    float c_frag_0 = 0.0f;
-    float c_frag_1 = 0.0f;
-    float c_frag_2 = 0.0f;
-    float c_frag_3 = 0.0f;
 
     for (int k_tile = 0; k_tile < K; k_tile += TileK) {
         int tile_idx = k_tile / TileK;
         int stage = tile_idx % StageCount;
 
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            /* printf("K-TILE LOOP START: k_tile=%d tile_idx=%d stage=%d K=%d TileK=%d\n",
-                   k_tile, tile_idx, stage, K, TileK); */
-        }
-#endif
-
         int next_stage = (stage + 2) % StageCount;
         int next_k = k_tile + 2 * TileK;
-
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            /* printf("K-TILE: About to prefetch, next_k=%d next_stage=%d (condition: %d)\n",
-                   next_k, next_stage, next_k < K); */
-        }
-#endif
 
         if (next_k < K) {
             prefetch_tile<TileM, TileK>(
@@ -1203,35 +1015,12 @@ fp4gemv_rank2_cta(
                 a_packed_stage, sfa_stage, mbar_a,
                 desc_A, desc_SFA
             );
-#ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                // printf("K-TILE: Prefetch completed for next_k=%d\n", next_k);
-            }
-#endif
         }
-
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            // printf("K-TILE: About to wait on mbarrier, use_tma_a=%d stage=%d\n", use_tma_a, stage);
-        }
-#endif
 
         if (use_tma_a) {
 #if __CUDA_ARCH__ >= 900
             mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
-
-#ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                // printf("K-TILE: Mbarrier wait completed, about to cluster sync\n");
-            }
-#endif
-            // RANK-3: Cluster-wide sync after CTA0 waited - prevents CTA1 from racing ahead
-            sync_cluster_or_block(L);
-#ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                // printf("K-TILE: After syncthreads, updating phase\n");
-            }
-#endif
+            __syncthreads();
             if (tid == 0) {
                 stage_phase_smem[stage] ^= 1;
             }
@@ -1241,168 +1030,19 @@ fp4gemv_rank2_cta(
         }
         __syncthreads();
 
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            // printf("K-TILE: After final syncthreads, starting decode at k_tile=%d\n", k_tile);
-        }
-#endif
-
-#ifndef NDEBUG
-        // Dump first few bytes of SFA shared memory after TMA load
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0 && k_tile == 0) {
-            // printf("SFA_SMEM_DUMP stage=%d:\n", stage);
-            /* printf("  [0-15]  = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                   sfa_stage[stage][0], sfa_stage[stage][1], sfa_stage[stage][2], sfa_stage[stage][3],
-                   sfa_stage[stage][4], sfa_stage[stage][5], sfa_stage[stage][6], sfa_stage[stage][7],
-                   sfa_stage[stage][8], sfa_stage[stage][9], sfa_stage[stage][10], sfa_stage[stage][11],
-                   sfa_stage[stage][12], sfa_stage[stage][13], sfa_stage[stage][14], sfa_stage[stage][15]); */
-            /* printf("  [16-31] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                   sfa_stage[stage][16], sfa_stage[stage][17], sfa_stage[stage][18], sfa_stage[stage][19],
-                   sfa_stage[stage][20], sfa_stage[stage][21], sfa_stage[stage][22], sfa_stage[stage][23],
-                   sfa_stage[stage][24], sfa_stage[stage][25], sfa_stage[stage][26], sfa_stage[stage][27],
-                   sfa_stage[stage][28], sfa_stage[stage][29], sfa_stage[stage][30], sfa_stage[stage][31]); */
-            /* printf("  [32-47] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                   sfa_stage[stage][32], sfa_stage[stage][33], sfa_stage[stage][34], sfa_stage[stage][35],
-                   sfa_stage[stage][36], sfa_stage[stage][37], sfa_stage[stage][38], sfa_stage[stage][39],
-                   sfa_stage[stage][40], sfa_stage[stage][41], sfa_stage[stage][42], sfa_stage[stage][43],
-                   sfa_stage[stage][44], sfa_stage[stage][45], sfa_stage[stage][46], sfa_stage[stage][47]); */
-        }
-#endif
-
-        process_tile<TileM, TileK, Threads, 16>(
-            k_tile, stage, tile_rows,
-            a_packed_stage, sfa_stage,
-            b_vec_smem, a_f16_smem, b_tile_smem,
-            M, K, K_scales_padded,
-            tid, warp_id, lane_id,
-            is_producer, is_consumer,
-            c_frag_0, c_frag_1, c_frag_2, c_frag_3
+        // Call core logic
+        fp4_gemv_core_logic<TileM, TileK, Threads, StageCount, a_stride>(
+            a_packed_stage, sfa_stage, mbar_a, b_vec_smem, a_f16_smem, b_tile_smem, D_batch,
+            M, K, L, K_scales_padded, m_tile, tile_rows,
+            tid, warp_id, lane_id, is_producer, is_consumer,
+            stage_phase_smem, use_tma_a, SfaBoxK
         );
-
-
-        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
-            // printf("DEBUG RANK-3: Before sync at end of k_tile\n");
-        }
-
-        // Synchronize at end of k_tile: cluster-wide for RANK-3, CTA-local for RANK-2
-        sync_cluster_or_block(L);
-
-        // RANK-3 DEBUG: After sync
-        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
-            // printf("DEBUG RANK-3: After cluster sync\n");
-        }
-
-        // RANK-3 DEBUG: End of each K-tile iteration
-        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            /* printf("DEBUG RANK-3: K-TILE %d completed, next k_tile=%d\n",
-                   k_tile, k_tile + TileK); */
-        }
-    }
-
-    // RANK-3 DEBUG: Track where illegal instruction occurs
-    if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        // printf("DEBUG RANK-3: EXITED K-TILE LOOP - All K tiles completed\n");
-    }
-
-    // DEBUG: Print ALL fragments for lanes 0,4,8 to understand output distribution
-    // DISABLED FOR PERFORMANCE: Excessive kernel // printf statements cause hang
-    // if (blockIdx.x == 0 && blockIdx.y == 0 && is_consumer && warp_id == 2) {
-    //     int octet = lane_id / 4;
-    //     int tid_in_octet = lane_id % 4;
-    //     if (tid_in_octet == 0 && (lane_id == 0 || lane_id == 4 || lane_id == 8)) {
-    //         // printf("FINAL_SM100: lane=%d octet=%d ALL_FRAGS: c0=%.2f c1=%.2f c2=%.2f c3=%.2f (rows %d,%d)\n",
-    //                lane_id, octet, c_frag_0, c_frag_1, c_frag_2, c_frag_3,
-    //                m_tile + (warp_id-2)*16 + octet, m_tile + (warp_id-2)*16 + octet + 8);
-    //     }
-    // }
-
-    // m16n8k16.row.col.f32 output fragment layout per PTX ISA:
-    // C matrix is 16 rows x 8 cols, distributed across 32 threads with 4 floats each.
-    //
-    // For thread T (0-31), the 4 output registers map to C matrix positions:
-    //   Let octet = T / 4  (0-7, which octet of threads)
-    //   Let tid_in_octet = T % 4  (0-3, position within octet)
-    //
-    //   c_frag_0: C[octet + 0][tid_in_octet * 2 + 0]  -> row=octet,     col=tid_in_octet*2
-    //   c_frag_1: C[octet + 0][tid_in_octet * 2 + 1]  -> row=octet,     col=tid_in_octet*2+1
-    //   c_frag_2: C[octet + 8][tid_in_octet * 2 + 0]  -> row=octet+8,   col=tid_in_octet*2
-    //   c_frag_3: C[octet + 8][tid_in_octet * 2 + 1]  -> row=octet+8,   col=tid_in_octet*2+1
-    //
-    // So threads 0-3 cover rows 0,8 cols 0-7; threads 4-7 cover rows 1,9 cols 0-7; etc.
-    //
-    // For GEMV: B is broadcast to all 8 columns, so all columns of C are identical.
-    // We only need col 0 values, held by threads where tid_in_octet == 0 (i.e., T % 4 == 0).
-    // Those threads are: 0, 4, 8, 12, 16, 20, 24, 28
-    // They hold rows: 0,8 | 1,9 | 2,10 | 3,11 | 4,12 | 5,13 | 6,14 | 7,15
-
-    int active_warps_total = (tile_rows + 15) / 16;
-    if (is_consumer && (warp_id - 2) < active_warps_total) {
-        int warp_row_offset = (warp_id - 2) * 16;
-
-        int octet = lane_id / 4;           // 0-7
-        int tid_in_octet = lane_id % 4;    // 0-3
-
-        // Row this thread's c_frag_0 and c_frag_2 correspond to
-        int row0 = octet;      // c_frag_0 -> row 0-7
-        int row1 = octet + 8;  // c_frag_2 -> row 8-15
-
-        // Column this thread holds (for c_frag_0/c_frag_2)
-        int col = tid_in_octet * 2;  // 0, 2, 4, or 6
-
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && warp_id == 2 && lane_id < 4) {
-            DEBUG_PRINT_ERROR("PRE_STORE_CHECK: lane=%d octet=%d tid_in_oct=%d col=%d\n",
-                              lane_id, octet, tid_in_octet, col);
-        }
-#endif
-
-        // Since B was broadcast, all columns have same value.
-        // We only write from threads holding col 0 to avoid duplication.
-        if (col == 0) {
-            int global_row0 = m_tile + warp_row_offset + row0;
-            int global_row1 = m_tile + warp_row_offset + row1;
-
-#ifndef NDEBUG
-            // Debug ALL lanes that write (col==0) to see what they're storing
-            if (blockIdx.x == 0 && blockIdx.y == 0 && warp_id == 2) {
-                DEBUG_PRINT_ERROR("D_STORE: warp=%d lane=%d octet=%d tid_in_oct=%d col=%d row0=%d row1=%d g0=%d g1=%d c0=%.2f c2=%.2f\n",
-                                  warp_id, lane_id, octet, tid_in_octet, col, row0, row1,
-                                  global_row0, global_row1, c_frag_0, c_frag_2);
-            }
-#endif
-
-            // RANK-3 DEBUG: Before writeback
-            if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-                // printf("DEBUG RANK-3: BEFORE WRITEBACK to global memory\n");
-            }
-
-            if (global_row0 < M) {
-                DEBUG_OOB_GLOBAL_1D("D_batch", global_row0, M, D_batch);
-                D_batch[global_row0] = __float2half(c_frag_0);
-            }
-            if (global_row1 < M) {
-                DEBUG_OOB_GLOBAL_1D("D_batch", global_row1, M, D_batch);
-                D_batch[global_row1] = __float2half(c_frag_2);
-            }
-
-            // RANK-3 DEBUG: After writeback
-            if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-                // printf("DEBUG RANK-3: AFTER WRITEBACK to global memory\n");
-            }
-        }
-    }
-
-    // RANK-3 DEBUG: Kernel completion
-    if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        // printf("DEBUG RANK-3: KERNEL FINISHED successfully\n");
-    }
-
-    // Debug: Print for ALL CTAs to verify they all exit
-    if (L > 1 && tid == 0) {
-        // printf("DEBUG: CTA(%d,%d,%d) exiting\n", blockIdx.x, blockIdx.y, blockIdx.z);
     }
 #endif
-}template<int TileM, int TileK, int Threads>
+}
+
+// RANK-3 kernel: Cluster launch (L > 1)
+template<int TileM, int TileK, int Threads>
 __global__ void __launch_bounds__(Threads)
 fp4gemv_rank3_cluster(
     const uint8_t* __restrict__ A_packed,
@@ -1419,7 +1059,7 @@ fp4gemv_rank3_cluster(
 #if __CUDA_ARCH__ >= 700
     constexpr int TileKPacked = TileK / 2;
     constexpr int TileScaleCount = TileK / 16;
-    constexpr int SfaBoxK = 128;  // Rank-3: SWIZZLE_128B
+    constexpr int SfaBoxK = 128;  // Rank-3: SWIZZLE_128B, large box
     constexpr int StageCount = 3;
     constexpr int a_stride = TileK + 8;
     constexpr int ProducerThreads = 64;
@@ -1435,9 +1075,7 @@ fp4gemv_rank3_cluster(
     if (batch >= L || m_tile >= M) return;
 
     const int K_packed = K >> 1;
-    // K_scales_padded is passed as parameter - use it for tensor access and validity checks
-    // Keep K_scales as local variable for lambda capture compatibility (though we use K_scales_padded for SFA)
-    const int K_scales = K >> 4;  // Used for SFB (not padded) - lambda needs this
+    const int K_scales = K >> 4;
     const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
 
     const uint8_t* A_batch = A_packed + static_cast<size_t>(batch) * M * K_packed;
@@ -1450,26 +1088,14 @@ fp4gemv_rank3_cluster(
 
 #ifndef NDEBUG
     if (tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        DEBUG_PRINT_ERROR("KERNEL STARTING: grid=(%d,%d,%d) blockDim.x=%d M=%d K=%d L=%d\n",
+        DEBUG_PRINT_ERROR("KERNEL STARTING (RANK-3 CLUSTER): grid=(%d,%d,%d) blockDim.x=%d M=%d K=%d L=%d\n",
                           gridDim.x, gridDim.y, gridDim.z, blockDim.x, M, K, L);
-    }
-    if (tid == 0) {
-        DEBUG_PRINT_ERROR("DBG block=(%d,%d,%d) tid=%d warp_id=%d lane_id=%d batch=%d m_tile=%d tile_rows=%d M=%d K=%d L=%d K_packed=%d K_scales_padded=%d\n",
-                          blockIdx.x, blockIdx.y, blockIdx.z,
-                          tid, warp_id, lane_id,
-                          batch, m_tile, tile_rows,
-                          M, K, L, K_packed, K_scales_padded);
-        DEBUG_PRINT_ERROR("DBG A_batch=%p B_batch=%p SFA_batch=%p SFB_batch=%p D_batch=%p smem=%p\n",
-                          (const void*)A_batch, (const void*)B_batch,
-                          (const void*)SFA_batch, (const void*)SFB_batch,
-                          (const void*)D_batch, (void*)smem);
     }
 #endif
 
     auto align_up = [] __device__(size_t x, size_t align) {
         return (x + align - 1) & ~(align - 1);
     };
-
 
     size_t offset = 0;
 
@@ -1480,14 +1106,12 @@ fp4gemv_rank3_cluster(
         return reinterpret_cast<uint64_t*>(base);
     };
 
-    // Helper to align the *absolute* shared address (cvta_to_shared) to 128 bytes
     auto align_up_smem_128 = [&] __device__() {
         uint32_t addr = cvta_to_shared_u32(smem + offset);
         uint32_t aligned = (addr + 127u) & ~127u;
         offset += static_cast<size_t>(aligned - addr);
     };
 
-    // Helper to align to 1024 bytes (required for SWIZZLE_128B TMA)
     auto align_up_smem_1024 = [&] __device__() {
         uint32_t addr = cvta_to_shared_u32(smem + offset);
         uint32_t aligned = (addr + 1023u) & ~1023u;
@@ -1498,23 +1122,19 @@ fp4gemv_rank3_cluster(
     uint64_t* mbar_b = alloc_mbar_array(1);
     uint64_t* mbar_sfb = alloc_mbar_array(1);
 
-    // TMA requires 128-byte alignment for destination addresses
     align_up_smem_128();
-
     uint8_t* b_packed_smem = smem + offset;
     offset += K_packed;
 
     align_up_smem_128();
-
     uint8_t* sfb_smem = smem + offset;
-    offset += (K >> 4);  // SFB scale factors (not padded)
+    offset += (K >> 4);
     offset = align_up(offset, 16);
 
     half* b_vec_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(K) * sizeof(half);
     offset = align_up(offset, 16);
 
-    // Ensure TMA destinations with SWIZZLE_128B are 1024-byte aligned in shared memory
     align_up_smem_1024();
     uint8_t* a_packed_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
@@ -1522,18 +1142,14 @@ fp4gemv_rank3_cluster(
         offset += TileM * TileKPacked;
     }
 
-    // Scales with SWIZZLE_128B TMA also need 1024-byte alignment
     align_up_smem_1024();
     uint8_t* sfa_stage[StageCount];
-    // For rank-2 (L=1): allocate TileM * 16 (matching TMA box_k)
-    // For rank-3 (L>1): allocate TileM * 128 (matching TMA box_k)
-    int sfa_stage_stride = (L == 1) ? (TileM * 16) : (TileM * 128);
+    int sfa_stage_stride = TileM * SfaBoxK;
     for (int s = 0; s < StageCount; ++s) {
         sfa_stage[s] = smem + offset;
         offset += sfa_stage_stride;
     }
 
-    // Tensor Core operand tiles in shared memory: also 128-byte aligned
     align_up_smem_128();
     half* a_f16_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(TileM) * a_stride * sizeof(half);
@@ -1545,18 +1161,8 @@ fp4gemv_rank3_cluster(
 
 #if __CUDA_ARCH__ >= 900
     const bool use_tma_a = (desc_A != nullptr);
-#ifndef NDEBUG
-    if (tid == 0 && blockIdx.x == 0) {
-        DEBUG_PRINT_ERROR("CUDA_ARCH=%d use_tma_a=%d desc_A=%p\n", __CUDA_ARCH__, use_tma_a, (const void*)desc_A);
-    }
-#endif
 #else
     const bool use_tma_a = false;
-#ifndef NDEBUG
-    if (tid == 0 && blockIdx.x == 0) {
-        DEBUG_PRINT_ERROR("CUDA_ARCH=%d < 900, TMA disabled\n", __CUDA_ARCH__);
-    }
-#endif
 #endif
 
     __shared__ uint32_t stage_phase_smem[StageCount];
@@ -1565,63 +1171,28 @@ fp4gemv_rank3_cluster(
         for (int s = 0; s < StageCount; ++s) {
             stage_phase_smem[s] = 0;
         }
-        __threadfence_block();  // Ensure stage_phase init visible to all warps
+        __threadfence_block();
     }
-
-#ifndef NDEBUG
-    // Verify alignment of shared-memory regions
-    // SWIZZLE_128B TMA regions need 1024-byte alignment
-    if (tid == 0) {
-        for (int s = 0; s < StageCount; ++s) {
-            uint32_t addr = cvta_to_shared_u32(a_packed_stage[s]);
-            if (addr % 1024 != 0) {
-                /* printf("SMEM ALIGN ERROR: a_packed_stage[%d] addr=%u not 1024-byte aligned (mod1024=%u)\n",
-                       s, addr, addr % 1024); */
-            }
-            uint32_t sfa_addr = cvta_to_shared_u32(sfa_stage[s]);
-            if (sfa_addr % 1024 != 0) {
-                /* printf("SMEM ALIGN ERROR: sfa_stage[%d] addr=%u not 1024-byte aligned (mod1024=%u)\n",
-                       s, sfa_addr, sfa_addr % 1024); */
-            }
-        }
-        uint32_t a_f16_addr = cvta_to_shared_u32(a_f16_smem);
-        if (a_f16_addr % 128 != 0) {
-            DEBUG_PRINT_ERROR("SMEM ALIGN ERROR: a_f16_smem addr=%u not 128-byte aligned (mod128=%u)\n",
-                              a_f16_addr, a_f16_addr % 128);
-        }
-        uint32_t b_tile_addr = cvta_to_shared_u32(b_tile_smem);
-        if (b_tile_addr % 128 != 0) {
-            DEBUG_PRINT_ERROR("SMEM ALIGN ERROR: b_tile_smem addr=%u not 128-byte aligned (mod128=%u)\n",
-                              b_tile_addr, b_tile_addr % 128);
-        }
-    }
-#endif
 
 #if __CUDA_ARCH__ >= 900
     if (tid == 0 && use_tma_a) {
-        // RANK-3 ONLY: Cluster fence (CUTLASS pattern from barrier.h)
-        if (L > 1) {
-            asm volatile(
-                "{\n\t"
-                "fence.mbarrier_init.release.cluster; \n"
-                "}"
-                ::
-                : "memory"
-            );
-        }
+        asm volatile(
+            "{\n\t"
+            "fence.mbarrier_init.release.cluster; \n"
+            "}"
+            ::
+            : "memory"
+        );
 
         for (int s = 0; s < StageCount; ++s) {
             mbarrier_init(mbar_stage(mbar_a, s));
         }
-        // Initialize barriers for B and SFB
         mbarrier_init(mbar_b);
         mbarrier_init(mbar_sfb);
     }
 #endif
-    // Sync to ensure remote barriers are initialized (cluster-wide for RANK-3)
     sync_cluster_or_block(L);
 
-    // Verify TMA descriptors are valid
     if (!desc_A || !desc_SFA || !desc_B || !desc_SFB) {
 #ifndef NDEBUG
         if (tid == 0) {
@@ -1630,202 +1201,120 @@ fp4gemv_rank3_cluster(
                               (const void*)desc_B, (const void*)desc_SFB);
         }
 #endif
-        return;  // Abort kernel execution
+        return;
     }
 
 #if __CUDA_ARCH__ >= 900
-    // Use TMA for B and SFB - need proper barrier management for multi-tile loads
     constexpr int kTMABoxLimit = 256;
     const int b_chunks = (K_packed + (kTMABoxLimit - 1)) / kTMABoxLimit;
-    const int sfb_chunks = ((K >> 4) + (kTMABoxLimit - 1)) / kTMABoxLimit;  // SFB not padded
+    const int sfb_chunks = ((K >> 4) + (kTMABoxLimit - 1)) / kTMABoxLimit;
 
-    // Calculate total expected bytes for all chunks
     uint32_t total_b_bytes = static_cast<uint32_t>(K_packed);
-    uint32_t total_sfb_bytes = static_cast<uint32_t>(K >> 4);  // SFB not padded
+    uint32_t total_sfb_bytes = static_cast<uint32_t>(K >> 4);
 
-    // RANK-2 (L=1): Original code path - DO NOT TOUCH
-    if (L == 1) {
-        if (warp_id == 0 && lane_id == 0) {
-            mbarrier_arrive_expect_tx(mbar_b, total_b_bytes);
-            mbarrier_arrive_expect_tx(mbar_sfb, total_sfb_bytes);
-        }
-    }
-    // RANK-3 (L>1): Cluster barrier setup - Only CTA0 sets expect_tx
-    else {
-        uint32_t cta_rank = blockIdx.x % 2;
-        if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
-            // Only CTA0 sets expect_tx on its local barrier
-            // TMA from both CTAs will route to CTA0's barrier via peer mask
-            // Apply Sm100MmaPeerBitMask to barrier addresses (FIX #2)
-            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
-            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
-            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+    uint32_t cta_rank = blockIdx.x % 2;
+    if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
+        constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+        uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+        uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
 
-            asm volatile(
-                "{\n\t"
-                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
-                "}"
-                :
-                : "r"(mbar_b_addr), "r"(total_b_bytes)
-                : "memory"
-            );
+        asm volatile(
+            "{\n\t"
+            "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
+            "}"
+            :
+            : "r"(mbar_b_addr), "r"(total_b_bytes)
+            : "memory"
+        );
 
-            asm volatile(
-                "{\n\t"
-                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
-                "}"
-                :
-                : "r"(mbar_sfb_addr), "r"(total_sfb_bytes)
-                : "memory"
-            );
-        }
+        asm volatile(
+            "{\n\t"
+            "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
+            "}"
+            :
+            : "r"(mbar_sfb_addr), "r"(total_sfb_bytes)
+            : "memory"
+        );
     }
 
-    // Issue TMA loads
     if (warp_id == 0 && lane_id == 0) {
-
-        // Issue all TMA loads (barrier expects total bytes from all loads)
         for (int tile_idx = 0; tile_idx < b_chunks; ++tile_idx) {
             int elem_offset = tile_idx * kTMABoxLimit;
             int chunk_size = (elem_offset + kTMABoxLimit <= K_packed) ? kTMABoxLimit : (K_packed - elem_offset);
             (void)chunk_size;
             uint8_t* dst = b_packed_smem + elem_offset;
-
             uint32_t smem_addr = cvta_to_shared_u32(dst);
-
-            if (L == 1) {
-                // Rank-2: CTA launch (no cluster)
-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_b);
-                asm volatile(
-                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
-                    "[%0], [%1, {%3, %4}], [%2];\n"
-                    :
-                    : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
-                    : "memory"
-                );
-            } else {
-                // Rank-3: Cluster launch with cta_group::2
-                constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
-                uint64_t cache_hint = 0;
-                asm volatile(
-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
-                    "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
-                    :
-                    : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
-                      "l"(cache_hint)
-                    : "memory"
-                );
-            }
+            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+            uint32_t mbar_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+            uint64_t cache_hint = 0;
+            asm volatile(
+                "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+                "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
+                :
+                : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
+                  "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
+                  "l"(cache_hint)
+                : "memory"
+            );
         }
 
         for (int tile_idx = 0; tile_idx < sfb_chunks; ++tile_idx) {
             int elem_offset = tile_idx * kTMABoxLimit;
-            const int K_sfb = (K >> 4);  // SFB not padded
+            const int K_sfb = (K >> 4);
             int chunk_size = (elem_offset + kTMABoxLimit <= K_sfb) ? kTMABoxLimit : (K_sfb - elem_offset);
             (void)chunk_size;
             uint8_t* dst = sfb_smem + elem_offset;
-
             uint32_t smem_addr = cvta_to_shared_u32(dst);
-
-            if (L == 1) {
-                // Rank-2: CTA launch (no cluster)
-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb);
-                asm volatile(
-                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
-                    "[%0], [%1, {%3, %4}], [%2];\n"
-                    :
-                    : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
-                    : "memory"
-                );
-            } else {
-                // Rank-3: Cluster launch with cta_group::2
-                constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
-                uint64_t cache_hint = 0;
-                asm volatile(
-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
-                    "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
-                    :
-                    : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
-                      "l"(cache_hint)
-                    : "memory"
-                );
-            }
-        }
-    }
-
-    // All threads wait on barriers
-    if (L == 1) {
-        // RANK-2: Wait locally (DO NOT TOUCH)
-        mbarrier_wait_parity(mbar_b, 0);
-        mbarrier_wait_parity(mbar_sfb, 0);
-    } else {
-        // RANK-3: With shared::cluster TMA + peer mask, only CTA0's barrier gets updated
-        // Only CTA0 waits on barrier, then all CTAs sync via cluster_arrive/cluster_wait
-        uint32_t cta_rank = blockIdx.x % 2;
-        if (cta_rank == 0) {
-            // Only CTA0 waits on the barrier
-            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
-            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
-
+            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+            uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+            uint64_t cache_hint = 0;
             asm volatile(
-                "{\n\t"
-                ".reg .pred P1; \n\t"
-                "LAB_WAIT_B: \n\t"
-                "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
-                "@!P1 bra.uni LAB_WAIT_B; \n\t"
-                "}"
+                "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+                "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
                 :
-                : "r"(mbar_b_addr), "r"(0)
-                : "memory"
-            );
-
-            asm volatile(
-                "{\n\t"
-                ".reg .pred P1; \n\t"
-                "LAB_WAIT_SFB: \n\t"
-                "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
-                "@!P1 bra.uni LAB_WAIT_SFB; \n\t"
-                "}"
-                :
-                : "r"(mbar_sfb_addr), "r"(0)
+                : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
+                  "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
+                  "l"(cache_hint)
                 : "memory"
             );
         }
-        // RANK-3: Cluster-wide sync after CTA0 waited for TMA (using cooperative_groups)
-        sync_cluster_or_block(L);
     }
+
+    if (cta_rank == 0) {
+        uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
+        uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
+
+        asm volatile(
+            "{\n\t"
+            ".reg .pred P1; \n\t"
+            "LAB_WAIT_B: \n\t"
+            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+            "@!P1 bra.uni LAB_WAIT_B; \n\t"
+            "}"
+            :
+            : "r"(mbar_b_addr), "r"(0)
+            : "memory"
+        );
+
+        asm volatile(
+            "{\n\t"
+            ".reg .pred P1; \n\t"
+            "LAB_WAIT_SFB: \n\t"
+            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+            "@!P1 bra.uni LAB_WAIT_SFB; \n\t"
+            "}"
+            :
+            : "r"(mbar_sfb_addr), "r"(0)
+            : "memory"
+        );
+    }
+    sync_cluster_or_block(L);
 #endif
     __syncthreads();
 
-        // DEBUG: Print first 4 SFB scale bytes and first 4 B packed bytes (first tile only)
-        // DISABLED FOR PERFORMANCE: Excessive kernel // printf statements cause hang
-        // if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        // // printf("=== KERNEL DEBUG (block 0,0) ===\n");
-        // // printf("SFB raw bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
-        //        sfb_smem[0], sfb_smem[1], sfb_smem[2], sfb_smem[3]);
-        // // printf("SFB decoded FP8 [0-3]: %.6f %.6f %.6f %.6f\n",
-        //        decode_fp8_e4m3(sfb_smem[0]), decode_fp8_e4m3(sfb_smem[1]),
-        //        decode_fp8_e4m3(sfb_smem[2]), decode_fp8_e4m3(sfb_smem[3]));
-        // // printf("B packed bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
-        //        b_packed_smem[0], b_packed_smem[1], b_packed_smem[2], b_packed_smem[3]);
-        //
-        // const int K_sfb = (K >> 4);  // SFB not padded
-        // for (int i = 0; i < 4; i++) {
-        //     size_t sfb_idx = static_cast<size_t>(batch) * 128 * K_sfb + static_cast<size_t>(i);
-        //     // printf("SFB contiguous_idx[row=0,col=%d,batch=%d] = %llu\n",
-        //            i, batch, (unsigned long long)sfb_idx);
-        // }
-        // }
     __syncthreads();
 
-    // Decode B vector
-    const int K_sfb_decode = (K >> 4);  // SFB not padded
+    const int K_sfb_decode = (K >> 4);
     for (int idx = tid; idx < K_packed; idx += Threads) {
         int k_base = idx * 2;
         int scale_idx = idx >> 3;
@@ -1836,12 +1325,10 @@ fp4gemv_rank3_cluster(
             DEBUG_OOB_SMEM_1D("sfb_smem", scale_idx, K_sfb_decode, sfb_smem);
             scale_h = __float2half(decode_fp8_e4m3(sfb_smem[scale_idx]));
         }
-        // FIXED: LOW nibble = element 0, HIGH nibble = element 1 (matches reference implementation)
-        half v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);         // LOW nibble -> element 0
-        half v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);  // HIGH nibble -> element 1
+        half v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+        half v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
 
 #ifndef NDEBUG
-        // Debug: print first few B decode values
         if (blockIdx.x == 0 && blockIdx.y == 0 && idx < 4) {
             DEBUG_PRINT_ERROR("B_decode: idx=%d packed=0x%02x scale_idx=%d scale=%.4f v0=%.4f v1=%.4f\n",
                               idx, packed, scale_idx, __half2float(scale_h), __half2float(v0), __half2float(v1));
@@ -1851,44 +1338,17 @@ fp4gemv_rank3_cluster(
         if (k_base < K) {
             DEBUG_OOB_SMEM_1D("b_vec_smem", k_base, K, b_vec_smem);
             b_vec_smem[k_base] = v0;
-        } else {
-#ifndef NDEBUG
-            DEBUG_PRINT_ERROR("WARN: b_vec_smem store OOB: k_base=%d K=%d at %s:%d\n",
-                              k_base, K, __FILE__, __LINE__);
-#endif
         }
         if (k_base + 1 < K) {
             DEBUG_OOB_SMEM_1D("b_vec_smem", k_base + 1, K, b_vec_smem);
             b_vec_smem[k_base + 1] = v1;
-        } else {
-#ifndef NDEBUG
-            DEBUG_PRINT_ERROR("WARN: b_vec_smem store OOB: k_base+1=%d K=%d at %s:%d\n",
-                              k_base + 1, K, __FILE__, __LINE__);
-#endif
         }
     }
     __syncthreads();
 
-    // DEBUG: Print first 8 decoded b_vec_smem values (first tile only)
-    // DISABLED FOR PERFORMANCE: Excessive kernel // printf statements cause hang
-    // if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-    //     // printf("b_vec_smem decoded [0-7]: %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
-    //            __half2float(b_vec_smem[0]), __half2float(b_vec_smem[1]),
-    //            __half2float(b_vec_smem[2]), __half2float(b_vec_smem[3]),
-    //            __half2float(b_vec_smem[4]), __half2float(b_vec_smem[5]),
-    //            __half2float(b_vec_smem[6]), __half2float(b_vec_smem[7]));
-    //     // printf("DEBUG: After b_vec_smem decode print, about to syncthreads\n");
-    // }
     __syncthreads();
 
-#ifndef NDEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        /* printf("DEBUG: About to call first prefetch_tile, use_tma_a=%d is_producer=%d m_tile=%d K_packed=%d\n",
-               use_tma_a, is_producer, m_tile, K_packed); */
-    }
-#endif
-
-    // Prefetch first tiles using TMA
+    // Prefetch first tiles using TMA (rank-3 cluster path)
     prefetch_tile<TileM, TileK>(
         0, 0,
         use_tma_a, is_producer, warp_id, lane_id,
@@ -1897,17 +1357,7 @@ fp4gemv_rank3_cluster(
         desc_A, desc_SFA
     );
 
-#ifndef NDEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        // printf("DEBUG: First prefetch_tile completed\n");
-    }
-#endif
     if (TileK < K) {
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            // printf("DEBUG: About to call second prefetch_tile, TileK=%d K=%d\n", TileK, K);
-        }
-#endif
         prefetch_tile<TileM, TileK>(
             1, TileK,
             use_tma_a, is_producer, warp_id, lane_id,
@@ -1915,44 +1365,14 @@ fp4gemv_rank3_cluster(
             a_packed_stage, sfa_stage, mbar_a,
             desc_A, desc_SFA
         );
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            // printf("DEBUG: Second prefetch_tile completed\n");
-        }
-#endif
     }
-
-#ifndef NDEBUG
-    if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        // printf("DEBUG: About to enter K-tile loop\n");
-    }
-#endif
-
-    float c_frag_0 = 0.0f;
-    float c_frag_1 = 0.0f;
-    float c_frag_2 = 0.0f;
-    float c_frag_3 = 0.0f;
 
     for (int k_tile = 0; k_tile < K; k_tile += TileK) {
         int tile_idx = k_tile / TileK;
         int stage = tile_idx % StageCount;
 
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            /* printf("K-TILE LOOP START: k_tile=%d tile_idx=%d stage=%d K=%d TileK=%d\n",
-                   k_tile, tile_idx, stage, K, TileK); */
-        }
-#endif
-
         int next_stage = (stage + 2) % StageCount;
         int next_k = k_tile + 2 * TileK;
-
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            /* printf("K-TILE: About to prefetch, next_k=%d next_stage=%d (condition: %d)\n",
-                   next_k, next_stage, next_k < K); */
-        }
-#endif
 
         if (next_k < K) {
             prefetch_tile<TileM, TileK>(
@@ -1962,40 +1382,15 @@ fp4gemv_rank3_cluster(
                 a_packed_stage, sfa_stage, mbar_a,
                 desc_A, desc_SFA
             );
-#ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                // printf("K-TILE: Prefetch completed for next_k=%d\n", next_k);
-            }
-#endif
         }
-
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            // printf("K-TILE: About to wait on mbarrier, use_tma_a=%d stage=%d\n", use_tma_a, stage);
-        }
-#endif
 
         if (use_tma_a) {
 #if __CUDA_ARCH__ >= 900
-
-                // RANK-3: Only CTA0 waits, then sync all CTAs
-                uint32_t cta_rank = blockIdx.x % 2;
-                if (cta_rank == 0) {
-                    mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
-                }
+            uint32_t cta_rank = blockIdx.x % 2;
+            if (cta_rank == 0) {
+                mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
             }
-#ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                // printf("K-TILE: Mbarrier wait completed, about to cluster sync\n");
-            }
-#endif
-            // RANK-3: Cluster-wide sync after CTA0 waited - prevents CTA1 from racing ahead
             sync_cluster_or_block(L);
-#ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                // printf("K-TILE: After syncthreads, updating phase\n");
-            }
-#endif
             if (tid == 0) {
                 stage_phase_smem[stage] ^= 1;
             }
@@ -2005,168 +1400,20 @@ fp4gemv_rank3_cluster(
         }
         __syncthreads();
 
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            // printf("K-TILE: After final syncthreads, starting decode at k_tile=%d\n", k_tile);
-        }
-#endif
-
-#ifndef NDEBUG
-        // Dump first few bytes of SFA shared memory after TMA load
-        if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0 && k_tile == 0) {
-            // printf("SFA_SMEM_DUMP stage=%d:\n", stage);
-            /* printf("  [0-15]  = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                   sfa_stage[stage][0], sfa_stage[stage][1], sfa_stage[stage][2], sfa_stage[stage][3],
-                   sfa_stage[stage][4], sfa_stage[stage][5], sfa_stage[stage][6], sfa_stage[stage][7],
-                   sfa_stage[stage][8], sfa_stage[stage][9], sfa_stage[stage][10], sfa_stage[stage][11],
-                   sfa_stage[stage][12], sfa_stage[stage][13], sfa_stage[stage][14], sfa_stage[stage][15]); */
-            /* printf("  [16-31] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                   sfa_stage[stage][16], sfa_stage[stage][17], sfa_stage[stage][18], sfa_stage[stage][19],
-                   sfa_stage[stage][20], sfa_stage[stage][21], sfa_stage[stage][22], sfa_stage[stage][23],
-                   sfa_stage[stage][24], sfa_stage[stage][25], sfa_stage[stage][26], sfa_stage[stage][27],
-                   sfa_stage[stage][28], sfa_stage[stage][29], sfa_stage[stage][30], sfa_stage[stage][31]); */
-            /* printf("  [32-47] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                   sfa_stage[stage][32], sfa_stage[stage][33], sfa_stage[stage][34], sfa_stage[stage][35],
-                   sfa_stage[stage][36], sfa_stage[stage][37], sfa_stage[stage][38], sfa_stage[stage][39],
-                   sfa_stage[stage][40], sfa_stage[stage][41], sfa_stage[stage][42], sfa_stage[stage][43],
-                   sfa_stage[stage][44], sfa_stage[stage][45], sfa_stage[stage][46], sfa_stage[stage][47]); */
-        }
-#endif
-
-        process_tile<TileM, TileK, Threads, 128>(
-            k_tile, stage, tile_rows,
-            a_packed_stage, sfa_stage,
-            b_vec_smem, a_f16_smem, b_tile_smem,
-            M, K, K_scales_padded,
-            tid, warp_id, lane_id,
-            is_producer, is_consumer,
-            c_frag_0, c_frag_1, c_frag_2, c_frag_3
+        // Call core logic
+        fp4_gemv_core_logic<TileM, TileK, Threads, StageCount, a_stride>(
+            a_packed_stage, sfa_stage, mbar_a, b_vec_smem, a_f16_smem, b_tile_smem, D_batch,
+            M, K, L, K_scales_padded, m_tile, tile_rows,
+            tid, warp_id, lane_id, is_producer, is_consumer,
+            stage_phase_smem, use_tma_a, SfaBoxK
         );
 
-
-        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
-            // printf("DEBUG RANK-3: Before sync at end of k_tile\n");
-        }
-
-        // Synchronize at end of k_tile: cluster-wide for RANK-3, CTA-local for RANK-2
         sync_cluster_or_block(L);
-
-        // RANK-3 DEBUG: After sync
-        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
-            // printf("DEBUG RANK-3: After cluster sync\n");
-        }
-
-        // RANK-3 DEBUG: End of each K-tile iteration
-        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            /* printf("DEBUG RANK-3: K-TILE %d completed, next k_tile=%d\n",
-                   k_tile, k_tile + TileK); */
-        }
-    }
-
-    // RANK-3 DEBUG: Track where illegal instruction occurs
-    if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        // printf("DEBUG RANK-3: EXITED K-TILE LOOP - All K tiles completed\n");
-    }
-
-    // DEBUG: Print ALL fragments for lanes 0,4,8 to understand output distribution
-    // DISABLED FOR PERFORMANCE: Excessive kernel // printf statements cause hang
-    // if (blockIdx.x == 0 && blockIdx.y == 0 && is_consumer && warp_id == 2) {
-    //     int octet = lane_id / 4;
-    //     int tid_in_octet = lane_id % 4;
-    //     if (tid_in_octet == 0 && (lane_id == 0 || lane_id == 4 || lane_id == 8)) {
-    //         // printf("FINAL_SM100: lane=%d octet=%d ALL_FRAGS: c0=%.2f c1=%.2f c2=%.2f c3=%.2f (rows %d,%d)\n",
-    //                lane_id, octet, c_frag_0, c_frag_1, c_frag_2, c_frag_3,
-    //                m_tile + (warp_id-2)*16 + octet, m_tile + (warp_id-2)*16 + octet + 8);
-    //     }
-    // }
-
-    // m16n8k16.row.col.f32 output fragment layout per PTX ISA:
-    // C matrix is 16 rows x 8 cols, distributed across 32 threads with 4 floats each.
-    //
-    // For thread T (0-31), the 4 output registers map to C matrix positions:
-    //   Let octet = T / 4  (0-7, which octet of threads)
-    //   Let tid_in_octet = T % 4  (0-3, position within octet)
-    //
-    //   c_frag_0: C[octet + 0][tid_in_octet * 2 + 0]  -> row=octet,     col=tid_in_octet*2
-    //   c_frag_1: C[octet + 0][tid_in_octet * 2 + 1]  -> row=octet,     col=tid_in_octet*2+1
-    //   c_frag_2: C[octet + 8][tid_in_octet * 2 + 0]  -> row=octet+8,   col=tid_in_octet*2
-    //   c_frag_3: C[octet + 8][tid_in_octet * 2 + 1]  -> row=octet+8,   col=tid_in_octet*2+1
-    //
-    // So threads 0-3 cover rows 0,8 cols 0-7; threads 4-7 cover rows 1,9 cols 0-7; etc.
-    //
-    // For GEMV: B is broadcast to all 8 columns, so all columns of C are identical.
-    // We only need col 0 values, held by threads where tid_in_octet == 0 (i.e., T % 4 == 0).
-    // Those threads are: 0, 4, 8, 12, 16, 20, 24, 28
-    // They hold rows: 0,8 | 1,9 | 2,10 | 3,11 | 4,12 | 5,13 | 6,14 | 7,15
-
-    int active_warps_total = (tile_rows + 15) / 16;
-    if (is_consumer && (warp_id - 2) < active_warps_total) {
-        int warp_row_offset = (warp_id - 2) * 16;
-
-        int octet = lane_id / 4;           // 0-7
-        int tid_in_octet = lane_id % 4;    // 0-3
-
-        // Row this thread's c_frag_0 and c_frag_2 correspond to
-        int row0 = octet;      // c_frag_0 -> row 0-7
-        int row1 = octet + 8;  // c_frag_2 -> row 8-15
-
-        // Column this thread holds (for c_frag_0/c_frag_2)
-        int col = tid_in_octet * 2;  // 0, 2, 4, or 6
-
-#ifndef NDEBUG
-        if (blockIdx.x == 0 && blockIdx.y == 0 && warp_id == 2 && lane_id < 4) {
-            DEBUG_PRINT_ERROR("PRE_STORE_CHECK: lane=%d octet=%d tid_in_oct=%d col=%d\n",
-                              lane_id, octet, tid_in_octet, col);
-        }
-#endif
-
-        // Since B was broadcast, all columns have same value.
-        // We only write from threads holding col 0 to avoid duplication.
-        if (col == 0) {
-            int global_row0 = m_tile + warp_row_offset + row0;
-            int global_row1 = m_tile + warp_row_offset + row1;
-
-#ifndef NDEBUG
-            // Debug ALL lanes that write (col==0) to see what they're storing
-            if (blockIdx.x == 0 && blockIdx.y == 0 && warp_id == 2) {
-                DEBUG_PRINT_ERROR("D_STORE: warp=%d lane=%d octet=%d tid_in_oct=%d col=%d row0=%d row1=%d g0=%d g1=%d c0=%.2f c2=%.2f\n",
-                                  warp_id, lane_id, octet, tid_in_octet, col, row0, row1,
-                                  global_row0, global_row1, c_frag_0, c_frag_2);
-            }
-#endif
-
-            // RANK-3 DEBUG: Before writeback
-            if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-                // printf("DEBUG RANK-3: BEFORE WRITEBACK to global memory\n");
-            }
-
-            if (global_row0 < M) {
-                DEBUG_OOB_GLOBAL_1D("D_batch", global_row0, M, D_batch);
-                D_batch[global_row0] = __float2half(c_frag_0);
-            }
-            if (global_row1 < M) {
-                DEBUG_OOB_GLOBAL_1D("D_batch", global_row1, M, D_batch);
-                D_batch[global_row1] = __float2half(c_frag_2);
-            }
-
-            // RANK-3 DEBUG: After writeback
-            if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-                // printf("DEBUG RANK-3: AFTER WRITEBACK to global memory\n");
-            }
-        }
-    }
-
-    // RANK-3 DEBUG: Kernel completion
-    if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        // printf("DEBUG RANK-3: KERNEL FINISHED successfully\n");
-    }
-
-    // Debug: Print for ALL CTAs to verify they all exit
-    if (L > 1 && tid == 0) {
-        // printf("DEBUG: CTA(%d,%d,%d) exiting\n", blockIdx.x, blockIdx.y, blockIdx.z);
     }
 #endif
-}template<int TileM, int TileK, int Threads>
+}
+
+template<int TileM, int TileK, int Threads>
 __global__ void __launch_bounds__(Threads)
 fp4_gemv_steaming(
     const uint8_t* __restrict__ A_packed,
