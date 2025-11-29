@@ -67,7 +67,7 @@ __device__ unsigned int g_debug_thread_error_counts[1024];
         if (_t < DEBUG_MAX_ERRORS_PER_THREAD) {                                            \
             unsigned int _g = atomicAdd(&g_debug_error_count, 1u);                         \
             if (_g < DEBUG_MAX_ERRORS) {                                                   \
-                printf(fmt, __VA_ARGS__);                                                  \
+                // printf(fmt, __VA_ARGS__);                                                  \
             }                                                                              \
         }                                                                                  \
     } while (0)
@@ -383,8 +383,8 @@ __device__ __forceinline__ void prefetch_tile(
                 if (valid_m && valid_k) {
 #ifndef NDEBUG
                     if (k_tile_base == 256 && stage == 1) {  // Second tile with TileK=256
-                        printf("DEBUG prefetch: About to TMA load A, c0=%u c1=%u valid_k=%d valid_m=%d\n",
-                               c0, c1, valid_k, valid_m);
+                        /* printf("DEBUG prefetch: About to TMA load A, c0=%u c1=%u valid_k=%d valid_m=%d\n",
+                               c0, c1, valid_k, valid_m); */
                     }
 #endif
                     tma_load_2d_no_arrive(
@@ -396,7 +396,7 @@ __device__ __forceinline__ void prefetch_tile(
                     );
 #ifndef NDEBUG
                     if (k_tile_base == 256 && stage == 1) {  // Second tile with TileK=256
-                        printf("DEBUG prefetch: A TMA load completed\n");
+                        // printf("DEBUG prefetch: A TMA load completed\n");
                     }
 #endif
                 }
@@ -404,8 +404,8 @@ __device__ __forceinline__ void prefetch_tile(
                 if (valid_sfa_m && valid_sfa_k) {
 #ifndef NDEBUG
                     if (k_tile_base == 256 && stage == 1) {  // Second tile with TileK=256
-                        printf("DEBUG prefetch: About to TMA load SFA, sfa_c0=%u sfa_c1=%u valid_sfa_k=%d valid_sfa_m=%d\n",
-                               sfa_c0, sfa_c1, valid_sfa_k, valid_sfa_m);
+                        /* printf("DEBUG prefetch: About to TMA load SFA, sfa_c0=%u sfa_c1=%u valid_sfa_k=%d valid_sfa_m=%d\n",
+                               sfa_c0, sfa_c1, valid_sfa_k, valid_sfa_m); */
                     }
 #endif
                     tma_load_2d_no_arrive(
@@ -417,7 +417,7 @@ __device__ __forceinline__ void prefetch_tile(
                     );
 #ifndef NDEBUG
                     if (k_tile_base == 256 && stage == 1) {  // Second tile with TileK=256
-                        printf("DEBUG prefetch: SFA TMA load completed\n");
+                        // printf("DEBUG prefetch: SFA TMA load completed\n");
                     }
 #endif
                 }
@@ -653,13 +653,13 @@ fp4_gemv_steaming(
         for (int s = 0; s < StageCount; ++s) {
             uint32_t addr = cvta_to_shared_u32(a_packed_stage[s]);
             if (addr % 1024 != 0) {
-                printf("SMEM ALIGN ERROR: a_packed_stage[%d] addr=%u not 1024-byte aligned (mod1024=%u)\n",
-                       s, addr, addr % 1024);
+                /* printf("SMEM ALIGN ERROR: a_packed_stage[%d] addr=%u not 1024-byte aligned (mod1024=%u)\n",
+                       s, addr, addr % 1024); */
             }
             uint32_t sfa_addr = cvta_to_shared_u32(sfa_stage[s]);
             if (sfa_addr % 1024 != 0) {
-                printf("SMEM ALIGN ERROR: sfa_stage[%d] addr=%u not 1024-byte aligned (mod1024=%u)\n",
-                       s, sfa_addr, sfa_addr % 1024);
+                /* printf("SMEM ALIGN ERROR: sfa_stage[%d] addr=%u not 1024-byte aligned (mod1024=%u)\n",
+                       s, sfa_addr, sfa_addr % 1024); */
             }
         }
         uint32_t a_f16_addr = cvta_to_shared_u32(a_f16_smem);
@@ -882,21 +882,21 @@ fp4_gemv_steaming(
     __syncthreads();
 
         // DEBUG: Print first 4 SFB scale bytes and first 4 B packed bytes (first tile only)
-        // DISABLED FOR PERFORMANCE: Excessive kernel printf statements cause hang
+        // DISABLED FOR PERFORMANCE: Excessive kernel // printf statements cause hang
         // if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        // printf("=== KERNEL DEBUG (block 0,0) ===\n");
-        // printf("SFB raw bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
+        // // printf("=== KERNEL DEBUG (block 0,0) ===\n");
+        // // printf("SFB raw bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
         //        sfb_smem[0], sfb_smem[1], sfb_smem[2], sfb_smem[3]);
-        // printf("SFB decoded FP8 [0-3]: %.6f %.6f %.6f %.6f\n",
+        // // printf("SFB decoded FP8 [0-3]: %.6f %.6f %.6f %.6f\n",
         //        decode_fp8_e4m3(sfb_smem[0]), decode_fp8_e4m3(sfb_smem[1]),
         //        decode_fp8_e4m3(sfb_smem[2]), decode_fp8_e4m3(sfb_smem[3]));
-        // printf("B packed bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
+        // // printf("B packed bytes [0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
         //        b_packed_smem[0], b_packed_smem[1], b_packed_smem[2], b_packed_smem[3]);
         //
         // const int K_sfb = (K >> 4);  // SFB not padded
         // for (int i = 0; i < 4; i++) {
         //     size_t sfb_idx = static_cast<size_t>(batch) * 128 * K_sfb + static_cast<size_t>(i);
-        //     printf("SFB contiguous_idx[row=0,col=%d,batch=%d] = %llu\n",
+        //     // printf("SFB contiguous_idx[row=0,col=%d,batch=%d] = %llu\n",
         //            i, batch, (unsigned long long)sfb_idx);
         // }
         // }
@@ -948,21 +948,21 @@ fp4_gemv_steaming(
     __syncthreads();
 
     // DEBUG: Print first 8 decoded b_vec_smem values (first tile only)
-    // DISABLED FOR PERFORMANCE: Excessive kernel printf statements cause hang
+    // DISABLED FOR PERFORMANCE: Excessive kernel // printf statements cause hang
     // if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-    //     printf("b_vec_smem decoded [0-7]: %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
+    //     // printf("b_vec_smem decoded [0-7]: %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
     //            __half2float(b_vec_smem[0]), __half2float(b_vec_smem[1]),
     //            __half2float(b_vec_smem[2]), __half2float(b_vec_smem[3]),
     //            __half2float(b_vec_smem[4]), __half2float(b_vec_smem[5]),
     //            __half2float(b_vec_smem[6]), __half2float(b_vec_smem[7]));
-    //     printf("DEBUG: After b_vec_smem decode print, about to syncthreads\n");
+    //     // printf("DEBUG: After b_vec_smem decode print, about to syncthreads\n");
     // }
     __syncthreads();
 
 #ifndef NDEBUG
     if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        printf("DEBUG: About to call first prefetch_tile, use_tma_a=%d is_producer=%d m_tile=%d K_packed=%d\n",
-               use_tma_a, is_producer, m_tile, K_packed);
+        /* printf("DEBUG: About to call first prefetch_tile, use_tma_a=%d is_producer=%d m_tile=%d K_packed=%d\n",
+               use_tma_a, is_producer, m_tile, K_packed); */
     }
 #endif
 
@@ -977,13 +977,13 @@ fp4_gemv_steaming(
 
 #ifndef NDEBUG
     if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        printf("DEBUG: First prefetch_tile completed\n");
+        // printf("DEBUG: First prefetch_tile completed\n");
     }
 #endif
     if (TileK < K) {
 #ifndef NDEBUG
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            printf("DEBUG: About to call second prefetch_tile, TileK=%d K=%d\n", TileK, K);
+            // printf("DEBUG: About to call second prefetch_tile, TileK=%d K=%d\n", TileK, K);
         }
 #endif
         prefetch_tile<TileM, TileK>(
@@ -995,14 +995,14 @@ fp4_gemv_steaming(
         );
 #ifndef NDEBUG
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            printf("DEBUG: Second prefetch_tile completed\n");
+            // printf("DEBUG: Second prefetch_tile completed\n");
         }
 #endif
     }
 
 #ifndef NDEBUG
     if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        printf("DEBUG: About to enter K-tile loop\n");
+        // printf("DEBUG: About to enter K-tile loop\n");
     }
 #endif
 
@@ -1017,8 +1017,8 @@ fp4_gemv_steaming(
 
 #ifndef NDEBUG
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            printf("K-TILE LOOP START: k_tile=%d tile_idx=%d stage=%d K=%d TileK=%d\n",
-                   k_tile, tile_idx, stage, K, TileK);
+            /* printf("K-TILE LOOP START: k_tile=%d tile_idx=%d stage=%d K=%d TileK=%d\n",
+                   k_tile, tile_idx, stage, K, TileK); */
         }
 #endif
 
@@ -1027,8 +1027,8 @@ fp4_gemv_steaming(
 
 #ifndef NDEBUG
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            printf("K-TILE: About to prefetch, next_k=%d next_stage=%d (condition: %d)\n",
-                   next_k, next_stage, next_k < K);
+            /* printf("K-TILE: About to prefetch, next_k=%d next_stage=%d (condition: %d)\n",
+                   next_k, next_stage, next_k < K); */
         }
 #endif
 
@@ -1042,14 +1042,14 @@ fp4_gemv_steaming(
             );
 #ifndef NDEBUG
             if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                printf("K-TILE: Prefetch completed for next_k=%d\n", next_k);
+                // printf("K-TILE: Prefetch completed for next_k=%d\n", next_k);
             }
 #endif
         }
 
 #ifndef NDEBUG
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            printf("K-TILE: About to wait on mbarrier, use_tma_a=%d stage=%d\n", use_tma_a, stage);
+            // printf("K-TILE: About to wait on mbarrier, use_tma_a=%d stage=%d\n", use_tma_a, stage);
         }
 #endif
 
@@ -1067,14 +1067,14 @@ fp4_gemv_steaming(
             }
 #ifndef NDEBUG
             if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                printf("K-TILE: Mbarrier wait completed, about to cluster sync\n");
+                // printf("K-TILE: Mbarrier wait completed, about to cluster sync\n");
             }
 #endif
             // RANK-3: Cluster-wide sync after CTA0 waited - prevents CTA1 from racing ahead
             sync_cluster_or_block(L);
 #ifndef NDEBUG
             if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                printf("K-TILE: After syncthreads, updating phase\n");
+                // printf("K-TILE: After syncthreads, updating phase\n");
             }
 #endif
             if (tid == 0) {
@@ -1088,29 +1088,29 @@ fp4_gemv_steaming(
 
 #ifndef NDEBUG
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            printf("K-TILE: After final syncthreads, starting decode at k_tile=%d\n", k_tile);
+            // printf("K-TILE: After final syncthreads, starting decode at k_tile=%d\n", k_tile);
         }
 #endif
 
 #ifndef NDEBUG
         // Dump first few bytes of SFA shared memory after TMA load
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0 && k_tile == 0) {
-            printf("SFA_SMEM_DUMP stage=%d:\n", stage);
-            printf("  [0-15]  = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            // printf("SFA_SMEM_DUMP stage=%d:\n", stage);
+            /* printf("  [0-15]  = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
                    sfa_stage[stage][0], sfa_stage[stage][1], sfa_stage[stage][2], sfa_stage[stage][3],
                    sfa_stage[stage][4], sfa_stage[stage][5], sfa_stage[stage][6], sfa_stage[stage][7],
                    sfa_stage[stage][8], sfa_stage[stage][9], sfa_stage[stage][10], sfa_stage[stage][11],
-                   sfa_stage[stage][12], sfa_stage[stage][13], sfa_stage[stage][14], sfa_stage[stage][15]);
-            printf("  [16-31] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                   sfa_stage[stage][12], sfa_stage[stage][13], sfa_stage[stage][14], sfa_stage[stage][15]); */
+            /* printf("  [16-31] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
                    sfa_stage[stage][16], sfa_stage[stage][17], sfa_stage[stage][18], sfa_stage[stage][19],
                    sfa_stage[stage][20], sfa_stage[stage][21], sfa_stage[stage][22], sfa_stage[stage][23],
                    sfa_stage[stage][24], sfa_stage[stage][25], sfa_stage[stage][26], sfa_stage[stage][27],
-                   sfa_stage[stage][28], sfa_stage[stage][29], sfa_stage[stage][30], sfa_stage[stage][31]);
-            printf("  [32-47] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                   sfa_stage[stage][28], sfa_stage[stage][29], sfa_stage[stage][30], sfa_stage[stage][31]); */
+            /* printf("  [32-47] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
                    sfa_stage[stage][32], sfa_stage[stage][33], sfa_stage[stage][34], sfa_stage[stage][35],
                    sfa_stage[stage][36], sfa_stage[stage][37], sfa_stage[stage][38], sfa_stage[stage][39],
                    sfa_stage[stage][40], sfa_stage[stage][41], sfa_stage[stage][42], sfa_stage[stage][43],
-                   sfa_stage[stage][44], sfa_stage[stage][45], sfa_stage[stage][46], sfa_stage[stage][47]);
+                   sfa_stage[stage][44], sfa_stage[stage][45], sfa_stage[stage][46], sfa_stage[stage][47]); */
         }
 #endif
 
@@ -1123,8 +1123,8 @@ fp4_gemv_steaming(
 
 #ifndef NDEBUG
             if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                printf("DECODE LOOP START: k_tile=%d tile_rows=%d curr_cols=%d loop_limit=%d\n",
-                       k_tile, tile_rows, curr_cols, tile_rows * curr_cols);
+                /* printf("DECODE LOOP START: k_tile=%d tile_rows=%d curr_cols=%d loop_limit=%d\n",
+                       k_tile, tile_rows, curr_cols, tile_rows * curr_cols); */
             }
 #endif
 
@@ -1183,22 +1183,22 @@ fp4_gemv_steaming(
         __syncthreads();
 
         // DEBUG: Print first 8 decoded A[row=0-7] values and first 4 SFA raw bytes (first tile only)
-        // DISABLED FOR PERFORMANCE: Excessive kernel printf statements cause hang
+        // DISABLED FOR PERFORMANCE: Excessive kernel // printf statements cause hang
         // if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0 && k_tile == 0) {
-        //     printf("SFA raw bytes [row=0, 0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
+        //     // printf("SFA raw bytes [row=0, 0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
         //            sfa_stage[stage][0], sfa_stage[stage][1],
         //            sfa_stage[stage][2], sfa_stage[stage][3]);
-        //     printf("SFA decoded FP8 [row=0, 0-3]: %.6f %.6f %.6f %.6f\n",
+        //     // printf("SFA decoded FP8 [row=0, 0-3]: %.6f %.6f %.6f %.6f\n",
         //            decode_fp8_e4m3(sfa_stage[stage][0]), decode_fp8_e4m3(sfa_stage[stage][1]),
         //            decode_fp8_e4m3(sfa_stage[stage][2]), decode_fp8_e4m3(sfa_stage[stage][3]));
-        //     printf("A packed bytes [row=0, 0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
+        //     // printf("A packed bytes [row=0, 0-3]: 0x%02x 0x%02x 0x%02x 0x%02x\n",
         //            a_packed_stage[stage][0], a_packed_stage[stage][1],
         //            a_packed_stage[stage][2], a_packed_stage[stage][3]);
         //
         //     // Print decoded A for rows 0-7 (first 8 elements of each row)
         //     for (int r = 0; r < 8; r++) {
         //         half* a_row = a_f16_smem + r * a_stride;
-        //         printf("A_f16_smem[row=%d, 0-7]: %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
+        //         // printf("A_f16_smem[row=%d, 0-7]: %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
         //                r,
         //                __half2float(a_row[0]), __half2float(a_row[1]),
         //                __half2float(a_row[2]), __half2float(a_row[3]),
@@ -1213,10 +1213,10 @@ fp4_gemv_steaming(
         // size_t sfa_idx = static_cast<size_t>(batch) * M * K_scales_padded
         //                + static_cast<size_t>(m_tile) * K_scales_padded
         //                + static_cast<size_t>(i);
-        // printf("SFA contiguous_idx[row=%d,col=%d,batch=%d] = %llu\n",
+        // // printf("SFA contiguous_idx[row=%d,col=%d,batch=%d] = %llu\n",
         //        m_tile, i, batch, (unsigned long long)sfa_idx);
         // }
-        //     printf("=== END KERNEL DEBUG ===\n");
+        //     // printf("=== END KERNEL DEBUG ===\n");
         // }
         __syncthreads();
 
@@ -1285,12 +1285,12 @@ fp4_gemv_steaming(
                     half* a1_h = reinterpret_cast<half*>(&a1);
                     half* a2_h = reinterpret_cast<half*>(&a2);
                     half* a3_h = reinterpret_cast<half*>(&a3);
-                    printf("LDMTX_SM100: lane=%d octet=%d a_row=%d a0=[%.2f,%.2f] a1=[%.2f,%.2f] a2=[%.2f,%.2f] a3=[%.2f,%.2f]\n",
+                    /* printf("LDMTX_SM100: lane=%d octet=%d a_row=%d a0=[%.2f,%.2f] a1=[%.2f,%.2f] a2=[%.2f,%.2f] a3=[%.2f,%.2f]\n",
                            lane_id, lane_id/4, a_row,
                            __half2float(a0_h[0]), __half2float(a0_h[1]),
                            __half2float(a1_h[0]), __half2float(a1_h[1]),
                            __half2float(a2_h[0]), __half2float(a2_h[1]),
-                           __half2float(a3_h[0]), __half2float(a3_h[1]));
+                           __half2float(a3_h[0]), __half2float(a3_h[1])); */
                 }
 #endif
 
@@ -1331,30 +1331,30 @@ fp4_gemv_steaming(
 
                 // RANK-3 DEBUG: Immediately after MMA instruction
                 if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id == 0) {
-                    printf("DEBUG RANK-3: MMA instruction completed for kk=%d\n", kk);
+                    // printf("DEBUG RANK-3: MMA instruction completed for kk=%d\n", kk);
                 }
 
                 // DEBUG: Print accumulator after first MMA in first K tile
                 if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id == 0) {
-                    printf("MMA DEBUG: k_tile=%d kk=%d warp=%d lane=%d c_frag=[%.4f, %.4f, %.4f, %.4f]\n",
-                           k_tile, kk, warp_id, lane_id, c_frag_0, c_frag_1, c_frag_2, c_frag_3);
+                    /* printf("MMA DEBUG: k_tile=%d kk=%d warp=%d lane=%d c_frag=[%.4f, %.4f, %.4f, %.4f]\n",
+                           k_tile, kk, warp_id, lane_id, c_frag_0, c_frag_1, c_frag_2, c_frag_3); */
                 }
 
                 // RANK-3 DEBUG: After debug print
                 if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && tid == 0) {
-                    printf("DEBUG RANK-3: After MMA DEBUG print, kk=%d\n", kk);
+                    // printf("DEBUG RANK-3: After MMA DEBUG print, kk=%d\n", kk);
                 }
             }
 
             // RANK-3 DEBUG: After kk loop iteration
             if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
-                printf("DEBUG RANK-3: Finished kk loop (all kk iterations)\n");
+                // printf("DEBUG RANK-3: Finished kk loop (all kk iterations)\n");
             }
         }
 
         // RANK-3 DEBUG: Before sync
         if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
-            printf("DEBUG RANK-3: Before sync at end of k_tile\n");
+            // printf("DEBUG RANK-3: Before sync at end of k_tile\n");
         }
 
         // Synchronize at end of k_tile: cluster-wide for RANK-3, CTA-local for RANK-2
@@ -1362,28 +1362,28 @@ fp4_gemv_steaming(
 
         // RANK-3 DEBUG: After sync
         if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
-            printf("DEBUG RANK-3: After cluster sync\n");
+            // printf("DEBUG RANK-3: After cluster sync\n");
         }
 
         // RANK-3 DEBUG: End of each K-tile iteration
         if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-            printf("DEBUG RANK-3: K-TILE %d completed, next k_tile=%d\n",
-                   k_tile, k_tile + TileK);
+            /* printf("DEBUG RANK-3: K-TILE %d completed, next k_tile=%d\n",
+                   k_tile, k_tile + TileK); */
         }
     }
 
     // RANK-3 DEBUG: Track where illegal instruction occurs
     if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-        printf("DEBUG RANK-3: EXITED K-TILE LOOP - All K tiles completed\n");
+        // printf("DEBUG RANK-3: EXITED K-TILE LOOP - All K tiles completed\n");
     }
 
     // DEBUG: Print ALL fragments for lanes 0,4,8 to understand output distribution
-    // DISABLED FOR PERFORMANCE: Excessive kernel printf statements cause hang
+    // DISABLED FOR PERFORMANCE: Excessive kernel // printf statements cause hang
     // if (blockIdx.x == 0 && blockIdx.y == 0 && is_consumer && warp_id == 2) {
     //     int octet = lane_id / 4;
     //     int tid_in_octet = lane_id % 4;
     //     if (tid_in_octet == 0 && (lane_id == 0 || lane_id == 4 || lane_id == 8)) {
-    //         printf("FINAL_SM100: lane=%d octet=%d ALL_FRAGS: c0=%.2f c1=%.2f c2=%.2f c3=%.2f (rows %d,%d)\n",
+    //         // printf("FINAL_SM100: lane=%d octet=%d ALL_FRAGS: c0=%.2f c1=%.2f c2=%.2f c3=%.2f (rows %d,%d)\n",
     //                lane_id, octet, c_frag_0, c_frag_1, c_frag_2, c_frag_3,
     //                m_tile + (warp_id-2)*16 + octet, m_tile + (warp_id-2)*16 + octet + 8);
     //     }
@@ -1446,7 +1446,7 @@ fp4_gemv_steaming(
 
             // RANK-3 DEBUG: Before writeback
             if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-                printf("DEBUG RANK-3: BEFORE WRITEBACK to global memory\n");
+                // printf("DEBUG RANK-3: BEFORE WRITEBACK to global memory\n");
             }
 
             if (global_row0 < M) {
@@ -1460,19 +1460,19 @@ fp4_gemv_steaming(
 
             // RANK-3 DEBUG: After writeback
             if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-                printf("DEBUG RANK-3: AFTER WRITEBACK to global memory\n");
+                // printf("DEBUG RANK-3: AFTER WRITEBACK to global memory\n");
             }
         }
     }
 
     // RANK-3 DEBUG: Kernel completion
     if (L > 1 && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        printf("DEBUG RANK-3: KERNEL FINISHED successfully\n");
+        // printf("DEBUG RANK-3: KERNEL FINISHED successfully\n");
     }
 
     // Debug: Print for ALL CTAs to verify they all exit
     if (L > 1 && tid == 0) {
-        printf("DEBUG: CTA(%d,%d,%d) exiting\n", blockIdx.x, blockIdx.y, blockIdx.z);
+        // printf("DEBUG: CTA(%d,%d,%d) exiting\n", blockIdx.x, blockIdx.y, blockIdx.z);
     }
 #endif
 }
@@ -1579,20 +1579,20 @@ void launch_fp4_gemv_optimized(
     // 2. Ensure tensor's device pointer is 128-byte aligned for TMA
     uintptr_t base_addr = reinterpret_cast<uintptr_t>(A_ptr);
     if ((base_addr % 128) != 0) {
-        printf("ERROR: base pointer A not 128-byte aligned: %p (mod128=%llu)\n",
-               A_ptr, (unsigned long long)(base_addr % 128));
+        /* printf("ERROR: base pointer A not 128-byte aligned: %p (mod128=%llu)\n",
+               A_ptr, (unsigned long long)(base_addr % 128)); */
         tma_ok = false;
     } else {
-        printf("✅A_ptr 128-byte alignment check passed: %p\n", A_ptr);
+        // printf("✅A_ptr 128-byte alignment check passed: %p\n", A_ptr);
     }
 
     // 3. Check that strides are properly 128-byte aligned
     if (K_packed % 128 != 0) {
-        printf("WARNING: K_packed (%llu) is not 128-byte aligned, may cause TMA issues\n",
-               (unsigned long long)K_packed);
+        /* printf("WARNING: K_packed (%llu) is not 128-byte aligned, may cause TMA issues\n",
+               (unsigned long long)K_packed); */
     } else {
-        printf("✅K_packed 128-byte stride alignment check passed: %llu bytes\n",
-               (unsigned long long)K_packed);
+        /* printf("✅K_packed 128-byte stride alignment check passed: %llu bytes\n",
+               (unsigned long long)K_packed); */
     }
 
     // TMA encoder with SWIZZLE_128B for large 2D matrices (A, SFA)
@@ -1662,20 +1662,20 @@ void launch_fp4_gemv_optimized(
                 (M < kTMABoxLimit ? M : kTMABoxLimit)
         );
 
-        printf("TMA Debug: A_ptr = %p, map_A_ptr = %p\n", A_ptr, (void*)map_A_ptr);
+        // printf("TMA Debug: A_ptr = %p, map_A_ptr = %p\n", A_ptr, (void*)map_A_ptr);
 
         // 4. Check box dimensions for good alignment (we prefer 128-byte multiples)
         if (box_k % 128 != 0) {
-            printf("WARNING: box_k (%u) is not a multiple of 128 elements, may reduce TMA efficiency\n", box_k);
+            // printf("WARNING: box_k (%u) is not a multiple of 128 elements, may reduce TMA efficiency\n", box_k);
         }
         // box_m doesn't need to be 128-aligned since it's the number of rows, not bytes
 
         // 5. Check that tile sizes result in 128-byte aligned transfers
         uint32_t tile_bytes = box_m * box_k;
         if (tile_bytes % 128 != 0) {
-            printf("WARNING: tile_bytes (%u) is not 128-byte aligned\n", tile_bytes);
+            // printf("WARNING: tile_bytes (%u) is not 128-byte aligned\n", tile_bytes);
         } else {
-            printf("✅Tile size 128-byte alignment check passed: %u bytes\n", tile_bytes);
+            // printf("✅Tile size 128-byte alignment check passed: %u bytes\n", tile_bytes);
         }
 
         if (L == 1) {
@@ -1696,8 +1696,8 @@ void launch_fp4_gemv_optimized(
 
             // Validate box dimensions
             if (box_A[0] > 256 || box_A[1] > 256) {
-                printf("ERROR: TMA box dimension exceeds 256 limit! box=[%u, %u]\n",
-                       box_A[0], box_A[1]);
+                /* printf("ERROR: TMA box dimension exceeds 256 limit! box=[%u, %u]\n",
+                       box_A[0], box_A[1]); */
                 tma_ok = false;
             }
 
@@ -1711,11 +1711,11 @@ void launch_fp4_gemv_optimized(
                                            strides_A,  // Explicit stride, NOT nullptr
                                            box_A);
 
-                printf("TMA Encode A Result: %d\n", (int)resA);
+                // printf("TMA Encode A Result: %d\n", (int)resA);
                 if (resA != CUDA_SUCCESS) {
                     const char* err_str = nullptr;
                     cuGetErrorString(resA, &err_str);
-                    printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
+                    // printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
                     tma_ok = false;
                 } else {
                     // Rank-2 success (silent)
@@ -1740,17 +1740,17 @@ void launch_fp4_gemv_optimized(
                 static_cast<cuuint64_t>(M) * K_packed        // Stride between batches (L dim)
             };
 
-            printf("TMA Debug: Using RANK=3 for L=%lld\n", (long long)L);
-            printf("TMA Debug: dims = [K_packed=%llu, M=%llu, L=%llu], box = [%u, %u, %u]\n",
+            // printf("TMA Debug: Using RANK=3 for L=%lld\n", (long long)L);
+            /* printf("TMA Debug: dims = [K_packed=%llu, M=%llu, L=%llu], box = [%u, %u, %u]\n",
                    (unsigned long long)dims_A[0], (unsigned long long)dims_A[1], (unsigned long long)dims_A[2],
-                   box_A[0], box_A[1], box_A[2]);
-            printf("TMA Debug: strides_A = [%llu, %llu]\n",
-                   (unsigned long long)strides_A[0], (unsigned long long)strides_A[1]);
+                   box_A[0], box_A[1], box_A[2]); */
+            /* printf("TMA Debug: strides_A = [%llu, %llu]\n",
+                   (unsigned long long)strides_A[0], (unsigned long long)strides_A[1]); */
 
             // Validate box dimensions
             if (box_A[0] > 256 || box_A[1] > 256 || box_A[2] > 256) {
-                printf("ERROR: TMA box dimension exceeds 256 limit! box=[%u, %u, %u]\n",
-                       box_A[0], box_A[1], box_A[2]);
+                /* printf("ERROR: TMA box dimension exceeds 256 limit! box=[%u, %u, %u]\n",
+                       box_A[0], box_A[1], box_A[2]); */
                 tma_ok = false;
             }
 
@@ -1764,14 +1764,14 @@ void launch_fp4_gemv_optimized(
                                            strides_A,
                                            box_A);
 
-                printf("TMA Encode A Result: %d\n", (int)resA);
+                // printf("TMA Encode A Result: %d\n", (int)resA);
                 if (resA != CUDA_SUCCESS) {
                     const char* err_str = nullptr;
                     cuGetErrorString(resA, &err_str);
-                    printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
+                    // printf("TMA Encode A failed: %s\n", err_str ? err_str : "unknown error");
                     tma_ok = false;
                 } else {
-                    printf("✅TMA Encode A (rank=3, SWIZZLE_128B) SUCCESS!\n");
+                    // printf("✅TMA Encode A (rank=3, SWIZZLE_128B) SUCCESS!\n");
                 }
             }
         }
@@ -1802,7 +1802,7 @@ void launch_fp4_gemv_optimized(
             if (resB != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
                 cuGetErrorString(resB, &err_str);
-                printf("TMA Encode B failed: %s\n", err_str ? err_str : "unknown");
+                // printf("TMA Encode B failed: %s\n", err_str ? err_str : "unknown");
                 tma_ok = false;
             } else {
                 check_cuda(cudaMalloc(&d_map_B, sizeof(CUtensorMap)), "cudaMalloc d_map_B");
@@ -1821,12 +1821,12 @@ void launch_fp4_gemv_optimized(
             if (resB != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
                 cuGetErrorString(resB, &err_str);
-                printf("TMA Encode B failed: %s\n", err_str ? err_str : "unknown");
+                // printf("TMA Encode B failed: %s\n", err_str ? err_str : "unknown");
                 tma_ok = false;
             } else {
                 check_cuda(cudaMalloc(&d_map_B, sizeof(CUtensorMap)), "cudaMalloc d_map_B");
                 check_cuda(cudaMemcpy(d_map_B, map_B_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_B");
-                printf("✅TMA Encode B (rank=3) SUCCESS!\n");
+                // printf("✅TMA Encode B (rank=3) SUCCESS!\n");
             }
         }
 
@@ -1851,7 +1851,7 @@ void launch_fp4_gemv_optimized(
             if (resSFB != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
                 cuGetErrorString(resSFB, &err_str);
-                printf("TMA Encode SFB failed: %s\n", err_str ? err_str : "unknown");
+                // printf("TMA Encode SFB failed: %s\n", err_str ? err_str : "unknown");
                 tma_ok = false;
             } else {
                 check_cuda(cudaMalloc(&d_map_SFB, sizeof(CUtensorMap)), "cudaMalloc d_map_SFB");
@@ -1870,12 +1870,12 @@ void launch_fp4_gemv_optimized(
             if (resSFB != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
                 cuGetErrorString(resSFB, &err_str);
-                printf("TMA Encode SFB failed: %s\n", err_str ? err_str : "unknown");
+                // printf("TMA Encode SFB failed: %s\n", err_str ? err_str : "unknown");
                 tma_ok = false;
             } else {
                 check_cuda(cudaMalloc(&d_map_SFB, sizeof(CUtensorMap)), "cudaMalloc d_map_SFB");
                 check_cuda(cudaMemcpy(d_map_SFB, map_SFB_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFB");
-                printf("✅TMA Encode SFB (rank=3) SUCCESS!\n");
+                // printf("✅TMA Encode SFB (rank=3) SUCCESS!\n");
             }
         }
 
@@ -1910,8 +1910,8 @@ void launch_fp4_gemv_optimized(
 
             uintptr_t sfa_addr = reinterpret_cast<uintptr_t>(SFA_ptr);
             if ((sfa_addr % 128) != 0) {
-                printf("ERROR: SFA_ptr not 128-byte aligned: %p (mod128=%llu)\n",
-                       SFA_ptr, (unsigned long long)(sfa_addr % 128));
+                /* printf("ERROR: SFA_ptr not 128-byte aligned: %p (mod128=%llu)\n",
+                       SFA_ptr, (unsigned long long)(sfa_addr % 128)); */
             }
 
             // Use SWIZZLE_NONE for rank-2 (CTA launch)
@@ -1920,7 +1920,7 @@ void launch_fp4_gemv_optimized(
             if (resSFA != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
                 cuGetErrorString(resSFA, &err_str);
-                printf("TMA Encode SFA failed: %s\n", err_str ? err_str : "unknown");
+                // printf("TMA Encode SFA failed: %s\n", err_str ? err_str : "unknown");
                 tma_ok = false;
             } else {
                 check_cuda(cudaMalloc(&d_map_SFA, sizeof(CUtensorMap)), "cudaMalloc d_map_SFA");
@@ -1939,21 +1939,21 @@ void launch_fp4_gemv_optimized(
             if (resSFA != CUDA_SUCCESS) {
                 const char* err_str = nullptr;
                 cuGetErrorString(resSFA, &err_str);
-                printf("TMA Encode SFA failed: %s\n", err_str ? err_str : "unknown");
+                // printf("TMA Encode SFA failed: %s\n", err_str ? err_str : "unknown");
                 tma_ok = false;
             } else {
                 check_cuda(cudaMalloc(&d_map_SFA, sizeof(CUtensorMap)), "cudaMalloc d_map_SFA");
                 check_cuda(cudaMemcpy(d_map_SFA, map_SFA_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFA");
-                printf("✅TMA Encode SFA (rank=3) SUCCESS!\n");
+                // printf("✅TMA Encode SFA (rank=3) SUCCESS!\n");
             }
         }
     }
 
     // Verify all TMA descriptors were created successfully
     if (!d_map_A || !d_map_SFA || !d_map_B || !d_map_SFB) {
-        printf("ERROR: Not all TMA descriptors were created successfully!\n");
-        printf("  d_map_A=%p d_map_SFA=%p d_map_B=%p d_map_SFB=%p\n",
-               (void*)d_map_A, (void*)d_map_SFA, (void*)d_map_B, (void*)d_map_SFB);
+        // printf("ERROR: Not all TMA descriptors were created successfully!\n");
+        /* printf("  d_map_A=%p d_map_SFA=%p d_map_B=%p d_map_SFB=%p\n",
+               (void*)d_map_A, (void*)d_map_SFA, (void*)d_map_B, (void*)d_map_SFB); */
         throw std::runtime_error("TMA descriptor creation failed");
     }
 
@@ -1970,7 +1970,7 @@ void launch_fp4_gemv_optimized(
         throw std::runtime_error(std::string("cudaFuncSetAttribute MaxDynamicSharedMemorySize failed: ") + cudaGetErrorString(set_err));
     }
     if (L > 1) {
-        printf("✅cudaFuncSetAttribute MaxDynamicSharedMemorySize=%zu SUCCESS\n", shared_bytes);
+        // printf("✅cudaFuncSetAttribute MaxDynamicSharedMemorySize=%zu SUCCESS\n", shared_bytes);
     }
 
     int num_blocks = static_cast<int>((M + kTileM - 1) / kTileM);
@@ -2009,10 +2009,10 @@ void launch_fp4_gemv_optimized(
             1
         );
         if (cluster_enable != cudaSuccess) {
-            printf("ERROR: cudaFuncSetAttribute NonPortableCluster failed: %s\n", cudaGetErrorString(cluster_enable));
+            // printf("ERROR: cudaFuncSetAttribute NonPortableCluster failed: %s\n", cudaGetErrorString(cluster_enable));
             throw std::runtime_error(std::string("cudaFuncSetAttribute NonPortableCluster failed: ") + cudaGetErrorString(cluster_enable));
         }
-        printf("✅cudaFuncSetAttribute NonPortableClusterSizeAllowed=1 SUCCESS\n");
+        // printf("✅cudaFuncSetAttribute NonPortableClusterSizeAllowed=1 SUCCESS\n");
 
         // Set up cluster launch configuration
         launch_attr[0].id = cudaLaunchAttributeClusterDimension;
@@ -2020,13 +2020,13 @@ void launch_fp4_gemv_optimized(
         launch_attr[0].val.clusterDim.y = cluster.y;
         launch_attr[0].val.clusterDim.z = cluster.z;
 
-        printf("DEBUG: Immediately after setting launch_attr:\n");
-        printf("  cudaLaunchAttributeClusterDimension enum value=%d\n", (int)cudaLaunchAttributeClusterDimension);
-        printf("  launch_attr[0].id=%d\n", (int)launch_attr[0].id);
-        printf("  launch_attr[0].val.clusterDim=(%u,%u,%u)\n",
+        // printf("DEBUG: Immediately after setting launch_attr:\n");
+        // printf("  cudaLaunchAttributeClusterDimension enum value=%d\n", (int)cudaLaunchAttributeClusterDimension);
+        // printf("  launch_attr[0].id=%d\n", (int)launch_attr[0].id);
+        /* printf("  launch_attr[0].val.clusterDim=(%u,%u,%u)\n",
                launch_attr[0].val.clusterDim.x,
                launch_attr[0].val.clusterDim.y,
-               launch_attr[0].val.clusterDim.z);
+               launch_attr[0].val.clusterDim.z); */
 
         launch_config.gridDim = grid;
         launch_config.blockDim = block;
@@ -2034,30 +2034,30 @@ void launch_fp4_gemv_optimized(
         launch_config.attrs = launch_attr;
         launch_config.numAttrs = 1;
 
-        printf("DEBUG: After setting launch_config.attrs:\n");
-        printf("  launch_config.attrs=%p, launch_attr=%p\n", (void*)launch_config.attrs, (void*)launch_attr);
-        printf("  launch_config.attrs[0].id=%d\n", (int)launch_config.attrs[0].id);
-        printf("  launch_config.attrs[0].val.clusterDim=(%u,%u,%u)\n",
+        // printf("DEBUG: After setting launch_config.attrs:\n");
+        // printf("  launch_config.attrs=%p, launch_attr=%p\n", (void*)launch_config.attrs, (void*)launch_attr);
+        // printf("  launch_config.attrs[0].id=%d\n", (int)launch_config.attrs[0].id);
+        /* printf("  launch_config.attrs[0].val.clusterDim=(%u,%u,%u)\n",
                launch_config.attrs[0].val.clusterDim.x,
                launch_config.attrs[0].val.clusterDim.y,
-               launch_config.attrs[0].val.clusterDim.z);
+               launch_config.attrs[0].val.clusterDim.z); */
 
         // Debug output for rank-3 only
-        printf("DEBUG launch (rank-3 cluster):\n");
-        printf("  grid=(%d,%d,%d)\n", grid_x, grid_y, 1);
-        printf("  block=(%d,%d,%d)\n", kThreads, 1, 1);
-        printf("  shared_bytes=%zu (%.1f KB)\n", shared_bytes, shared_bytes/1024.0);
-        printf("  cluster=(%d,%d,%d)\n", cluster.x, cluster.y, cluster.z);
-        printf("  M=%lld K=%lld L=%lld K_scales_padded=%lld\n",
-               (long long)M, (long long)K, (long long)L, (long long)K_scales_padded);
-        printf("  box_sfa_k=%d\n", (L == 1) ? 16 : 128);
+        // printf("DEBUG launch (rank-3 cluster):\n");
+        // printf("  grid=(%d,%d,%d)\n", grid_x, grid_y, 1);
+        // printf("  block=(%d,%d,%d)\n", kThreads, 1, 1);
+        // printf("  shared_bytes=%zu (%.1f KB)\n", shared_bytes, shared_bytes/1024.0);
+        // printf("  cluster=(%d,%d,%d)\n", cluster.x, cluster.y, cluster.z);
+        /* printf("  M=%lld K=%lld L=%lld K_scales_padded=%lld\n",
+               (long long)M, (long long)K, (long long)L, (long long)K_scales_padded); */
+        // printf("  box_sfa_k=%d\n", (L == 1) ? 16 : 128);
 
         // Check if grid is divisible by cluster
         if (grid_x % cluster.x != 0) {
-            printf("WARNING: grid.x=%d not divisible by cluster.x=%d\n", grid_x, cluster.x);
+            // printf("WARNING: grid.x=%d not divisible by cluster.x=%d\n", grid_x, cluster.x);
         }
         if (grid_y % cluster.y != 0) {
-            printf("WARNING: grid.y=%d not divisible by cluster.y=%d\n", grid_y, cluster.y);
+            // printf("WARNING: grid.y=%d not divisible by cluster.y=%d\n", grid_y, cluster.y);
         }
     }
 
@@ -2088,56 +2088,56 @@ void launch_fp4_gemv_optimized(
         cudaGetDevice(&device);
         cudaDeviceProp prop;
         cudaGetDeviceProperties(&prop, device);
-        printf("Device limits:\n");
-        printf("  sharedMemPerBlock: %zu (%.1f KB)\n",
-               prop.sharedMemPerBlock, prop.sharedMemPerBlock/1024.0);
-        printf("  sharedMemPerBlockOptin: %zu (%.1f KB)\n",
-               prop.sharedMemPerBlockOptin, prop.sharedMemPerBlockOptin/1024.0);
-        printf("  maxBlocksPerMultiProcessor: %d\n", prop.maxBlocksPerMultiProcessor);
-        printf("  clusterDimSupported: %d\n", prop.clusterLaunch);
-        printf("  Requested shared_bytes: %zu (%.1f KB)\n",
-               shared_bytes, shared_bytes/1024.0);
+        // printf("Device limits:\n");
+        /* printf("  sharedMemPerBlock: %zu (%.1f KB)\n",
+               prop.sharedMemPerBlock, prop.sharedMemPerBlock/1024.0); */
+        /* printf("  sharedMemPerBlockOptin: %zu (%.1f KB)\n",
+               prop.sharedMemPerBlockOptin, prop.sharedMemPerBlockOptin/1024.0); */
+        // printf("  maxBlocksPerMultiProcessor: %d\n", prop.maxBlocksPerMultiProcessor);
+        // printf("  clusterDimSupported: %d\n", prop.clusterLaunch);
+        /* printf("  Requested shared_bytes: %zu (%.1f KB)\n",
+               shared_bytes, shared_bytes/1024.0); */
 
         // Check if shared memory exceeds limits
         if (shared_bytes > prop.sharedMemPerBlockOptin) {
-            printf("ERROR: Requested shared memory exceeds device limit!\n");
+            // printf("ERROR: Requested shared memory exceeds device limit!\n");
         }
 
         // Check cluster support
         if (!prop.clusterLaunch) {
-            printf("ERROR: Device does not support cluster launch!\n");
+            // printf("ERROR: Device does not support cluster launch!\n");
         }
 
         // Verify launch config
-        printf("Launch config verification:\n");
-        printf("  kernel_ptr=%p\n", kernel_ptr);
-        printf("  launch_config.gridDim=(%u,%u,%u)\n",
-               launch_config.gridDim.x, launch_config.gridDim.y, launch_config.gridDim.z);
-        printf("  launch_config.blockDim=(%u,%u,%u)\n",
-               launch_config.blockDim.x, launch_config.blockDim.y, launch_config.blockDim.z);
-        printf("  launch_config.dynamicSmemBytes=%zu\n", launch_config.dynamicSmemBytes);
-        printf("  launch_config.numAttrs=%d\n", launch_config.numAttrs);
+        // printf("Launch config verification:\n");
+        // printf("  kernel_ptr=%p\n", kernel_ptr);
+        /* printf("  launch_config.gridDim=(%u,%u,%u)\n",
+               launch_config.gridDim.x, launch_config.gridDim.y, launch_config.gridDim.z); */
+        /* printf("  launch_config.blockDim=(%u,%u,%u)\n",
+               launch_config.blockDim.x, launch_config.blockDim.y, launch_config.blockDim.z); */
+        // printf("  launch_config.dynamicSmemBytes=%zu\n", launch_config.dynamicSmemBytes);
+        // printf("  launch_config.numAttrs=%d\n", launch_config.numAttrs);
         if (launch_config.numAttrs > 0) {
-            printf("  launch_attr[0].id=%d (should be %d for ClusterDimension)\n",
-                   launch_config.attrs[0].id, cudaLaunchAttributeClusterDimension);
-            printf("  cluster dims=(%u,%u,%u)\n",
+            /* printf("  launch_attr[0].id=%d (should be %d for ClusterDimension)\n",
+                   launch_config.attrs[0].id, cudaLaunchAttributeClusterDimension); */
+            /* printf("  cluster dims=(%u,%u,%u)\n",
                    launch_config.attrs[0].val.clusterDim.x,
                    launch_config.attrs[0].val.clusterDim.y,
-                   launch_config.attrs[0].val.clusterDim.z);
+                   launch_config.attrs[0].val.clusterDim.z); */
         }
     }
 
     cudaError_t launch_err = cudaLaunchKernelExC(&launch_config, kernel_ptr, kernel_args);
     if (launch_err != cudaSuccess) {
         if (L > 1) {
-            printf("Launch failed with error: %s\n", cudaGetErrorString(launch_err));
-            printf("This was a rank-3 (L=%lld) cluster launch\n", (long long)L);
+            // printf("Launch failed with error: %s\n", cudaGetErrorString(launch_err));
+            // printf("This was a rank-3 (L=%lld) cluster launch\n", (long long)L);
         }
         throw std::runtime_error(std::string("cudaLaunchKernelExC failed: ") + cudaGetErrorString(launch_err));
     }
 
     if (L > 1) {
-        printf("✓ Rank-3 kernel launched successfully!\n");
+        // printf("✓ Rank-3 kernel launched successfully!\n");
     }
 
     cudaError_t err = cudaDeviceSynchronize();
@@ -2173,11 +2173,15 @@ def get_module():
             functions=[
                 "launch_fp4_gemv_optimized",
             ],
-            verbose=True,
+            verbose=False,
             extra_cuda_cflags=[
-                "-O2",  # Enable optimizations to fix lambda stack issues
+                "-O3",  # Enable optimizations to fix lambda stack issues
                 "-DNDEBUG",  # Disable debug output for performance testing
-                # "--use_fast_math",  # Disabled for debugging
+                "--use_fast_math",  # Disabled for debugging
+                "--ftz=true",  # Flush denormals to zero
+                "--prec-div=false",  # Faster division (less precise)
+                "--prec-sqrt=false",  # Faster sqrt (less precise)
+                "--fmad=true",  # Enable fused multiply-add
                 "-std=c++17",
                 "-gencode=arch=compute_100a,code=sm_100a",
                 "--expt-relaxed-constexpr",
@@ -2185,8 +2189,8 @@ def get_module():
                 "-Xcudafe",
                 "--diag_suppress=20012",
                 "-maxrregcount=128",
-                "--ptxas-options=-v,-warn-lmem-usage",
-                "-lineinfo",
+                # "--ptxas-options=-v,-warn-lmem-usage",
+                # "-lineinfo",
                 f"-I{cutlass_path}/include",
             ],
             extra_ldflags=["-lcuda"],
