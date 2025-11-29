@@ -1402,7 +1402,9 @@ fp4gemv_rank2_cta(
         // printf("DEBUG: CTA(%d,%d,%d) exiting\n", blockIdx.x, blockIdx.y, blockIdx.z);
     }
 #endif
-}template<int TileM, int TileK, int Threads>
+}
+
+template<int TileM, int TileK, int Threads>
 __global__ void __launch_bounds__(Threads)
 fp4gemv_rank3_cluster(
     const uint8_t* __restrict__ A_packed,
@@ -2166,7 +2168,9 @@ fp4gemv_rank3_cluster(
         // printf("DEBUG: CTA(%d,%d,%d) exiting\n", blockIdx.x, blockIdx.y, blockIdx.z);
     }
 #endif
-}template<int TileM, int TileK, int Threads>
+}
+
+template<int TileM, int TileK, int Threads>
 __global__ void __launch_bounds__(Threads)
 fp4_gemv_steaming(
     const uint8_t* __restrict__ A_packed,
@@ -3647,10 +3651,10 @@ void launch_fp4_gemv_optimized(
     void const* kernel_ptr = nullptr;
     if (L == 1) {
         // Rank-2: CTA-only kernel
-        kernel_ptr = (void const*)fp4_gemv_rank2_cta<kTileM, kTileK, kThreads>;
+        kernel_ptr = (void const*)fp4gemv_rank2_cta<kTileM, kTileK, kThreads>;
     } else {
         // Rank-3: Cluster kernel
-        kernel_ptr = (void const*)fp4_gemv_rank3_cluster<kTileM, kTileK, kThreads>;
+        kernel_ptr = (void const*)fp4gemv_rank3_cluster<kTileM, kTileK, kThreads>;
     }
 
     cudaFuncAttributes attr;
