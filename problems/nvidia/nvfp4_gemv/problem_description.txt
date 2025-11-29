@@ -19,6 +19,6 @@ The ranking criteria is the geometric mean of the benchmark results.
 
 The speed of light analysis based on the max(FFMA math throughput, DRAM memory throughput) of B200 and tested under 1.5Ghz clock:
 M K L time[us]
-7168 16384 1 8.622
-4096 7168 8 17.275
-7168 2048 4 4.317
+7168 16384 1 ?
+4096 7168 8 ?
+7168 2048 4 ?
