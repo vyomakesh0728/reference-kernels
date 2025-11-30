@@ -1,0 +1,97 @@
+Support for CUDA Memory Checker has been removed. Use the standalone Compute Sanitizer instead.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffeaa9ff640 (LWP 25272)]
+[New Thread 0x7ffeaa1fe640 (LWP 25273)]
+[New Thread 0x7ffea99fd640 (LWP 25274)]
+[New Thread 0x7ffea91fc640 (LWP 25275)]
+[New Thread 0x7ffea89fb640 (LWP 25276)]
+[New Thread 0x7ffea81fa640 (LWP 25277)]
+[New Thread 0x7ffea79f9640 (LWP 25278)]
+[New Thread 0x7ffea71f8640 (LWP 25279)]
+[New Thread 0x7ffea69f7640 (LWP 25280)]
+[New Thread 0x7ffea61f6640 (LWP 25281)]
+[New Thread 0x7ffea59f5640 (LWP 25282)]
+[New Thread 0x7ffea51f4640 (LWP 25283)]
+[New Thread 0x7ffea49f3640 (LWP 25284)]
+[New Thread 0x7ffea41f2640 (LWP 25285)]
+[New Thread 0x7ffea39f1640 (LWP 25286)]
+[New Thread 0x7ffea31f0640 (LWP 25287)]
+[New Thread 0x7ffea29ef640 (LWP 25288)]
+[New Thread 0x7ffea21ee640 (LWP 25289)]
+[New Thread 0x7ffea19ed640 (LWP 25290)]
+[New Thread 0x7ffea11ec640 (LWP 25291)]
+[New Thread 0x7ffea09eb640 (LWP 25292)]
+[New Thread 0x7ffea01ea640 (LWP 25293)]
+[New Thread 0x7ffe9f9e9640 (LWP 25294)]
+[New Thread 0x7ffe9f1e8640 (LWP 25295)]
+[New Thread 0x7ffe9e9e7640 (LWP 25296)]
+[New Thread 0x7ffe9e1e6640 (LWP 25297)]
+[New Thread 0x7ffe9d9e5640 (LWP 25298)]
+[New Thread 0x7ffe9d1e4640 (LWP 25299)]
+[New Thread 0x7ffe9c9e3640 (LWP 25300)]
+[New Thread 0x7ffe995dc640 (LWP 25303)]
+[New Thread 0x7ffe93fff640 (LWP 25304)]
+[Thread 0x7ffe9d1e4640 (LWP 25299) exited]
+[Thread 0x7ffe9d9e5640 (LWP 25298) exited]
+[Thread 0x7ffe9e1e6640 (LWP 25297) exited]
+[Thread 0x7ffe9e9e7640 (LWP 25296) exited]
+[Thread 0x7ffe9f1e8640 (LWP 25295) exited]
+[Thread 0x7ffe9f9e9640 (LWP 25294) exited]
+[Thread 0x7ffea01ea640 (LWP 25293) exited]
+[Thread 0x7ffea09eb640 (LWP 25292) exited]
+[Thread 0x7ffea11ec640 (LWP 25291) exited]
+[Thread 0x7ffea19ed640 (LWP 25290) exited]
+[Thread 0x7ffea21ee640 (LWP 25289) exited]
+[Thread 0x7ffea29ef640 (LWP 25288) exited]
+[Thread 0x7ffea31f0640 (LWP 25287) exited]
+[Thread 0x7ffea39f1640 (LWP 25286) exited]
+[Thread 0x7ffea41f2640 (LWP 25285) exited]
+[Thread 0x7ffea49f3640 (LWP 25284) exited]
+[Thread 0x7ffea51f4640 (LWP 25283) exited]
+[Thread 0x7ffea59f5640 (LWP 25282) exited]
+[Thread 0x7ffea61f6640 (LWP 25281) exited]
+[Thread 0x7ffea69f7640 (LWP 25280) exited]
+[Thread 0x7ffea71f8640 (LWP 25279) exited]
+[Thread 0x7ffea79f9640 (LWP 25278) exited]
+[Thread 0x7ffea81fa640 (LWP 25277) exited]
+[Thread 0x7ffea89fb640 (LWP 25276) exited]
+[Thread 0x7ffea91fc640 (LWP 25275) exited]
+[Thread 0x7ffea99fd640 (LWP 25274) exited]
+[Thread 0x7ffeaa1fe640 (LWP 25273) exited]
+[Thread 0x7ffeaa9ff640 (LWP 25272) exited]
+[Thread 0x7ffe9c9e3640 (LWP 25300) exited]
+[Detaching after fork from child process 25305]
+[New Thread 0x7ffe9c9e3640 (LWP 25313)]
+[Detaching after vfork from child process 25316]
+[Detaching after vfork from child process 25317]
+
+============================================================
+Testing: M=4096, K=7168, L=1 (rank-2 CTA)
+============================================================
+Launching kernel...
+
+[SCALE DEBUG] sfa_ref_cpu shape=torch.Size([4096, 448, 1]), device=cuda:0
+[SCALE DEBUG] sfb_ref_cpu shape=torch.Size([128, 448, 1]), device=cuda:0
+[DEBUG] No padding needed, K_scales=448
+[DEBUG] a_bytes: shape=(1, 4096, 3584), stride=(14680064, 3584, 1), elem_size=1, numel=14680064, bytes=14680064, data_ptr=0x7ffc62000000
+[DEBUG] b_bytes: shape=(1, 128, 3584), stride=(458752, 3584, 1), elem_size=1, numel=458752, bytes=458752, data_ptr=0x7ffc61aaa000
+[DEBUG] sfa_bytes: shape=(1, 4096, 448), stride=(1835008, 448, 1), elem_size=1, numel=1835008, bytes=1835008, data_ptr=0x7ffc5e1c0000
+[DEBUG] sfb_bytes: shape=(1, 128, 448), stride=(57344, 448, 1), elem_size=1, numel=57344, bytes=57344, data_ptr=0x7ffc61a82000
+[DEBUG] sfa_bytes[0,0,:8] (batch 0, row 0, first 8 scales): [0, 64, 56, 0, 0, 56, 56, 64]
+[DEBUG] sfa_bytes[0,1,:8] (batch 0, row 1, first 8 scales): [0, 64, 56, 56, 64, 56, 0, 64]
+[DEBUG] sfa_bytes[0,2,:8] (batch 0, row 2, first 8 scales): [56, 0, 64, 0, 56, 64, 0, 64]
+[DEBUG] sfa_bytes[0,3,:8] (batch 0, row 3, first 8 scales): [0, 0, 56, 0, 64, 64, 56, 64]
+[DEBUG] sfa_bytes[0,4,:8] (batch 0, row 4, first 8 scales): [0, 56, 0, 0, 0, 0, 64, 56]
+[DEBUG] sfb_bytes[0,0,:8] (batch 0, row 0, first 8 scales): [64, 64, 64, 64, 0, 0, 0, 56]
+[DEBUG] a_bytes range: [0x7ffc62000000, 0x7ffc62e00000) (14680064 bytes)
+[DEBUG] b_bytes range: [0x7ffc61aaa000, 0x7ffc61b1a000) (458752 bytes)
+[DEBUG] sfa_bytes range: [0x7ffc5e1c0000, 0x7ffc5e380000) (1835008 bytes)
+[DEBUG] sfb_bytes range: [0x7ffc61a82000, 0x7ffc61a90000) (57344 bytes)
+[DEBUG] a shape=(1, 4096, 3584), stride=(14680064, 3584, 1), data_ptr=0x7ffc62000000
+[DEBUG] b shape=(1, 128, 3584), stride=(458752, 3584, 1), data_ptr=0x7ffc61aaa000
+✅(Python) a_bytes 128-byte alignment check passed: 0x7ffc62000000
+✅(Python) b_bytes 128-byte alignment check passed: 0x7ffc61aaa000
+[Detaching after vfork from child process 25318]
+LAUNCH DEBUG: M=4096 K=7168 L=1
+LAUNCH DEBUG: using fp4_gemv_rank2_cta
