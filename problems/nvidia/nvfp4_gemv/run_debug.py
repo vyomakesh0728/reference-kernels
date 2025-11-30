@@ -34,13 +34,21 @@ def run_debug():
     # input_t is likely (a, b, sfa, sfb, sfa_permuted, sfb_permuted, c) based on reference.py
     # But submission.py might ignore some.
     
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    
+    start_event.record()
     try:
-        c_submit = submission.fp4_gemv(inputs)
+        c_submit = submission.custom_kernel(inputs)
     except Exception as e:
         print(f"Error running submission kernel: {e}")
         import traceback
         traceback.print_exc()
         return
+    end_event.record()
+    torch.cuda.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print(f"Kernel execution time: {elapsed_time_ms * 1000:.2f} us")
 
     print("\n" + "="*80)
     print("COMPARISON")
