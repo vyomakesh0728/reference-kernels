@@ -9,7 +9,7 @@ lang: "py"
 
 description: |
   
-  You will implement a batched matrix-vector multiplication kernel optimized for NVIDIA B200.
+  You will implement a batched matrix-vector GEMV multiplication kernel optimized for NVIDIA B200.
   To be explicit, you will be given a tuple of tensors:
   ```
   (a, b, sfa, sfb, c)
