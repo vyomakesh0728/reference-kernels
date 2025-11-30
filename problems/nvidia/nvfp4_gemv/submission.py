@@ -1867,20 +1867,17 @@ fp4_gemv_rank3_cluster( // <- kernel start here
                 // printf("K-TILE: Mbarrier wait completed, about to cluster sync\n");
             }
 #endif
-            // RANK-3: Cluster-wide sync after CTA0 waited - prevents CTA1 from racing ahead
-            sync_cluster_or_block(L); // <- forth sync cluster or block
-#ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                // printf("K-TILE: After syncthreads, updating phase\n");
-            }
-#endif
             if (tid == 0) {
                 stage_phase_smem[stage] ^= 1;
             }
 #endif
-        } else {        // <- and I think this brace is the use_tma_a close if
+        } else {        
             cp_async_wait();
         }
+#if __CUDA_ARCH__ >= 900
+        // RANK-3: Cluster-wide sync must be called by ALL threads
+        sync_cluster_or_block(L); 
+#endif
         __syncthreads();
 
 #ifndef NDEBUG
