@@ -1863,7 +1863,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
 
                 // RANK-3: Only CTA0 waits, then sync all CTAs
                 // uint32_t cta_rank = blockIdx.x % 2; // Already declared at kernel start
-                if (cta_rank == 0) {
+                if (!out_of_bounds && cta_rank == 0) {
                     mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
                 }
 #ifndef NDEBUG
