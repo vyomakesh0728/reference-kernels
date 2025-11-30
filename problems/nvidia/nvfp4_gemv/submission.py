@@ -1859,14 +1859,6 @@ fp4_gemv_rank3_cluster( // <- kernel start here
 
                 // RANK-3: ALL CTAs wait (since all have their own mbar_a)
                 // uint32_t cta_rank = blockIdx.x % 2; // Already declared at kernel start
-                if (true) {
-                    mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
-                }
-#ifndef NDEBUG
-            if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
-                // printf("K-TILE: Mbarrier wait completed, about to cluster sync\n");
-            }
-#endif
             if (tid == 0) {
                 stage_phase_smem[stage] ^= 1;
             }
@@ -1874,10 +1866,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
         } else {        
             cp_async_wait();
         }
-#if __CUDA_ARCH__ >= 900
-        // RANK-3: Cluster-wide sync must be called by ALL threads
-        sync_cluster_or_block(L); 
-#endif
+        // Standard block sync is sufficient as A/SFA are local to the block
         __syncthreads();
 
 #ifndef NDEBUG
