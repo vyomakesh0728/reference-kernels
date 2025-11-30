@@ -8,7 +8,6 @@ cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
 
 cuda_source = r"""
 #include <torch/extension.h>
-#undef NDEBUG
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda.h>
@@ -538,7 +537,7 @@ __device__ __forceinline__ void process_tile(
                         int sfa_offset = sfa_base_scale % sfa_stride;
                         sfa_idx = row * sfa_stride + sfa_offset + scale_col;
                     }
-                    DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, sfa_size, sfa_stage[stage]);
+                    DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, TileM * sfa_stride, sfa_stage[stage]);
                     scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][sfa_idx]));
                 }
             }
@@ -579,9 +578,11 @@ __device__ __forceinline__ void process_tile(
                 int b_vec_idx = k_tile + kk;
                 DEBUG_OOB_SMEM_1D("b_vec_smem", b_vec_idx, K, b_vec_smem);
                 v = b_vec_smem[b_vec_idx];
+#ifndef NDEBUG
                 if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk < 8) {
                     printf("B_decode k_tile=%d kk=%d v=%.4f\n", k_tile, kk, __half2float(v));
                 }
+#endif
             }
             half* b_row = b_tile_smem + kk * 8;
 #pragma unroll
@@ -654,10 +655,12 @@ __device__ __forceinline__ void process_tile(
                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1)
             );
 
+#ifndef NDEBUG
             if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id == 0) {
-                printf("ACCUM k_tile=%d c_frag_0=%.4f c_frag_1=%.4f c_frag_2=%.4f c_frag_3=%.4f\n", 
+                printf("ACCUM k_tile=%d c_frag_0=%.4f c_frag_1=%.4f c_frag_2=%.4f c_frag_3=%.4f\n",
                        k_tile, c_frag_0, c_frag_1, c_frag_2, c_frag_3);
             }
+#endif
         }
     }
 }

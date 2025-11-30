@@ -3,6 +3,7 @@
 import sys
 sys.path.insert(0, '/root/reference-kernels/problems/nvidia/nvfp4_gemv')
 
+import torch
 from submission import custom_kernel
 from reference import generate_input
 from utils import set_seed
@@ -29,8 +30,24 @@ for m, k, l, desc in test_cases:
     data = generate_input(m=m, k=k, l=l, seed=1111)
 
     try:
+        # Warmup run
+        _ = custom_kernel(data)
+        torch.cuda.synchronize()
+
+        # Timed run
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        start_event.record()
         output = custom_kernel(data)
+        end_event.record()
+        torch.cuda.synchronize()
+
+        elapsed_time_ms = start_event.elapsed_time(end_event)
+        elapsed_time_us = elapsed_time_ms * 1000
+
         print(f"✓ Kernel executed successfully! Output shape: {output.shape}")
+        print(f"  Execution time: {elapsed_time_us:.2f} μs ({elapsed_time_ms:.3f} ms)")
     except Exception as e:
         print(f"✗ Kernel FAILED with error: {e}")
         import traceback
