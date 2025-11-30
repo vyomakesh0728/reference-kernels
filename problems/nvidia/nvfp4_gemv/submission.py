@@ -1612,7 +1612,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
 
     // RANK-3: With shared::cluster TMA + peer mask, only CTA0's barrier gets updated
     // Only CTA0 waits on barrier, then all CTAs sync via cluster_arrive/cluster_wait
-    uint32_t cta_rank = blockIdx.x % 2;
+    // uint32_t cta_rank = blockIdx.x % 2; // Already declared above
     if (cta_rank == 0) {
         // Only CTA0 waits on the barrier
         uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
@@ -1823,7 +1823,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
 #if __CUDA_ARCH__ >= 900
 
                 // RANK-3: Only CTA0 waits, then sync all CTAs
-                uint32_t cta_rank = blockIdx.x % 2;
+                // uint32_t cta_rank = blockIdx.x % 2; // Already declared at kernel start
                 if (cta_rank == 0) {
                     mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
                 }
