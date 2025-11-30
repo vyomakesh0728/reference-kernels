@@ -35,15 +35,11 @@ If the task is unreasonable or infeasible, or if any of the tests are incorrect,
 
 <CONCISE_CRITICAL_INSTRUCTIONS>
 
-  NVFP4 GEMV KERNEL FIX: DEVICE-SIDE NUMERICS ONLY
+  NVFP4 GEMV KERNEL FIX: CLUSTER DEADLOCK IN RANK-3 KERNEL
 
   CRITICAL_CONSTRAINT
     <CRITICAL>
       ABSOLUTE RULE: ZERO HOST/PYTHON/ABI CHANGES ALLOWED
-
-      Hammond harness ALWAYS passes L=1 in c.shape[2], so runtime L cannot decide rank-2 vs rank-3.
-      All three benchmark shapes route through fp4_gemv_rank2_cta and ALL THREE MISMATCH
-      because of device-side indexing bugs.
 
       LOCKED INTERFACES (DO NOT TOUCH):
         - C++ launcher:
@@ -72,80 +68,68 @@ If the task is unreasonable or infeasible, or if any of the tests are incorrect,
 
   CURRENT_STATE
     <OBSERVATION>
-      Hammond Benchmark Shapes (all with harness L=1):
-        - Shape 1: k=16384, l=1, m=128, n=7168
-        - Shape 2: k=7168,  l=1, m=128, n=4096
-        - Shape 3: k=2048,  l=1, m=128, n=7168
+      Official Benchmark Shapes (from test_kernel_only.py):
+        - Shape 1: M=7168, K=16384, L=1 (rank-2 CTA) - WORKS, but 2753x slower
+        - Shape 2: M=4096, K=7168,  L=8 (rank-3 cluster) - DEADLOCKS
+        - Shape 3: M=7168, K=2048,  L=4 (rank-3 cluster) - UNTESTED
 
-      Status:
-        - Launch/TMA/cluster config is STABLE (compute-sanitizer clean)
-        - Only device-side numerical bugs remain in fp4_gemv_rank2_cta
+      Status (from cuda-gdb):
+        - Shape 1 (L=1): Uses fp4_gemv_rank2_cta, executes but numerically wrong (2753x slower)
+        - Shape 2 (L=8): Uses fp4_gemv_rank3_cluster, DEADLOCKS in cluster synchronization
+        - All blocks stuck alternating between two PCs (0x7ffea15f9a70 and 0x7ffea15f61f0)
+        - Launch config: grid=(32,8,1), block=(320,1,1), shared_bytes=189440
     </OBSERVATION>
 
   IMPLEMENTATION_PLAN
     <PLAN>
-      STEP 1: Tiny Debug Case
-        - Use harness with:
-            M=16, K=64, L=1
-        - Single CTA launch of:
-            fp4_gemv_rank2_cta
+      PRIORITY 1: Fix Cluster Deadlock in fp4_gemv_rank3_cluster (L=8, L=4)
 
-      STEP 2: Device Printf Instrumentation
-        - Add to fp4_gemv_rank2_cta under:
-            blockIdx == (0,0), consumer warp, k_tile == 0
+        DEADLOCK SYMPTOMS (from cuda-gdb):
+          - Blocks alternating between two PCs
+          - Likely stuck in cluster.sync() or barrier.arrive_tx/wait
+          - Grid=(32,8,1) means 256 blocks across 8 batches
 
-        - Print:
-            // decoded A[0, 0:16] after SFA scaling
-            // decoded B[0, 0:16] after SFB scaling
-            // c_frag accumulator for row 0 before writeback
+        POSSIBLE CAUSES:
+          1. Mismatched barrier/cluster sync counts
+          2. Incorrect cluster dimensions or launch config
+          3. TMA fences not properly ordered
+          4. Producer-consumer barrier mismatch
 
-      STEP 3: Reference Comparison
-        - In reference.py for same tiny shape/seed, print:
-            # decoded a[0, 0:16] using fp4_lut + sfa scaling
-            # decoded b[0, 0:16] using fp4_lut + sfb scaling
-            # row-0 dot product
+        DEBUG APPROACH:
+          - Add printf in fp4_gemv_rank3_cluster at each sync point
+          - Check if all blocks in cluster reach each barrier
+          - Verify barrier phase/expected_tx match across all blocks
+          - Check TMA descriptor batch indexing for L>1
 
-      STEP 4: Fix Device Numerics Line-by-Line
-        <FIXES>
+      PRIORITY 2: Fix Numerical Issues in fp4_gemv_rank2_cta (L=1)
 
-          SFA indexing in process_tile:
-            // For sfa_stride == 16 (rank-2):
-            sfa_idx = row * 16 + (col_packed >> 3)
-              // col_packed counts FP4 packed bytes along K
+        ISSUE: Executes but 2753x slower than target (23.7ms vs 8.6μs)
 
-          SFB indexing / broadcast:
-            // Ensure k_idx // 8 mapping (one scale per 16 FP4 elements)
-            // Must match reference.py's sfb[0, k//16, 0] indexing
+        POSSIBLE CAUSES:
+          1. Wrong indexing causing cache thrashing
+          2. Incorrect SFA/SFB scale indexing
+          3. FP4 decode nibble order wrong
+          4. Accumulator writeback misaligned
 
-          B decode nibble order:
-            // Confirm low/high nibble extraction matches fp4_lut usage in reference.py
-
-          Accumulator writeback:
-            // Verify c_frag_* maps to correct D_batch[row_idx] with NO swaps
-
-        </FIXES>
-
-      STEP 5: Progressive Validation
-        - Tiny case row 0 matches
-            -> expand to M=128, K=64, L=1
-        - Validate multiple rows
-            -> run three official Hammond shapes
-        - NO HOST CHANGES during validation
+        DEBUG APPROACH:
+          - Use M=16, K=64, L=1 test case
+          - Add printf for decoded A[0, 0:16], B[0, 0:16]
+          - Compare with reference.py for same seed
+          - Fix indexing bugs one by one
     </PLAN>
 
   PREVIOUS_MISTAKES
     <PREVIOUS_VERSION>
-      - Tried adding stride parameters (VIOLATED ABI)
-      - Attempted L→N remapping on host (FORBIDDEN)
-      - Modified TMA/cluster logic (UNNECESSARY - already stable)
-      - Assumed rank-3 kernel was reachable (WRONG - harness only uses rank-2)
+      - Misunderstood that L=1 for all benchmarks (WRONG - actually L=1, L=8, L=4)
+      - Thought rank-3 cluster was unreachable (WRONG - it's used but deadlocks)
+      - Focused only on numerics, missed cluster synchronization bug
     </PREVIOUS_VERSION>
 
   NON_GOALS
     <NON_GOALS>
-      - Do NOT try to "enable" rank-3 kernel (unreachable under harness L=1)
-      - Do NOT reconstruct conceptual L=4,8 shapes (harness doesn't expose them)
-      - Do NOT touch anything outside fp4_gemv_rank2_cta device code
+      - Do NOT modify host-side launch logic
+      - Do NOT add stride parameters
+      - Do NOT change TMA descriptor creation (unless cluster batch indexing wrong)
     </NON_GOALS>
 
   TOOLS
