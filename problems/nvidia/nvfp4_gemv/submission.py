@@ -664,6 +664,8 @@ __device__ __forceinline__ void process_tile(
         }
     }
 }
+
+// RANK2 CTA + SWIZZLE_NONE + BOX_K 16 BYTE (NO CLUSTER)
 template<int TileM, int TileK, int Threads>
 __global__ void __launch_bounds__(Threads)
 fp4_gemv_rank2_cta(
