@@ -2524,6 +2524,7 @@ void launch_fp4_gemv_optimized(
     dim3 grid, block, cluster;
     cudaLaunchAttribute launch_attr[1] = {};  // Declare outside if/else to persist
 
+    if (L == 1) {
         // Rank-2: Regular CTA launch (no cluster)
         grid_x = num_blocks;
         grid_y = 1;
