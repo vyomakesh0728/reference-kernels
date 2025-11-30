@@ -1,0 +1,75 @@
+CUDA_LAUNCH_BLOCKING=1 \
+compute-sanitizer --tool memcheck --report-api-errors all \
+python3 test_kernel_only.py
+========= COMPUTE-SANITIZER
+Testing kernel execution for all configurations...
+============================================================
+
+Test: M=7168, K=16384, L=1
+Config: rank-2: CTA + SWIZZLE_NONE + box_k=16
+
+[SCALE DEBUG] sfa_ref_cpu shape=torch.Size([7168, 1024, 1]), device=cuda:0
+[SCALE DEBUG] sfb_ref_cpu shape=torch.Size([128, 1024, 1]), device=cuda:0
+[DEBUG] No padding needed, K_scales=1024
+[DEBUG] a_bytes: shape=(1, 7168, 8192), stride=(58720256, 8192, 1), elem_size=1, numel=58720256, bytes=58720256, data_ptr=0x7fa5bc000000
+[DEBUG] b_bytes: shape=(1, 128, 8192), stride=(1048576, 8192, 1), elem_size=1, numel=1048576, bytes=1048576, data_ptr=0x7fa5bba00000
+[DEBUG] sfa_bytes: shape=(1, 7168, 1024), stride=(7340032, 1024, 1), elem_size=1, numel=7340032, bytes=7340032, data_ptr=0x7fa5ba700000
+[DEBUG] sfb_bytes: shape=(1, 128, 1024), stride=(131072, 1024, 1), elem_size=1, numel=131072, bytes=131072, data_ptr=0x7fa5f1bb9800
+[DEBUG] sfa_bytes[0,0,:8] (batch 0, row 0, first 8 scales): [64, 0, 64, 64, 0, 64, 64, 56]
+[DEBUG] sfa_bytes[0,1,:8] (batch 0, row 1, first 8 scales): [0, 56, 56, 0, 64, 56, 56, 64]
+[DEBUG] sfa_bytes[0,2,:8] (batch 0, row 2, first 8 scales): [0, 64, 64, 56, 0, 64, 56, 0]
+[DEBUG] sfa_bytes[0,3,:8] (batch 0, row 3, first 8 scales): [64, 64, 0, 56, 56, 56, 56, 56]
+[DEBUG] sfa_bytes[0,4,:8] (batch 0, row 4, first 8 scales): [56, 56, 64, 64, 0, 0, 0, 64]
+[DEBUG] sfb_bytes[0,0,:8] (batch 0, row 0, first 8 scales): [64, 56, 56, 0, 64, 64, 64, 56]
+[DEBUG] a_bytes range: [0x7fa5bc000000, 0x7fa5bf800000) (58720256 bytes)
+[DEBUG] b_bytes range: [0x7fa5bba00000, 0x7fa5bbb00000) (1048576 bytes)
+[DEBUG] sfa_bytes range: [0x7fa5ba700000, 0x7fa5bae00000) (7340032 bytes)
+[DEBUG] sfb_bytes range: [0x7fa5f1bb9800, 0x7fa5f1bd9800) (131072 bytes)
+[DEBUG] a shape=(1, 7168, 8192), stride=(58720256, 8192, 1), data_ptr=0x7fa5bc000000
+[DEBUG] b shape=(1, 128, 8192), stride=(1048576, 8192, 1), data_ptr=0x7fa5bba00000
+✅(Python) a_bytes 128-byte alignment check passed: 0x7fa5bc000000
+✅(Python) b_bytes 128-byte alignment check passed: 0x7fa5bba00000
+========= Program hit cudaErrorInvalidClusterSize (error 912) due to "a kernel launch error has occurred due to cluster misconfiguration" on CUDA API call to cudaLaunchKernel.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: launch_fp4_gemv_optimized(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long) [0x8e41d] in nvfp4_gemv_sm100_ptx.so
+=========         Host Frame: void std::__invoke_impl<void, void (* const&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long>(std::__invoke_other, void (* const&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), at::Tensor&&, at::Tensor&&, at::Tensor&&, at::Tensor&&, at::Tensor&&, long&&, long&&, long&&, long&&) [0x7e154] in nvfp4_gemv_sm100_ptx.so
+=========         Host Frame: std::__invoke_result<void (* const&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long>::type std::__invoke<void (* const&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long>(void (* const&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), at::Tensor&&, at::Tensor&&, at::Tensor&&, at::Tensor&&, at::Tensor&&, long&&, long&&, long&&, long&&) [0x77d31] in nvfp4_gemv_sm100_ptx.so
+=========         Host Frame: std::invoke_result<void (* const&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long>::type std::invoke<void (* const&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long>(void (* const&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), at::Tensor&&, at::Tensor&&, at::Tensor&&, at::Tensor&&, at::Tensor&&, long&&, long&&, long&&, long&&) [0x70630] in nvfp4_gemv_sm100_ptx.so
+=========         Host Frame: torch::detail::wrap_pybind_function_impl_<void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul, false>(void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), std::integer_sequence<unsigned long, 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul>, std::integral_constant<bool, false>)::{lambda(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long)#1}::operator()(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long) const [0x68bc0] in nvfp4_gemv_sm100_ptx.so
+=========         Host Frame: void pybind11::detail::argument_loader<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long>::call_impl<void, torch::detail::wrap_pybind_function_impl_<void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul, false>(void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), std::integer_sequence<unsigned long, 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul>, std::integral_constant<bool, false>)::{lambda(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long)#1}&, 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul, pybind11::detail::void_type>(torch::detail::wrap_pybind_function_impl_<void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul, false>(void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), std::integer_sequence<unsigned long, 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul>, std::integral_constant<bool, false>)::{lambda(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long)#1}&, std::integer_sequence<unsigned long, 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul>, pybind11::detail::void_type&&) && [0x88b82] in nvfp4_gemv_sm100_ptx.so
+=========         Host Frame: std::enable_if<std::is_void<void>::value, pybind11::detail::void_type>::type pybind11::detail::argument_loader<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long>::call<void, pybind11::detail::void_type, torch::detail::wrap_pybind_function_impl_<void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul, false>(void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), std::integer_sequence<unsigned long, 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul>, std::integral_constant<bool, false>)::{lambda(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long)#1}&>(torch::detail::wrap_pybind_function_impl_<void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul, false>(void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), std::integer_sequence<unsigned long, 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul>, std::integral_constant<bool, false>)::{lambda(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long)#1}&) && [0x8410b] in nvfp4_gemv_sm100_ptx.so
+=========         Host Frame: pybind11::cpp_function::initialize<torch::detail::wrap_pybind_function_impl_<void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul, false>(void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), std::integer_sequence<unsigned long, 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul>, std::integral_constant<bool, false>)::{lambda(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long)#1}, void, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long, pybind11::name, pybind11::scope, pybind11::sibling, char [26]>(void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), void (*)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), pybind11::name const&, pybind11::scope const&, pybind11::sibling const&, char const (&) [26])::{lambda(pybind11::detail::function_call&)#3}::operator()(pybind11::detail::function_call) const [0x7e361] in nvfp4_gemv_sm100_ptx.so
+=========         Host Frame: pybind11::cpp_function::initialize<torch::detail::wrap_pybind_function_impl_<void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul, false>(void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), std::integer_sequence<unsigned long, 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul, 7ul, 8ul>, std::integral_constant<bool, false>)::{lambda(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long)#1}, void, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long, pybind11::name, pybind11::scope, pybind11::sibling, char [26]>(void (&)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), void (*)(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, long, long, long, long), pybind11::name const&, pybind11::scope const&, pybind11::sibling const&, char const (&) [26])::{lambda(pybind11::detail::function_call&)#3}::_FUN(pybind11::detail::function_call) [0x7e87b] in nvfp4_gemv_sm100_ptx.so
+=========         Host Frame: pybind11::cpp_function::dispatcher(_object*, _object*, _object*) [0x669a1] in nvfp4_gemv_sm100_ptx.so
+=========         Host Frame:  [0x18a851] in python3
+=========         Host Frame: _PyObject_MakeTpCall [0x18112a] in python3
+=========         Host Frame: _PyEval_EvalFrameDefault [0x17ad95] in python3
+=========         Host Frame: _PyFunction_Vectorcall [0x18b0ab] in python3
+=========         Host Frame: _PyEval_EvalFrameDefault [0x17545f] in python3
+=========         Host Frame:  [0x259be5] in python3
+=========         Host Frame: PyEval_EvalCode [0x259ab5] in python3
+=========         Host Frame:  [0x280527] in python3
+=========         Host Frame:  [0x27ab7e] in python3
+=========         Host Frame:  [0x2802c4] in python3
+=========         Host Frame: _PyRun_SimpleFileObject [0x27f807] in python3
+=========         Host Frame: _PyRun_AnyFileObject [0x27f4e6] in python3
+=========         Host Frame: Py_RunMain [0x273a8d] in python3
+=========         Host Frame: Py_BytesMain [0x24da8c] in python3
+=========         Host Frame:  [0x29d8f] in libc.so.6
+=========         Host Frame: __libc_start_main [0x29e3f] in libc.so.6
+=========         Host Frame: _start [0x24d984] in python3
+=========         Host Frame: custom_kernel in submission.py:2901
+=========         Host Frame: <module> in test_kernel_only.py:32
+========= 
+✗ Kernel FAILED with error: cudaLaunchKernel failed: a kernel launch error has occurred due to cluster misconfiguration
+Traceback (most recent call last):
+  File "/root/reference-kernels/problems/nvidia/nvfp4_gemv/test_kernel_only.py", line 32, in <module>
+    output = custom_kernel(data)
+  File "/root/reference-kernels/problems/nvidia/nvfp4_gemv/submission.py", line 2901, in custom_kernel
+    mod.launch_fp4_gemv_optimized(
+RuntimeError: cudaLaunchKernel failed: a kernel launch error has occurred due to cluster misconfiguration
+
+============================================================
+All kernel executions completed!
+============================================================
+========= ERROR SUMMARY: 1 error
