@@ -554,8 +554,8 @@ __device__ __forceinline__ void process_tile(
             if (blockIdx.x == 0 && blockIdx.y == 0 && col_packed == 0 && row < 5) {
                 int sfa_idx_check = row * K_scales_padded + (col_packed >> 3);
                 uint8_t sfa_byte = sfa_stage[stage][sfa_idx_check];
-                printf("A_decode k_tile=%d stage=%d: row=%d col=%d k_base=%d packed=0x%02x scale=%.4f sfa_idx=%d sfa_byte=0x%02x v0=%.4f v1=%.4f\n",
-                                  k_tile, stage, row, col_packed, k_base, packed, __half2float(scale_h), sfa_idx_check, sfa_byte, __half2float(v0), __half2float(v1));
+                // printf("A_decode k_tile=%d stage=%d: row=%d col=%d k_base=%d packed=0x%02x scale=%.4f sfa_idx=%d sfa_byte=0x%02x v0=%.4f v1=%.4f\n",
+                //                   k_tile, stage, row, col_packed, k_base, packed, __half2float(scale_h), sfa_idx_check, sfa_byte, __half2float(v0), __half2float(v1));
             }
 #endif
 
@@ -580,7 +580,7 @@ __device__ __forceinline__ void process_tile(
                 v = b_vec_smem[b_vec_idx];
 #ifndef NDEBUG
                 if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk < 8) {
-                    printf("B_decode k_tile=%d kk=%d v=%.4f\n", k_tile, kk, __half2float(v));
+                    // printf("B_decode k_tile=%d kk=%d v=%.4f\n", k_tile, kk, __half2float(v));
                 }
 #endif
             }
