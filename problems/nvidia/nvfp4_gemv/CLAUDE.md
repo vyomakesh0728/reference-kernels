@@ -33,62 +33,132 @@ Focus on understanding the problem requirements and implementing the correct alg
 If the task is unreasonable or infeasible, or if any of the tests are incorrect, please inform me rather than working around them. The solution should be robust, maintainable, and extendable.
 </CODE_STYLE>
 
-<IMPLEMENTATION_PLAN>
-  <PREVIOUS_VERSION>
-    sahasra_copy.py is the previous, working single-kernel version.
-    It contains one kernel that handles both:
-      - RANK-2, L=1: TMA CTA + SWIZZLE_NONE + box_k = 16 (bytes / scales).
-      - RANK-3, L=4 or 8: TMA CLUSTER (non-multicast) + SWIZZLE_128B + 1024-byte swizzled regions.
-    All decode, math, tensor layouts, and TMA coordinate logic in sahasra_copy.py are trusted and must be preserved.
-  </PREVIOUS_VERSION>
+<CONCISE_CRITICAL_INSTRUCTIONS>
 
-  <KERNEL_SPLIT_REQUIREMENTS>
-    We now want TWO kernels, but with the SAME core behavior as sahasra_copy.py:
+  NVFP4 GEMV KERNEL FIX: DEVICE-SIDE NUMERICS ONLY
 
-    1) fp4gemv_rank2_cta<TileM, TileK, Threads>  (RANK-2, L == 1)
-       - CTA-only execution, no cluster usage.
-       - Uses RANK-2 TMA descriptors:
-         * TMA CTA, SWIZZLE_NONE, SfaBoxK = 16.
-       - Uses .shared::cta TMA only and __syncthreads() for sync.
-       - No cooperative_groups::this_cluster, no .shared::cluster or ctagroup2 TMA, no cluster mbarrier peer-mask.
-       - Its decode + MMA + writeback logic MUST be identical to the RANK-2 path in sahasra_copy.py,
-         aside from trivial parameterization (no new indexing formulas).
+  CRITICAL_CONSTRAINT
+    <CRITICAL>
+      ABSOLUTE RULE: ZERO HOST/PYTHON/ABI CHANGES ALLOWED
 
-    2) fp4gemv_rank3_cluster<TileM, TileK, Threads>  (RANK-3, L > 1 : L=4 or L=8)
-       - Cluster launch, 2 CTAs per cluster, same as sahasra_copy.py.
-       - Uses RANK-3 TMA descriptors:
-         * TMA CLUSTER NON-MULTICAST, SWIZZLE_128B, SfaBoxK = 128,
-           1024-byte aligned SWIZZLE regions in shared memory.
-       - Uses the existing cluster TMA pattern from sahasra_copy.py:
-         ctagroup2.shared::cluster.global.mbarriercomplete_txbytes,
-         mbarrier peer-mask (Sm100MmaPeerBitMask), and syncclusterorblock(L).
-       - Its decode + MMA + writeback logic MUST be identical to the RANK-3 path in sahasra_copy.py.
+      Hammond harness ALWAYS passes L=1 in c.shape[2], so runtime L cannot decide rank-2 vs rank-3.
+      All three benchmark shapes route through fp4_gemv_rank2_cta and ALL THREE MISMATCH
+      because of device-side indexing bugs.
 
-    The ONLY structural change allowed is splitting the single kernel from sahasra_copy.py into
-    these two entry kernels and updating the host launch code to dispatch:
+      LOCKED INTERFACES (DO NOT TOUCH):
+        - C++ launcher:
+            launch_fp4_gemv_optimized(A, B, SFA, SFB, D, M, K, L, K_scales_padded)
 
-      - If L == 1:
-          Launch fp4gemv_rank2_cta<kTileM, kTileK, kThreads> with a CTA-only launch
-          (no clusterDim, no cluster attributes).
+        - Kernel signatures:
+            fp4_gemv_rank2_cta(..., M, K, L, K_scales_padded)
+            fp4_gemv_rank3_cluster(..., M, K, L, K_scales_padded)
 
-      - If L > 1 (L = 4 or 8):
-          Launch fp4gemv_rank3_cluster<kTileM, kTileK, kThreads> as a cluster kernel
-          with cudaLaunchKernelExC and clusterDim = dim3(2,1,1) plus
-          cudaFuncSetAttribute(...NonPortableClusterSizeAllowed, 1), exactly as in sahasra_copy.py.
+        - Problem layout:
+            a   : [M, K, L]
+            b   : [1, K, L]
+            sfa : [M, K/16, L]
+            sfb : [1, K/16, L]
+            c   : [M, 1, L]
 
-    DO NOT change:
-      - FP4 / FP8 decode implementations or math.
-      - TMA descriptor dims/strides/box settings.
-      - SFA/SFB indexing or shared-memory layouts.
-      - ldmatrix + mma.sync fragment mapping.
-    Reuse the sahasra_copy.py logic verbatim wherever possible; only factor it into shared helpers
-    and two kernels without altering behavior.
-  </KERNEL_SPLIT_REQUIREMENTS>
-</IMPLEMENTATION_PLAN>
+        - Python custom_kernel interface
+        - TMA descriptors and shared-memory allocation
 
-<TOOLS>
-  Always diff sahasra_copy.py and submission.py before and after edits.
-  Treat sahasra_copy.py as the source of truth for decode, SFA/SFB indexing,
-  TMA dims/strides/box, and PTX mnemonics; copy those sections directly instead
-  of rewriting them from scratch.
-</TOOLS>
+      FORBIDDEN ACTIONS:
+        - Adding stride parameters anywhere
+        - Remapping L/N on host or Python side
+        - Changing cluster launch logic
+        - Modifying any host-side code
+    </CRITICAL>
+
+  CURRENT_STATE
+    <OBSERVATION>
+      Hammond Benchmark Shapes (all with harness L=1):
+        - Shape 1: k=16384, l=1, m=128, n=7168
+        - Shape 2: k=7168,  l=1, m=128, n=4096
+        - Shape 3: k=2048,  l=1, m=128, n=7168
+
+      Status:
+        - Launch/TMA/cluster config is STABLE (compute-sanitizer clean)
+        - Only device-side numerical bugs remain in fp4_gemv_rank2_cta
+    </OBSERVATION>
+
+  IMPLEMENTATION_PLAN
+    <PLAN>
+      STEP 1: Tiny Debug Case
+        - Use harness with:
+            M=16, K=64, L=1
+        - Single CTA launch of:
+            fp4_gemv_rank2_cta
+
+      STEP 2: Device Printf Instrumentation
+        - Add to fp4_gemv_rank2_cta under:
+            blockIdx == (0,0), consumer warp, k_tile == 0
+
+        - Print:
+            // decoded A[0, 0:16] after SFA scaling
+            // decoded B[0, 0:16] after SFB scaling
+            // c_frag accumulator for row 0 before writeback
+
+      STEP 3: Reference Comparison
+        - In reference.py for same tiny shape/seed, print:
+            # decoded a[0, 0:16] using fp4_lut + sfa scaling
+            # decoded b[0, 0:16] using fp4_lut + sfb scaling
+            # row-0 dot product
+
+      STEP 4: Fix Device Numerics Line-by-Line
+        <FIXES>
+
+          SFA indexing in process_tile:
+            // For sfa_stride == 16 (rank-2):
+            sfa_idx = row * 16 + (col_packed >> 3)
+              // col_packed counts FP4 packed bytes along K
+
+          SFB indexing / broadcast:
+            // Ensure k_idx // 8 mapping (one scale per 16 FP4 elements)
+            // Must match reference.py's sfb[0, k//16, 0] indexing
+
+          B decode nibble order:
+            // Confirm low/high nibble extraction matches fp4_lut usage in reference.py
+
+          Accumulator writeback:
+            // Verify c_frag_* maps to correct D_batch[row_idx] with NO swaps
+
+        </FIXES>
+
+      STEP 5: Progressive Validation
+        - Tiny case row 0 matches
+            -> expand to M=128, K=64, L=1
+        - Validate multiple rows
+            -> run three official Hammond shapes
+        - NO HOST CHANGES during validation
+    </PLAN>
+
+  PREVIOUS_MISTAKES
+    <PREVIOUS_VERSION>
+      - Tried adding stride parameters (VIOLATED ABI)
+      - Attempted L→N remapping on host (FORBIDDEN)
+      - Modified TMA/cluster logic (UNNECESSARY - already stable)
+      - Assumed rank-3 kernel was reachable (WRONG - harness only uses rank-2)
+    </PREVIOUS_VERSION>
+
+  NON_GOALS
+    <NON_GOALS>
+      - Do NOT try to "enable" rank-3 kernel (unreachable under harness L=1)
+      - Do NOT reconstruct conceptual L=4,8 shapes (harness doesn't expose them)
+      - Do NOT touch anything outside fp4_gemv_rank2_cta device code
+    </NON_GOALS>
+
+  TOOLS
+    <TOOLS>
+      - compute-sanitizer:
+          Already clean, confirms launch/TMA stable
+      - printf:
+          Device-side conditional printing for row-0 debug
+      - reference.py:
+          Element-wise numerical ground truth
+      - Target:
+          <55.577 μs geomean latency after numerical fix
+    </TOOLS>
+
+</CONCISE_CRITICAL_INSTRUCTIONS>
+
