@@ -1024,7 +1024,7 @@ fp4_gemv_rank2_cta(
     prefetch_tile<TileM, TileK>(
         0, 0,
         use_tma_a, is_producer, warp_id, lane_id,
-        m_tile, K_packed, K_scales_padded, M, L, batch,
+        m_tile, K_packed, K_scales_padded, M, 1, batch,
         a_packed_stage, sfa_stage, mbar_a,
         desc_A, desc_SFA
     );
@@ -1043,7 +1043,7 @@ fp4_gemv_rank2_cta(
         prefetch_tile<TileM, TileK>(
             1, TileK,
             use_tma_a, is_producer, warp_id, lane_id,
-            m_tile, K_packed, K_scales_padded, M, L, batch,
+            m_tile, K_packed, K_scales_padded, M, 1, batch,
             a_packed_stage, sfa_stage, mbar_a,
             desc_A, desc_SFA
         );
@@ -1090,7 +1090,7 @@ fp4_gemv_rank2_cta(
             prefetch_tile<TileM, TileK>(
                 next_stage, next_k,
                 use_tma_a, is_producer, warp_id, lane_id,
-                m_tile, K_packed, K_scales_padded, M, L, batch,
+                m_tile, K_packed, K_scales_padded, M, 1, batch,
                 a_packed_stage, sfa_stage, mbar_a,
                 desc_A, desc_SFA
             );
