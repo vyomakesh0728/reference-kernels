@@ -428,57 +428,53 @@ __device__ __forceinline__ void prefetch_tile(
 #endif
                 }
             } else {
-                // RANK-3: Only CTA0 sets expect_tx and issues TMA (with shared::cluster, routes to CTA0's barrier)
-                uint32_t cta_rank = blockIdx.x % 2;
-                if (cta_rank == 0) {
-                    // Load A matrix tile (3D)
-                    uint32_t c0 = c_k_packed;
-                    uint32_t c1 = c_m;
-                    uint32_t c2 = static_cast<uint32_t>(batch);
-                    bool valid_batch = c2 < static_cast<uint32_t>(L);
-                    bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
-                    bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
+                // Load A matrix tile (3D)
+                uint32_t c0 = c_k_packed;
+                uint32_t c1 = c_m;
+                uint32_t c2 = static_cast<uint32_t>(batch);
+                bool valid_batch = c2 < static_cast<uint32_t>(L);
+                bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
+                bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
 
-                    // Load SFA scales tile (3D) using element-space coordinates
-                    // TMA requires coordinates to be aligned to box size
-                    uint32_t sfa_c0 = (c_k_scales / SfaBoxK) * SfaBoxK;  // Align to SfaBoxK
-                    uint32_t sfa_c1 = c_m;
-                    uint32_t sfa_c2 = c2;
-                    bool valid_sfa_k = (sfa_c0 + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
-                    bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
+                // Load SFA scales tile (3D) using element-space coordinates
+                // TMA requires coordinates to be aligned to box size
+                uint32_t sfa_c0 = (c_k_scales / SfaBoxK) * SfaBoxK;  // Align to SfaBoxK
+                uint32_t sfa_c1 = c_m;
+                uint32_t sfa_c2 = c2;
+                bool valid_sfa_k = (sfa_c0 + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
+                bool valid_sfa_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
-                    // Calculate total bytes for mbarrier
-                    uint32_t total_bytes = 0;
-                    if (valid_batch && valid_m && valid_k) {
-                        total_bytes += TileM * TileKPacked;
-                    }
-                    if (valid_batch && valid_sfa_m && valid_sfa_k) {
-                        total_bytes += TileM * SfaBoxK;
-                    }
+                // Calculate total bytes for mbarrier
+                uint32_t total_bytes = 0;
+                if (valid_batch && valid_m && valid_k) {
+                    total_bytes += TileM * TileKPacked;
+                }
+                if (valid_batch && valid_sfa_m && valid_sfa_k) {
+                    total_bytes += TileM * SfaBoxK;
+                }
 
-                    // Set mbarrier expected bytes (only CTA0)
-                    mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), total_bytes);
+                // Set mbarrier expected bytes (ALL CTAs must do this for their own A/SFA)
+                mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), total_bytes);
 
-                    // Issue TMA loads (they will complete to the same mbarrier)
-                    if (valid_batch && valid_m && valid_k) {
-                        tma_load_3d_no_arrive(
-                            a_packed_stage[stage],
-                            desc_A,
-                            c0, c1, c2,
-                            mbar_stage(mbar_a, stage),
-                            L
-                        );
-                    }
+                // Issue TMA loads (they will complete to the same mbarrier)
+                if (valid_batch && valid_m && valid_k) {
+                    tma_load_3d_no_arrive(
+                        a_packed_stage[stage],
+                        desc_A,
+                        c0, c1, c2,
+                        mbar_stage(mbar_a, stage),
+                        L
+                    );
+                }
 
-                    if (valid_batch && valid_sfa_m && valid_sfa_k) {
-                        tma_load_3d_no_arrive(
-                            sfa_stage[stage],
-                            desc_SFA,
-                            sfa_c0, sfa_c1, sfa_c2,
-                            mbar_stage(mbar_a, stage),
-                            L
-                        );
-                    }
+                if (valid_batch && valid_sfa_m && valid_sfa_k) {
+                    tma_load_3d_no_arrive(
+                        sfa_stage[stage],
+                        desc_SFA,
+                        sfa_c0, sfa_c1, sfa_c2,
+                        mbar_stage(mbar_a, stage),
+                        L
+                    );
                 }
             }
         }
@@ -1561,15 +1557,15 @@ fp4_gemv_rank3_cluster( // <- kernel start here
     uint32_t total_b_bytes = static_cast<uint32_t>(K_packed);
     uint32_t total_sfb_bytes = static_cast<uint32_t>(K >> 4);  // SFB not padded
 
-    // RANK-3 (L>1): Cluster barrier setup - Only CTA0 sets expect_tx
+    // RANK-3 (L>1): Cluster barrier setup
     uint32_t cta_rank = blockIdx.x % 2;
-    if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
+    if (warp_id == 0 && lane_id == 0) {
         // For out-of-bounds blocks, set expect_tx to 0 bytes
         uint32_t b_bytes = out_of_bounds ? 0 : total_b_bytes;
         uint32_t sfb_bytes = out_of_bounds ? 0 : total_sfb_bytes;
         
-        // Only CTA0 sets expect_tx on its local barrier
-        // TMA from both CTAs will route to CTA0's barrier via peer mask
+        // ALL CTAs set expect_tx on their local barrier
+        // CTA0 issues multicast TMA which updates both barriers
         // Apply Sm100MmaPeerBitMask to barrier addresses (FIX #2)
         constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
         uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
@@ -1650,8 +1646,8 @@ fp4_gemv_rank3_cluster( // <- kernel start here
     // RANK-3: With shared::cluster TMA + peer mask, only CTA0's barrier gets updated
     // Only CTA0 waits on barrier, then all CTAs sync via cluster_arrive/cluster_wait
     // uint32_t cta_rank = blockIdx.x % 2; // Already declared above
-    if (cta_rank == 0) {
-        // Only CTA0 waits on the barrier
+    if (true) {
+        // ALL CTAs wait on their local barrier (updated by multicast TMA)
         uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
         uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
 
@@ -1861,9 +1857,9 @@ fp4_gemv_rank3_cluster( // <- kernel start here
         if (use_tma_a) {
 #if __CUDA_ARCH__ >= 900
 
-                // RANK-3: Only CTA0 waits, then sync all CTAs
+                // RANK-3: ALL CTAs wait (since all have their own mbar_a)
                 // uint32_t cta_rank = blockIdx.x % 2; // Already declared at kernel start
-                if (cta_rank == 0) {
+                if (true) {
                     mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
                 }
 #ifndef NDEBUG
@@ -2845,9 +2841,12 @@ def custom_kernel(data: input_t) -> output_t:
         print(
             f"[DEBUG] Padded SFA from K_scales={K_scales} to K_scales_padded={K_scales_padded}"
         )
+        # print(
+        #     f"[DEBUG] Padded SFA from K_scales={K_scales} to K_scales_padded={K_scales_padded}"
+        # )
     else:
         K_scales_padded = K_scales
-        print(f"[DEBUG] No padding needed, K_scales={K_scales}")
+        # print(f"[DEBUG] No padding needed, K_scales={K_scales}")
 
     # Reinterpret as raw bytes for the CUDA kernel (uint8 view of float8 storage)
     sfa_bytes = sfa_linear.view(torch.uint8)
@@ -2861,11 +2860,11 @@ def custom_kernel(data: input_t) -> output_t:
         elem_size = t.element_size()
         numel = t.numel()
         ptr = t.data_ptr()
-        print(
-            f"[DEBUG] {name}: shape={tuple(t.shape)}, stride={tuple(t.stride())}, "
-            f"elem_size={elem_size}, numel={numel}, bytes={numel * elem_size}, "
-            f"data_ptr={hex(ptr)}"
-        )
+        # print(
+        #     f"[DEBUG] {name}: shape={tuple(t.shape)}, stride={tuple(t.stride())}, "
+        #     f"elem_size={elem_size}, numel={numel}, bytes={numel * elem_size}, "
+        #     f"data_ptr={hex(ptr)}"
+        # )
 
     dump_tensor_info("a_bytes", a_bytes)
     dump_tensor_info("b_bytes", b_bytes)
@@ -2873,13 +2872,13 @@ def custom_kernel(data: input_t) -> output_t:
     dump_tensor_info("sfb_bytes", sfb_bytes)
 
     # Debug: Print first bytes of scale factors for multiple rows
-    for r in range(min(5, sfa_bytes.shape[1])):
-        print(
-            f"[DEBUG] sfa_bytes[0,{r},:8] (batch 0, row {r}, first 8 scales): {sfa_bytes[0, r, : min(8, sfa_bytes.shape[2])].cpu().tolist()}"
-        )
-    print(
-        f"[DEBUG] sfb_bytes[0,0,:8] (batch 0, row 0, first 8 scales): {sfb_bytes[0, 0, : min(8, sfb_bytes.shape[2])].cpu().tolist()}"
-    )
+    # for r in range(min(5, sfa_bytes.shape[1])):
+    #     print(
+    #         f"[DEBUG] sfa_bytes[0,{r},:8] (batch 0, row {r}, first 8 scales): {sfa_bytes[0, r, : min(8, sfa_bytes.shape[2])].cpu().tolist()}"
+    #     )
+    # print(
+    #     f"[DEBUG] sfb_bytes[0,0,:8] (batch 0, row 0, first 8 scales): {sfb_bytes[0, 0, : min(8, sfb_bytes.shape[2])].cpu().tolist()}"
+    # )
 
     # Compute base/end ranges and check for overlap between all byte tensors
     tensors = {
@@ -2893,10 +2892,10 @@ def custom_kernel(data: input_t) -> output_t:
         base = t.data_ptr()
         size_bytes = t.numel() * t.element_size()
         ranges[name] = (base, base + size_bytes)
-        print(
-            f"[DEBUG] {name} range: [{hex(base)}, {hex(base + size_bytes)}) "
-            f"({size_bytes} bytes)"
-        )
+        # print(
+        #     f"[DEBUG] {name} range: [{hex(base)}, {hex(base + size_bytes)}) "
+        #     f"({size_bytes} bytes)"
+        # )
 
     names = list(ranges.keys())
     for i in range(len(names)):

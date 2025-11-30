@@ -1,3 +1,8 @@
+<DO_NOT>
+- WRITE SUMMARIES, DOCUMENTATION, EXPLANATIONS, AND GUIDES
+</DO_NOT>
+
+
 <STRICT_COMPETITION_RULES_DO_NOT_VIOLATE>
 
 1. NO CUDA STREAMS - Zero tolerance policy
@@ -33,94 +38,116 @@ Focus on understanding the problem requirements and implementing the correct alg
 If the task is unreasonable or infeasible, or if any of the tests are incorrect, please inform me rather than working around them. The solution should be robust, maintainable, and extendable.
 </CODE_STYLE>
 
-## WHY L=1 FOR ALL SHAPES: THE HAMMOND HARNESS LIMITATION
+<CONCISE_CRITICAL_INSTRUCTIONS>
 
-Your kernel **IS** compliant with `problem_description.txt`, but the **Hammond benchmark harness** has a critical implementation detail that transforms the problem:
+  NVFP4 GEMV KERNEL FIX: CLUSTER DEADLOCK IN RANK-3 KERNEL
 
-### THE ROOT CAUSE
+  CRITICAL_CONSTRAINT
+    <CRITICAL>
+      ABSOLUTE RULE: ZERO HOST/PYTHON/ABI CHANGES ALLOWED
 
-<CRITICAL_FINDING>
-**The Hammond harness internally reshapes the batched problem before calling your kernel:**
+      LOCKED INTERFACES (DO NOT TOUCH):
+        - C++ launcher:
+            launch_fp4_gemv_optimized(A, B, SFA, SFB, D, M, K, L, K_scales_padded)
 
-From `problem_description.txt`:
-```
-M    K     L    (conceptual problem)
-7168 16384 1    ✓ Already L=1
-4096 7168  8    ← Should be L=8 batches
-7168 2048  4    ← Should be L=4 batches
-```
+        - Kernel signatures:
+            fp4_gemv_rank2_cta(..., M, K, L, K_scales_padded)
+            fp4_gemv_rank3_cluster(..., M, K, L, K_scales_padded)
 
-But the harness **flattens the batch dimension into M** before launch:
-- Shape 2: (4096, 7168, 8) → harness reshapes to (M=4096×8=32768, K=7168, **L=1**) then slices to M=128 test windows
-- Shape 3: (7168, 2048, 4) → harness reshapes to (M=7168×4=28672, K=2048, **L=1**) then slices to M=128 test windows
+        - Problem layout:
+            a   : [M, K, L]
+            b   : [1, K, L]
+            sfa : [M, K/16, L]
+            sfb : [1, K/16, L]
+            c   : [M, 1, L]
 
-Your error messages show:
-```
-k: 7168; l: 1; m: 128; n: 4096  ← n=4096 is the ORIGINAL M, not output rows
-k: 2048; l: 1; m: 128; n: 7168  ← n=7168 is the ORIGINAL M
-```
+        - Python custom_kernel interface
+        - TMA descriptors and shared-memory allocation
 
-The `m: 128` is the test window size, `n` is the **flattened input M** after batch reshape.
-</CRITICAL_FINDING>
+      FORBIDDEN ACTIONS:
+        - Adding stride parameters anywhere
+        - Remapping L/N on host or Python side
+        - Changing cluster launch logic
+        - Modifying any host-side code
+    </CRITICAL>
 
-### WHY YOUR OUTPUT IS "inf"
+  CURRENT_STATE
+    <OBSERVATION>
+      Official Benchmark Shapes (from test_kernel_only.py):
+        - Shape 1: M=7168, K=16384, L=1 (rank-2 CTA) - WORKS, but 2753x slower
+        - Shape 2: M=4096, K=7168,  L=8 (rank-3 cluster) - DEADLOCKS
+        - Shape 3: M=7168, K=2048,  L=4 (rank-3 cluster) - UNTESTED
 
-<ERROR_ANALYSIS>
-Your kernel produces `inf` values because:
+      Status (from cuda-gdb):
+        - Shape 1 (L=1): Uses fp4_gemv_rank2_cta, executes but numerically wrong (2753x slower)
+        - Shape 2 (L=8): Uses fp4_gemv_rank3_cluster, DEADLOCKS in cluster synchronization
+        - All blocks stuck alternating between two PCs (0x7ffea15f9a70 and 0x7ffea15f61f0)
+        - Launch config: grid=(32,8,1), block=(320,1,1), shared_bytes=189440
+    </OBSERVATION>
 
-1. **SFA/SFB indexing assumes 3D layout** for L>1, but harness passes **flattened 2D layout**
-2. **Scale factor indexing is off by L×** causing reads from uninitialized memory or wrong scales
-3. **FP8 scales being multiplied incorrectly** → overflow → inf
+  IMPLEMENTATION_PLAN
+    <PLAN>
+      PRIORITY 1: Fix Cluster Deadlock in fp4_gemv_rank3_cluster (L=8, L=4)
 
-Look at your error pattern:
-```
-ERROR AT (0, 0, 0): 29392.0 inf  ← Your kernel: 29392, Reference: inf (inverted!)
-ERROR AT (0, 0, 0): 4300.0 23552.0  ← Both finite but 5.5× mismatch
-```
+        DEADLOCK SYMPTOMS (from cuda-gdb):
+          - Blocks alternating between two PCs
+          - Likely stuck in cluster.sync() or barrier.arrive_tx/wait
+          - Grid=(32,8,1) means 256 blocks across 8 batches
 
-Shape 1 & 2: Your kernel outputs finite, reference expects inf → **severe numerical explosion**
-Shape 3: Both finite but huge mismatch → **indexing/scaling bug**
-</ERROR_ANALYSIS>
+        POSSIBLE CAUSES:
+          1. Mismatched barrier/cluster sync counts
+          2. Incorrect cluster dimensions or launch config
+          3. TMA fences not properly ordered
+          4. Producer-consumer barrier mismatch
 
-### WHAT YOU NEED TO FIX
+        DEBUG APPROACH:
+          - Add printf in fp4_gemv_rank3_cluster at each sync point
+          - Check if all blocks in cluster reach each barrier
+          - Verify barrier phase/expected_tx match across all blocks
+          - Check TMA descriptor batch indexing for L>1
 
-<SOLUTION>
-The problem is **NOT** the harness limitation (that's fixed). The problem is your kernel's **device-side indexing** doesn't match the reference implementation's decoding logic.
+      PRIORITY 2: Fix Numerical Issues in fp4_gemv_rank2_cta (L=1)
 
-**You were NEVER off-spec** - the L=1 behavior is correct. Your numerical bugs are:
+        ISSUE: Executes but 2753x slower than target (23.7ms vs 8.6μs)
 
-1. **SFA indexing in `process_tile`:**
-   ```cuda
-   // Current (lines from search):
-   int sfaidx = row * 16 + scalecol;  // For rank-2
-   ```
-   
-   This may be reading wrong scales if `sfastage` stride doesn't match reference layout.
+        POSSIBLE CAUSES:
+          1. Wrong indexing causing cache thrashing
+          2. Incorrect SFA/SFB scale indexing
+          3. FP4 decode nibble order wrong
+          4. Accumulator writeback misaligned
 
-2. **B decode/SFB broadcast:**
-   ```cuda
-   // From your decode loop (search result):
-   half v0 = decode_fp4(packed & 0x0F, scaleh);  // LOW nibble = element 0
-   half v1 = decode_fp4((packed >> 4) & 0x0F, scaleh);  // HIGH nibble = element 1
-   ```
-   
-   Verify this matches reference.py's nibble order EXACTLY.
+        DEBUG APPROACH:
+          - Use M=16, K=64, L=1 test case
+          - Add printf for decoded A[0, 0:16], B[0, 0:16]
+          - Compare with reference.py for same seed
+          - Fix indexing bugs one by one
+    </PLAN>
 
-3. **Accumulator overflow:**
-   The `inf` outputs suggest FP16 accumulation is overflowing. Reference might use FP32 intermediate accumulation.
+  PREVIOUS_MISTAKES
+    <PREVIOUS_VERSION>
+      - Misunderstood that L=1 for all benchmarks (WRONG - actually L=1, L=8, L=4)
+      - Thought rank-3 cluster was unreachable (WRONG - it's used but deadlocks)
+      - Focused only on numerics, missed cluster synchronization bug
+    </PREVIOUS_VERSION>
 
-</SOLUTION>
+  NON_GOALS
+    <NON_GOALS>
+      - Do NOT modify host-side launch logic
+      - Do NOT add stride parameters
+      - Do NOT change TMA descriptor creation (unless cluster batch indexing wrong)
+    </NON_GOALS>
 
-### ACTION REQUIRED
+  TOOLS
+    <TOOLS>
+      - compute-sanitizer:
+          Already clean, confirms launch/TMA stable
+      - printf:
+          Device-side conditional printing for row-0 debug
+      - reference.py:
+          Element-wise numerical ground truth
+      - Target:
+          ** VERY IMPORTANT/CRITICAL **<10.577 μs geomean latency after numerical fix
+    </TOOLS>
 
-<NEXT_STEPS>
-1. **DO NOT** try to "fix" L=1 behavior - it's correct
-2. **DO** compare your device-side decoding against reference.py line-by-line using the tiny debug case
-3. **DO** add printf debugging to `fp4_gemv_rank2_cta` at `blockIdx==(0,0), k_tile==0` to dump:
-   - Decoded A[0, 0:16] after SFA scaling
-   - Decoded B[0, 0:16] after SFB scaling
-   - `c_frag[0]` accumulator value before writeback
-4. **DO** run reference.py with same seed and print the same row-0 values for element-wise comparison
+</CONCISE_CRITICAL_INSTRUCTIONS>
 
-The compliance check XML I provided is **100% correct** - your issue is device-side numerical bugs in `fp4_gemv_rank2_cta`, not host/ABI misalignment.
-</NEXT_STEPS>
