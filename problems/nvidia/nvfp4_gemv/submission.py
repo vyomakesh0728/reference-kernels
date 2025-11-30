@@ -1100,7 +1100,7 @@ fp4_gemv_rank2_cta(
 #endif
 
         if (next_k < K) {
-            prefetch_tile<TileM, TileK>(
+            prefetch_tile<TileM, TileK, 1>(
                 next_stage, next_k,
                 use_tma_a, is_producer, warp_id, lane_id,
                 m_tile, K_packed, K_scales_padded, M, L, batch,
@@ -1813,7 +1813,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
 #endif
 
         if (next_k < K) {
-            prefetch_tile<TileM, TileK>(
+            prefetch_tile<TileM, TileK, 0>(
                 next_stage, next_k,
                 use_tma_a, is_producer, warp_id, lane_id,
                 m_tile, K_packed, K_scales_padded, M, L, batch,
