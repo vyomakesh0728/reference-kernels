@@ -1563,8 +1563,11 @@ fp4_gemv_rank3_cluster( // <- kernel start here
 
     // RANK-3 (L>1): Cluster barrier setup - Only CTA0 sets expect_tx
     uint32_t cta_rank = blockIdx.x % 2;
-    // Skip TMA setup and loads for out-of-bounds blocks
-    if (!out_of_bounds && warp_id == 0 && lane_id == 0 && cta_rank == 0) {
+    if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
+        // For out-of-bounds blocks, set expect_tx to 0 bytes
+        uint32_t b_bytes = out_of_bounds ? 0 : total_b_bytes;
+        uint32_t sfb_bytes = out_of_bounds ? 0 : total_sfb_bytes;
+        
         // Only CTA0 sets expect_tx on its local barrier
         // TMA from both CTAs will route to CTA0's barrier via peer mask
         // Apply Sm100MmaPeerBitMask to barrier addresses (FIX #2)
@@ -1577,7 +1580,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
             "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
             "}"
             :
-            : "r"(mbar_b_addr), "r"(total_b_bytes)
+            : "r"(mbar_b_addr), "r"(b_bytes)
             : "memory"
         );
 
@@ -1586,7 +1589,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
             "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
             "}"
             :
-            : "r"(mbar_sfb_addr), "r"(total_sfb_bytes)
+            : "r"(mbar_sfb_addr), "r"(sfb_bytes)
             : "memory"
         );
     }
@@ -1647,7 +1650,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
     // RANK-3: With shared::cluster TMA + peer mask, only CTA0's barrier gets updated
     // Only CTA0 waits on barrier, then all CTAs sync via cluster_arrive/cluster_wait
     // uint32_t cta_rank = blockIdx.x % 2; // Already declared above
-    if (!out_of_bounds && cta_rank == 0) {
+    if (cta_rank == 0) {
         // Only CTA0 waits on the barrier
         uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
         uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
@@ -1768,9 +1771,8 @@ fp4_gemv_rank3_cluster( // <- kernel start here
     }
 #endif
 
-    // Prefetch first tiles using TMA (skip for out-of-bounds blocks)
-    if (!out_of_bounds) {
-        prefetch_tile<TileM, TileK, 0>(
+    // Prefetch first tiles using TMA
+    prefetch_tile<TileM, TileK, 0>(
         0, 0,
         use_tma_a, is_producer, warp_id, lane_id,
         m_tile, K_packed, K_scales_padded, M, L, batch,
@@ -1783,8 +1785,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
         // printf("DEBUG: First prefetch_tile completed\n");
     }
 #endif
-    } // end first prefetch
-    if (!out_of_bounds && TileK < K) {
+    if (TileK < K) {
 #ifndef NDEBUG
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
             // printf("DEBUG: About to call second prefetch_tile, TileK=%d K=%d\n", TileK, K);
@@ -1815,8 +1816,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
     float c_frag_2 = 0.0f;
     float c_frag_3 = 0.0f;
 
-    if (!out_of_bounds) {
-        for (int k_tile = 0; k_tile < K; k_tile += TileK) { // for loop start
+    for (int k_tile = 0; k_tile < K; k_tile += TileK) { // for loop start
         int tile_idx = k_tile / TileK;
         int stage = tile_idx % StageCount;
 
@@ -1863,7 +1863,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
 
                 // RANK-3: Only CTA0 waits, then sync all CTAs
                 // uint32_t cta_rank = blockIdx.x % 2; // Already declared at kernel start
-                if (!out_of_bounds && cta_rank == 0) {
+                if (cta_rank == 0) {
                     mbarrier_wait_parity(mbar_stage(mbar_a, stage), stage_phase_smem[stage]);
                 }
 #ifndef NDEBUG
@@ -1943,8 +1943,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
             /* printf("DEBUG RANK-3: K-TILE %d completed, next k_tile=%d\n",
                    k_tile, k_tile + TileK); */
         }
-        } // <- k-tile loop closes here
-    } // end if (!out_of_bounds) for k-tile loop
+    } // <- k-tile loop closes here
 
     // RANK-3 DEBUG: Track where illegal instruction occurs
     if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
