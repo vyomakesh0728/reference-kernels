@@ -1307,7 +1307,7 @@ fp4_gemv_rank2_cta(
 }
 
 template<int TileM, int TileK, int Threads>
-__global__ void __launch_bounds__(Threads)
+__global__ void __launch_bounds__(Threads) __cluster_dims__(2, 1, 1)
 fp4_gemv_rank3_cluster( // <- kernel start here
     const uint8_t* __restrict__ A_packed,
     const uint8_t* __restrict__ B_packed,
