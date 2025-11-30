@@ -1340,7 +1340,15 @@ fp4_gemv_rank3_cluster( // <- kernel start here
 
     const int batch = blockIdx.y;
     const int m_tile = blockIdx.x * TileM;
-    if (batch >= L || m_tile >= M) return;
+    // CRITICAL FIX: For cluster launches (L>1), do NOT return early!
+    // All CTAs in a cluster MUST participate in all cluster.sync() calls.
+    // Returning early causes deadlock because cluster.sync() requires unanimous participation.
+    const bool out_of_bounds = (batch >= L || m_tile >= M);
+    if (out_of_bounds && L == 1) {
+        // For non-cluster launches (L=1), we can safely return early
+        return;
+    }
+    // For cluster launches (L>1), continue execution but skip work
 
     const int K_packed = K >> 1;
     // K_scales_padded is passed as parameter - use it for tensor access and validity checks
@@ -1555,7 +1563,8 @@ fp4_gemv_rank3_cluster( // <- kernel start here
 
     // RANK-3 (L>1): Cluster barrier setup - Only CTA0 sets expect_tx
     uint32_t cta_rank = blockIdx.x % 2;
-    if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
+    // Skip TMA setup and loads for out-of-bounds blocks
+    if (!out_of_bounds && warp_id == 0 && lane_id == 0 && cta_rank == 0) {
         // Only CTA0 sets expect_tx on its local barrier
         // TMA from both CTAs will route to CTA0's barrier via peer mask
         // Apply Sm100MmaPeerBitMask to barrier addresses (FIX #2)
@@ -1584,7 +1593,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
 
     // Issue TMA loads
     // FIX: Only CTA0 in the pair issues the multicast TMA to avoid double data/barrier updates
-    if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
+    if (!out_of_bounds && warp_id == 0 && lane_id == 0 && cta_rank == 0) {
 
         // Issue all TMA loads (barrier expects total bytes from all loads)
         for (int tile_idx = 0; tile_idx < b_chunks; ++tile_idx) {
@@ -1638,7 +1647,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
     // RANK-3: With shared::cluster TMA + peer mask, only CTA0's barrier gets updated
     // Only CTA0 waits on barrier, then all CTAs sync via cluster_arrive/cluster_wait
     // uint32_t cta_rank = blockIdx.x % 2; // Already declared above
-    if (cta_rank == 0) {
+    if (!out_of_bounds && cta_rank == 0) {
         // Only CTA0 waits on the barrier
         uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
         uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
@@ -1693,9 +1702,10 @@ fp4_gemv_rank3_cluster( // <- kernel start here
         // }
     __syncthreads();
 
-    // Decode B vector
-    const int K_sfb_decode = (K >> 4);  // SFB not padded
-    for (int idx = tid; idx < K_packed; idx += Threads) {
+    // Decode B vector (skip for out-of-bounds blocks, but keep syncthreads after)
+    if (!out_of_bounds) {
+        const int K_sfb_decode = (K >> 4);  // SFB not padded
+        for (int idx = tid; idx < K_packed; idx += Threads) {
         int k_base = idx * 2;
         int scale_idx = idx >> 3;
         DEBUG_OOB_SMEM_1D("b_packed_smem", idx, K_packed, b_packed_smem);
@@ -1735,7 +1745,8 @@ fp4_gemv_rank3_cluster( // <- kernel start here
                               k_base + 1, K, __FILE__, __LINE__);
 #endif
         }
-    } // <- for loop end int idx = tid; idx < K_packed; idx += Threads
+        } // <- for loop end int idx = tid; idx < K_packed; idx += Threads
+    } // end if (!out_of_bounds) for B decode
     __syncthreads();
 
     // DEBUG: Print first 8 decoded b_vec_smem values (first tile only)
@@ -1757,8 +1768,9 @@ fp4_gemv_rank3_cluster( // <- kernel start here
     }
 #endif
 
-    // Prefetch first tiles using TMA
-    prefetch_tile<TileM, TileK, 0>(
+    // Prefetch first tiles using TMA (skip for out-of-bounds blocks)
+    if (!out_of_bounds) {
+        prefetch_tile<TileM, TileK, 0>(
         0, 0,
         use_tma_a, is_producer, warp_id, lane_id,
         m_tile, K_packed, K_scales_padded, M, L, batch,
@@ -1771,7 +1783,8 @@ fp4_gemv_rank3_cluster( // <- kernel start here
         // printf("DEBUG: First prefetch_tile completed\n");
     }
 #endif
-    if (TileK < K) {
+    } // end first prefetch
+    if (!out_of_bounds && TileK < K) {
 #ifndef NDEBUG
         if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
             // printf("DEBUG: About to call second prefetch_tile, TileK=%d K=%d\n", TileK, K);
@@ -1802,7 +1815,8 @@ fp4_gemv_rank3_cluster( // <- kernel start here
     float c_frag_2 = 0.0f;
     float c_frag_3 = 0.0f;
 
-    for (int k_tile = 0; k_tile < K; k_tile += TileK) { // for loop start
+    if (!out_of_bounds) {
+        for (int k_tile = 0; k_tile < K; k_tile += TileK) { // for loop start
         int tile_idx = k_tile / TileK;
         int stage = tile_idx % StageCount;
 
@@ -1929,7 +1943,8 @@ fp4_gemv_rank3_cluster( // <- kernel start here
             /* printf("DEBUG RANK-3: K-TILE %d completed, next k_tile=%d\n",
                    k_tile, k_tile + TileK); */
         }
-    } // <- k-tile loop closes here
+        } // <- k-tile loop closes here
+    } // end if (!out_of_bounds) for k-tile loop
 
     // RANK-3 DEBUG: Track where illegal instruction occurs
     if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
@@ -1968,7 +1983,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
     // They hold rows: 0,8 | 1,9 | 2,10 | 3,11 | 4,12 | 5,13 | 6,14 | 7,15
 
     int active_warps_total = (tile_rows + 15) / 16;
-    if (is_consumer && (warp_id - 2) < active_warps_total) {
+    if (!out_of_bounds && is_consumer && (warp_id - 2) < active_warps_total) {
         int warp_row_offset = (warp_id - 2) * 16;
 
         int octet = lane_id / 4;           // 0-7

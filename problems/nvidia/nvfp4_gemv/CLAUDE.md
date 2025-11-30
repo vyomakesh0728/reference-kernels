@@ -1,3 +1,8 @@
+<DO_NOT>
+- WRITE SUMMARIES, DOCUMENTATION, EXPLANATIONS, AND GUIDES
+</DO_NOT>
+
+
 <STRICT_COMPETITION_RULES_DO_NOT_VIOLATE>
 
 1. NO CUDA STREAMS - Zero tolerance policy
@@ -141,7 +146,7 @@ If the task is unreasonable or infeasible, or if any of the tests are incorrect,
       - reference.py:
           Element-wise numerical ground truth
       - Target:
-          <55.577 μs geomean latency after numerical fix
+          ** VERY IMPORTANT/CRITICAL **<10.577 μs geomean latency after numerical fix
     </TOOLS>
 
 </CONCISE_CRITICAL_INSTRUCTIONS>
