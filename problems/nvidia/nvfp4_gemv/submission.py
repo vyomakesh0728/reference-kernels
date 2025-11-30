@@ -520,11 +520,17 @@ __device__ __forceinline__ void process_tile(
             if (row < tile_rows) {
                 int scale_col = col_packed >> 3;
                 if (scale_col < scale_count) {
-                    // Use template parameter sfa_stride instead of runtime (L == 1) ? 16 : 128
-                    int sfa_base_scale = k_tile >> 4;
-                    int sfa_offset = (sfa_stride == 16) ? 0 : (sfa_base_scale % sfa_stride);
-                    int sfa_idx = row * sfa_stride + sfa_offset + scale_col;
-                    int sfa_size = TileM * sfa_stride;
+                    // Use template parameter sfa_stride to select logic
+                    int sfa_idx;
+                    if (sfa_stride == 16) {
+                        // Rank-2 (L=1): Simple indexing, no offset
+                        sfa_idx = row * 16 + scale_col;
+                    } else {
+                        // Rank-3 (L>1): Offset within 128-scale slice
+                        int sfa_base_scale = k_tile >> 4;
+                        int sfa_offset = sfa_base_scale % sfa_stride;
+                        sfa_idx = row * sfa_stride + sfa_offset + scale_col;
+                    }
                     DEBUG_OOB_SMEM_1D("sfa_stage", sfa_idx, sfa_size, sfa_stage[stage]);
                     scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][sfa_idx]));
                 }
