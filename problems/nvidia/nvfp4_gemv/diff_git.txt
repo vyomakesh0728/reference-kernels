@@ -1,0 +1,664 @@
+diff --git a/problems/nvidia/nvfp4_gemv/submission.py b/problems/nvidia/nvfp4_gemv/submission.py
+index 217d7ca..a3dbf35 100644
+--- a/problems/nvidia/nvfp4_gemv/submission.py
++++ b/problems/nvidia/nvfp4_gemv/submission.py
+@@ -645,7 +645,7 @@ __device__ __forceinline__ void process_tile(
+ }
+ template<int TileM, int TileK, int Threads>
+ __global__ void __launch_bounds__(Threads)
+-fp4gemv_rank2_cta(
++fp4_gemv_rank2_cta(
+     const uint8_t* __restrict__ A_packed,
+     const uint8_t* __restrict__ B_packed,
+     const uint8_t* __restrict__ SFA_packed,
+@@ -841,16 +841,7 @@ fp4gemv_rank2_cta(
+ 
+ #if __CUDA_ARCH__ >= 900
+     if (tid == 0 && use_tma_a) {
+-        // RANK-3 ONLY: Cluster fence (CUTLASS pattern from barrier.h)
+-        if (L > 1) {
+-            asm volatile(
+-                "{\n\t"
+-                "fence.mbarrier_init.release.cluster; \n"
+-                "}"
+-                ::
+-                : "memory"
+-            );
+-        }
++        // RANK-3 ONLY: Cluster fence removed for Rank-2
+ 
+         for (int s = 0; s < StageCount; ++s) {
+             mbarrier_init(mbar_stage(mbar_a, s));
+@@ -861,7 +852,7 @@ fp4gemv_rank2_cta(
+     }
+ #endif
+     // Sync to ensure remote barriers are initialized (cluster-wide for RANK-3)
+-    sync_cluster_or_block(L); // <- first sync cluster or block
++    __syncthreads(); // <- first sync cluster or block
+ 
+     // Verify TMA descriptors are valid
+     if (!desc_A || !desc_SFA || !desc_B || !desc_SFB) {
+@@ -886,41 +877,9 @@ fp4gemv_rank2_cta(
+     uint32_t total_sfb_bytes = static_cast<uint32_t>(K >> 4);  // SFB not padded
+ 
+     // RANK-2 (L=1): Original code path - DO NOT TOUCH
+-    if (L == 1) {
+-        if (warp_id == 0 && lane_id == 0) {
+-            mbarrier_arrive_expect_tx(mbar_b, total_b_bytes);
+-            mbarrier_arrive_expect_tx(mbar_sfb, total_sfb_bytes);
+-        }
+-    }
+-    // RANK-3 (L>1): Cluster barrier setup - Only CTA0 sets expect_tx
+-    else {
+-        uint32_t cta_rank = blockIdx.x % 2;
+-        if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
+-            // Only CTA0 sets expect_tx on its local barrier
+-            // TMA from both CTAs will route to CTA0's barrier via peer mask
+-            // Apply Sm100MmaPeerBitMask to barrier addresses (FIX #2)
+-            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+-            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+-            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+-
+-            asm volatile(
+-                "{\n\t"
+-                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
+-                "}"
+-                :
+-                : "r"(mbar_b_addr), "r"(total_b_bytes)
+-                : "memory"
+-            );
+-
+-            asm volatile(
+-                "{\n\t"
+-                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
+-                "}"
+-                :
+-                : "r"(mbar_sfb_addr), "r"(total_sfb_bytes)
+-                : "memory"
+-            );
+-        }
++    if (warp_id == 0 && lane_id == 0) {
++        mbarrier_arrive_expect_tx(mbar_b, total_b_bytes);
++        mbarrier_arrive_expect_tx(mbar_sfb, total_sfb_bytes);
+     }
+ 
+     // Issue TMA loads
+@@ -935,32 +894,16 @@ fp4gemv_rank2_cta(
+ 
+             uint32_t smem_addr = cvta_to_shared_u32(dst);
+ 
+-            if (L == 1) {
+-                // Rank-2: CTA launch (no cluster)
+-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_b);
+-                asm volatile(
+-                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+-                    "[%0], [%1, {%3, %4}], [%2];\n"
+-                    :
+-                    : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
+-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
+-                    : "memory"
+-                );
+-            } else {
+-                // Rank-3: Cluster launch with cta_group::2
+-                constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+-                uint64_t cache_hint = 0;
+-                asm volatile(
+-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+-                    "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
+-                    :
+-                    : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
+-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
+-                      "l"(cache_hint)
+-                    : "memory"
+-                );
+-            }
++            // Rank-2: CTA launch (no cluster)
++            uint32_t mbar_addr = cvta_to_shared_u32(mbar_b);
++            asm volatile(
++                "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
++                "[%0], [%1, {%3, %4}], [%2];\n"
++                :
++                : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
++                  "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
++                : "memory"
++            );
+         }
+ 
+         for (int tile_idx = 0; tile_idx < sfb_chunks; ++tile_idx) {
+@@ -972,76 +915,23 @@ fp4gemv_rank2_cta(
+ 
+             uint32_t smem_addr = cvta_to_shared_u32(dst);
+ 
+-            if (L == 1) {
+-                // Rank-2: CTA launch (no cluster)
+-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb);
+-                asm volatile(
+-                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+-                    "[%0], [%1, {%3, %4}], [%2];\n"
+-                    :
+-                    : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
+-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
+-                    : "memory"
+-                );
+-            } else {
+-                // Rank-3: Cluster launch with cta_group::2
+-                constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+-                uint64_t cache_hint = 0;
+-                asm volatile(
+-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+-                    "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
+-                    :
+-                    : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
+-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
+-                      "l"(cache_hint)
+-                    : "memory"
+-                );
+-            }
+-        }
+-    }
+-
+-    // All threads wait on barriers
+-    if (L == 1) {
+-        // RANK-2: Wait locally (DO NOT TOUCH)
+-        mbarrier_wait_parity(mbar_b, 0);
+-        mbarrier_wait_parity(mbar_sfb, 0);
+-    } else {
+-        // RANK-3: With shared::cluster TMA + peer mask, only CTA0's barrier gets updated
+-        // Only CTA0 waits on barrier, then all CTAs sync via cluster_arrive/cluster_wait
+-        uint32_t cta_rank = blockIdx.x % 2;
+-        if (cta_rank == 0) {
+-            // Only CTA0 waits on the barrier
+-            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
+-            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
+-
++            // Rank-2: CTA launch (no cluster)
++            uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb);
+             asm volatile(
+-                "{\n\t"
+-                ".reg .pred P1; \n\t"
+-                "LAB_WAIT_B: \n\t"
+-                "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+-                "@!P1 bra.uni LAB_WAIT_B; \n\t"
+-                "}"
++                "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
++                "[%0], [%1, {%3, %4}], [%2];\n"
+                 :
+-                : "r"(mbar_b_addr), "r"(0)
+-                : "memory"
+-            );
+-
+-            asm volatile(
+-                "{\n\t"
+-                ".reg .pred P1; \n\t"
+-                "LAB_WAIT_SFB: \n\t"
+-                "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+-                "@!P1 bra.uni LAB_WAIT_SFB; \n\t"
+-                "}"
+-                :
+-                : "r"(mbar_sfb_addr), "r"(0)
++                : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
++                  "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
+                 : "memory"
+             );
+         }
+-        // RANK-3: Cluster-wide sync after CTA0 waited for TMA (using cooperative_groups)
+-        sync_cluster_or_block(L); // <- second sync cluster or block
+     }
++
++    // All threads wait on barriers
++    // RANK-2: Wait locally (DO NOT TOUCH)
++    mbarrier_wait_parity(mbar_b, 0);
++    mbarrier_wait_parity(mbar_sfb, 0);
+ #endif
+     __syncthreads();
+ 
+@@ -1226,8 +1116,8 @@ fp4gemv_rank2_cta(
+                 // printf("K-TILE: Mbarrier wait completed, about to cluster sync\n");
+             }
+ #endif
+-            // RANK-3: Cluster-wide sync after CTA0 waited - prevents CTA1 from racing ahead
+-            sync_cluster_or_block(L); // <- third sync cluster or block
++            // RANK-3: Cluster-wide sync removed for Rank-2
++            __syncthreads(); // <- first sync cluster or block
+ #ifndef NDEBUG
+             if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+                 // printf("K-TILE: After syncthreads, updating phase\n");
+@@ -1281,29 +1171,20 @@ fp4gemv_rank2_cta(
+         );
+ 
+ 
+-        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
+-            // printf("DEBUG RANK-3: Before sync at end of k_tile\n");
+-        }
++
+ 
+         // Synchronize at end of k_tile: cluster-wide for RANK-3, CTA-local for RANK-2
+-        sync_cluster_or_block(L);   // <- fourth sync cluster or block
++        __syncthreads();   // <- fourth sync cluster or block
+ 
+         // RANK-3 DEBUG: After sync
+-        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
+-            // printf("DEBUG RANK-3: After cluster sync\n");
+-        }
++
+ 
+         // RANK-3 DEBUG: End of each K-tile iteration
+-        if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+-            /* printf("DEBUG RANK-3: K-TILE %d completed, next k_tile=%d\n",
+-                   k_tile, k_tile + TileK); */
+-        }
++
+     }
+ 
+     // RANK-3 DEBUG: Track where illegal instruction occurs
+-    if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+-        // printf("DEBUG RANK-3: EXITED K-TILE LOOP - All K tiles completed\n");
+-    }
++
+ 
+     // DEBUG: Print ALL fragments for lanes 0,4,8 to understand output distribution
+     // DISABLED FOR PERFORMANCE: Excessive kernel // printf statements cause hang
+@@ -1407,7 +1288,7 @@ fp4gemv_rank2_cta(
+ 
+ template<int TileM, int TileK, int Threads>
+ __global__ void __launch_bounds__(Threads)
+-fp4gemv_rank3_cluster( // <- kernel start here
++fp4_gemv_rank3_cluster( // <- kernel start here
+     const uint8_t* __restrict__ A_packed,
+     const uint8_t* __restrict__ B_packed,
+     const uint8_t* __restrict__ SFA_packed,
+@@ -1624,7 +1505,7 @@ fp4gemv_rank3_cluster( // <- kernel start here
+     }
+ #endif
+     // Sync to ensure remote barriers are initialized (cluster-wide for RANK-3)
+-    sync_cluster_or_block(L); // <- fifth sync cluster or block
++    sync_cluster_or_block(L); // <- second sync cluster or block
+ 
+     // Verify TMA descriptors are valid
+     if (!desc_A || !desc_SFA || !desc_B || !desc_SFB) {
+@@ -1648,42 +1529,33 @@ fp4gemv_rank3_cluster( // <- kernel start here
+     uint32_t total_b_bytes = static_cast<uint32_t>(K_packed);
+     uint32_t total_sfb_bytes = static_cast<uint32_t>(K >> 4);  // SFB not padded
+ 
+-    // RANK-2 (L=1): Original code path - DO NOT TOUCH
+-    if (L == 1) {
+-        if (warp_id == 0 && lane_id == 0) {
+-            mbarrier_arrive_expect_tx(mbar_b, total_b_bytes);
+-            mbarrier_arrive_expect_tx(mbar_sfb, total_sfb_bytes);
+-        }
+-    }
+     // RANK-3 (L>1): Cluster barrier setup - Only CTA0 sets expect_tx
+-    else {
+-        uint32_t cta_rank = blockIdx.x % 2;
+-        if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
+-            // Only CTA0 sets expect_tx on its local barrier
+-            // TMA from both CTAs will route to CTA0's barrier via peer mask
+-            // Apply Sm100MmaPeerBitMask to barrier addresses (FIX #2)
+-            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+-            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+-            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+-
+-            asm volatile(
+-                "{\n\t"
+-                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
+-                "}"
+-                :
+-                : "r"(mbar_b_addr), "r"(total_b_bytes)
+-                : "memory"
+-            );
++    uint32_t cta_rank = blockIdx.x % 2;
++    if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
++        // Only CTA0 sets expect_tx on its local barrier
++        // TMA from both CTAs will route to CTA0's barrier via peer mask
++        // Apply Sm100MmaPeerBitMask to barrier addresses (FIX #2)
++        constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
++        uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
++        uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
++
++        asm volatile(
++            "{\n\t"
++            "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
++            "}"
++            :
++            : "r"(mbar_b_addr), "r"(total_b_bytes)
++            : "memory"
++        );
+ 
+-            asm volatile(
+-                "{\n\t"
+-                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
+-                "}"
+-                :
+-                : "r"(mbar_sfb_addr), "r"(total_sfb_bytes)
+-                : "memory"
+-            );
+-        }
++        asm volatile(
++            "{\n\t"
++            "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1; \n\t"
++            "}"
++            :
++            : "r"(mbar_sfb_addr), "r"(total_sfb_bytes)
++            : "memory"
++        );
+     }
+ 
+     // Issue TMA loads
+@@ -1698,32 +1570,19 @@ fp4gemv_rank3_cluster( // <- kernel start here
+ 
+             uint32_t smem_addr = cvta_to_shared_u32(dst);
+ 
+-            if (L == 1) {
+-                // Rank-2: CTA launch (no cluster)
+-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_b);
+-                asm volatile(
+-                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+-                    "[%0], [%1, {%3, %4}], [%2];\n"
+-                    :
+-                    : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
+-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
+-                    : "memory"
+-                );
+-            } else {
+-                // Rank-3: Cluster launch with cta_group::2
+-                constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
+-                uint64_t cache_hint = 0;
+-                asm volatile(
+-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+-                    "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
+-                    :
+-                    : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
+-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
+-                      "l"(cache_hint)
+-                    : "memory"
+-                );
+-            }
++            // Rank-3: Cluster launch with cta_group::2
++            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
++            uint32_t mbar_addr = cvta_to_shared_u32(mbar_b) & Sm100MmaPeerBitMask;
++            uint64_t cache_hint = 0;
++            asm volatile(
++                "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
++                "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
++                :
++                : "r"(smem_addr), "l"(desc_B), "r"(mbar_addr),
++                  "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
++                  "l"(cache_hint)
++                : "memory"
++            );
+         }
+ 
+         for (int tile_idx = 0; tile_idx < sfb_chunks; ++tile_idx) {
+@@ -1735,76 +1594,56 @@ fp4gemv_rank3_cluster( // <- kernel start here
+ 
+             uint32_t smem_addr = cvta_to_shared_u32(dst);
+ 
+-            if (L == 1) {
+-                // Rank-2: CTA launch (no cluster)
+-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb);
+-                asm volatile(
+-                    "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+-                    "[%0], [%1, {%3, %4}], [%2];\n"
+-                    :
+-                    : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
+-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u)
+-                    : "memory"
+-                );
+-            } else {
+-                // Rank-3: Cluster launch with cta_group::2
+-                constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
+-                uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
+-                uint64_t cache_hint = 0;
+-                asm volatile(
+-                    "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+-                    "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
+-                    :
+-                    : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
+-                      "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
+-                      "l"(cache_hint)
+-                    : "memory"
+-                );
+-            }
+-        }
+-    }
+-
+-    // All threads wait on barriers
+-    if (L == 1) {
+-        // RANK-2: Wait locally (DO NOT TOUCH)
+-        mbarrier_wait_parity(mbar_b, 0);
+-        mbarrier_wait_parity(mbar_sfb, 0);
+-    } else {
+-        // RANK-3: With shared::cluster TMA + peer mask, only CTA0's barrier gets updated
+-        // Only CTA0 waits on barrier, then all CTAs sync via cluster_arrive/cluster_wait
+-        uint32_t cta_rank = blockIdx.x % 2;
+-        if (cta_rank == 0) {
+-            // Only CTA0 waits on the barrier
+-            uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
+-            uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
+-
+-            asm volatile(
+-                "{\n\t"
+-                ".reg .pred P1; \n\t"
+-                "LAB_WAIT_B: \n\t"
+-                "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+-                "@!P1 bra.uni LAB_WAIT_B; \n\t"
+-                "}"
+-                :
+-                : "r"(mbar_b_addr), "r"(0)
+-                : "memory"
+-            );
+-
++            // Rank-3: Cluster launch with cta_group::2
++            constexpr uint32_t Sm100MmaPeerBitMask = 0xFEFFFFFF;
++            uint32_t mbar_addr = cvta_to_shared_u32(mbar_sfb) & Sm100MmaPeerBitMask;
++            uint64_t cache_hint = 0;
+             asm volatile(
+-                "{\n\t"
+-                ".reg .pred P1; \n\t"
+-                "LAB_WAIT_SFB: \n\t"
+-                "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
+-                "@!P1 bra.uni LAB_WAIT_SFB; \n\t"
+-                "}"
++                "cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint "
++                "[%0], [%1, {%3, %4, %5}], [%2], %6;\n"
+                 :
+-                : "r"(mbar_sfb_addr), "r"(0)
++                : "r"(smem_addr), "l"(desc_SFB), "r"(mbar_addr),
++                  "r"(static_cast<uint32_t>(elem_offset)), "r"(0u), "r"(static_cast<uint32_t>(batch)),
++                  "l"(cache_hint)
+                 : "memory"
+             );
+         }
+-        // RANK-3: Cluster-wide sync after CTA0 waited for TMA (using cooperative_groups)
+-        sync_cluster_or_block(L); // sixth sync cluster or block
+     }
++
++    // RANK-3: With shared::cluster TMA + peer mask, only CTA0's barrier gets updated
++    // Only CTA0 waits on barrier, then all CTAs sync via cluster_arrive/cluster_wait
++    uint32_t cta_rank = blockIdx.x % 2;
++    if (cta_rank == 0) {
++        // Only CTA0 waits on the barrier
++        uint32_t mbar_b_addr = cvta_to_shared_u32(mbar_b);
++        uint32_t mbar_sfb_addr = cvta_to_shared_u32(mbar_sfb);
++
++        asm volatile(
++            "{\n\t"
++            ".reg .pred P1; \n\t"
++            "LAB_WAIT_B: \n\t"
++            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
++            "@!P1 bra.uni LAB_WAIT_B; \n\t"
++            "}"
++            :
++            : "r"(mbar_b_addr), "r"(0)
++            : "memory"
++        );
++
++        asm volatile(
++            "{\n\t"
++            ".reg .pred P1; \n\t"
++            "LAB_WAIT_SFB: \n\t"
++            "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1; \n\t"
++            "@!P1 bra.uni LAB_WAIT_SFB; \n\t"
++            "}"
++            :
++            : "r"(mbar_sfb_addr), "r"(0)
++            : "memory"
++        );
++    }
++    // RANK-3: Cluster-wide sync after CTA0 waited for TMA (using cooperative_groups)
++    sync_cluster_or_block(L); // <- third sync cluster or block
+ #endif
+     __syncthreads();
+ 
+@@ -1994,7 +1833,7 @@ fp4gemv_rank3_cluster( // <- kernel start here
+             }
+ #endif
+             // RANK-3: Cluster-wide sync after CTA0 waited - prevents CTA1 from racing ahead
+-            sync_cluster_or_block(L); // <- seventh sync cluster or block
++            sync_cluster_or_block(L); // <- forth sync cluster or block
+ #ifndef NDEBUG
+             if (blockIdx.x == 0 && blockIdx.y == 0 && tid == 0) {
+                 // printf("K-TILE: After syncthreads, updating phase\n");
+@@ -2053,7 +1892,7 @@ fp4gemv_rank3_cluster( // <- kernel start here
+         }
+ 
+         // Synchronize at end of k_tile: cluster-wide for RANK-3, CTA-local for RANK-2
+-        sync_cluster_or_block(L); // <- eighth sync cluster or block
++        sync_cluster_or_block(L); // <- fifth sync cluster or block
+ 
+         // RANK-3 DEBUG: After sync
+         if (L > 1 && blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && tid == 0) {
+@@ -2172,6 +2011,7 @@ fp4gemv_rank3_cluster( // <- kernel start here
+ #endif
+ } // <- kernel closes here
+ 
++// launch_fp4_gemv_optimized starts from here 
+ void launch_fp4_gemv_optimized(
+     torch::Tensor A, torch::Tensor B,
+     torch::Tensor SFA, torch::Tensor SFB,
+@@ -2656,10 +2496,10 @@ void launch_fp4_gemv_optimized(
+     void const* kernel_ptr = nullptr;
+     if (L == 1) {
+         // Rank-2: CTA-only kernel
+-        kernel_ptr = (void const*)fp4gemv_rank2_cta<kTileM, kTileK, kThreads>;
++        kernel_ptr = (void const*)fp4_gemv_rank2_cta<kTileM, kTileK, kThreads>;
+     } else {
+         // Rank-3: Cluster kernel
+-        kernel_ptr = (void const*)fp4gemv_rank3_cluster<kTileM, kTileK, kThreads>;
++        kernel_ptr = (void const*)fp4_gemv_rank3_cluster<kTileM, kTileK, kThreads>;
+     }
+ 
+     cudaFuncAttributes attr;
+@@ -2699,12 +2539,16 @@ void launch_fp4_gemv_optimized(
+         launch_config.numAttrs = 0;
+     } else {
+         // Rank-3: Cluster launch with cta_group::2
+-        // Round up grid_x to be divisible by cluster.x=2
+-        grid_x = ((num_blocks + 1) / 2) * 2;
++        cluster = dim3(2, 1, 1);
++
++        // Ensure grid_x is a multiple of cluster.x
++        grid_x = num_blocks;
++        if (grid_x % cluster.x != 0) {
++            grid_x = ((grid_x + cluster.x - 1) / cluster.x) * cluster.x;
++        }
+         grid_y = static_cast<int>(L);
+         grid = dim3(grid_x, grid_y);
+         block = dim3(kThreads);
+-        cluster = dim3(2, 1, 1);
+ 
+         // Enable non-portable cluster size
+         cudaError_t cluster_enable = cudaFuncSetAttribute(
+@@ -2758,10 +2602,12 @@ void launch_fp4_gemv_optimized(
+ 
+         // Check if grid is divisible by cluster
+         if (grid_x % cluster.x != 0) {
+-            // printf("WARNING: grid.x=%d not divisible by cluster.x=%d\n", grid_x, cluster.x);
++            printf("ERROR: grid.x=%d not divisible by cluster.x=%d\n", grid_x, cluster.x);
++            throw std::runtime_error("Grid X not divisible by Cluster X");
+         }
+         if (grid_y % cluster.y != 0) {
+-            // printf("WARNING: grid.y=%d not divisible by cluster.y=%d\n", grid_y, cluster.y);
++            printf("ERROR: grid.y=%d not divisible by cluster.y=%d\n", grid_y, cluster.y);
++            throw std::runtime_error("Grid Y not divisible by Cluster Y");
+         }
+     }
+ 
+@@ -2792,42 +2638,42 @@ void launch_fp4_gemv_optimized(
+         cudaGetDevice(&device);
+         cudaDeviceProp prop;
+         cudaGetDeviceProperties(&prop, device);
+-        // printf("Device limits:\n");
+-        /* printf("  sharedMemPerBlock: %zu (%.1f KB)\n",
+-               prop.sharedMemPerBlock, prop.sharedMemPerBlock/1024.0); */
+-        /* printf("  sharedMemPerBlockOptin: %zu (%.1f KB)\n",
+-               prop.sharedMemPerBlockOptin, prop.sharedMemPerBlockOptin/1024.0); */
+-        // printf("  maxBlocksPerMultiProcessor: %d\n", prop.maxBlocksPerMultiProcessor);
+-        // printf("  clusterDimSupported: %d\n", prop.clusterLaunch);
+-        /* printf("  Requested shared_bytes: %zu (%.1f KB)\n",
+-               shared_bytes, shared_bytes/1024.0); */
++        printf("Device limits:\n");
++        printf("  sharedMemPerBlock: %zu (%.1f KB)\n",
++               prop.sharedMemPerBlock, prop.sharedMemPerBlock/1024.0);
++        printf("  sharedMemPerBlockOptin: %zu (%.1f KB)\n",
++               prop.sharedMemPerBlockOptin, prop.sharedMemPerBlockOptin/1024.0);
++        printf("  maxBlocksPerMultiProcessor: %d\n", prop.maxBlocksPerMultiProcessor);
++        printf("  clusterDimSupported: %d\n", prop.clusterLaunch);
++        printf("  Requested shared_bytes: %zu (%.1f KB)\n",
++               shared_bytes, shared_bytes/1024.0);
+ 
+         // Check if shared memory exceeds limits
+         if (shared_bytes > prop.sharedMemPerBlockOptin) {
+-            // printf("ERROR: Requested shared memory exceeds device limit!\n");
++            printf("ERROR: Requested shared memory exceeds device limit!\n");
+         }
+ 
+         // Check cluster support
+         if (!prop.clusterLaunch) {
+-            // printf("ERROR: Device does not support cluster launch!\n");
++            printf("ERROR: Device does not support cluster launch!\n");
+         }
+ 
+         // Verify launch config
+-        // printf("Launch config verification:\n");
+-        // printf("  kernel_ptr=%p\n", kernel_ptr);
+-        /* printf("  launch_config.gridDim=(%u,%u,%u)\n",
+-               launch_config.gridDim.x, launch_config.gridDim.y, launch_config.gridDim.z); */
+-        /* printf("  launch_config.blockDim=(%u,%u,%u)\n",
+-               launch_config.blockDim.x, launch_config.blockDim.y, launch_config.blockDim.z); */
+-        // printf("  launch_config.dynamicSmemBytes=%zu\n", launch_config.dynamicSmemBytes);
+-        // printf("  launch_config.numAttrs=%d\n", launch_config.numAttrs);
++        printf("Launch config verification:\n");
++        printf("  kernel_ptr=%p\n", kernel_ptr);
++        printf("  launch_config.gridDim=(%u,%u,%u)\n",
++               launch_config.gridDim.x, launch_config.gridDim.y, launch_config.gridDim.z);
++        printf("  launch_config.blockDim=(%u,%u,%u)\n",
++               launch_config.blockDim.x, launch_config.blockDim.y, launch_config.blockDim.z);
++        printf("  launch_config.dynamicSmemBytes=%zu\n", launch_config.dynamicSmemBytes);
++        printf("  launch_config.numAttrs=%d\n", launch_config.numAttrs);
+         if (launch_config.numAttrs > 0) {
+-            /* printf("  launch_attr[0].id=%d (should be %d for ClusterDimension)\n",
+-                   launch_config.attrs[0].id, cudaLaunchAttributeClusterDimension); */
+-            /* printf("  cluster dims=(%u,%u,%u)\n",
++            printf("  launch_attr[0].id=%d (should be %d for ClusterDimension)\n",
++                   launch_config.attrs[0].id, cudaLaunchAttributeClusterDimension);
++            printf("  cluster dims=(%u,%u,%u)\n",
+                    launch_config.attrs[0].val.clusterDim.x,
+                    launch_config.attrs[0].val.clusterDim.y,
+-                   launch_config.attrs[0].val.clusterDim.z); */
++                   launch_config.attrs[0].val.clusterDim.z);
+         }
+     }
+ 
+@@ -2841,7 +2687,7 @@ void launch_fp4_gemv_optimized(
+     }
+ 
+     if (L > 1) {
+-        // printf("✓ Rank-3 kernel launched successfully!\n");
++        printf("✓ Rank-3 L4, L8 kernel launched successfully!\n");
+     }
+ 
+     cudaError_t err = cudaDeviceSynchronize();
