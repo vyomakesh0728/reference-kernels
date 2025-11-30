@@ -330,14 +330,20 @@ __device__ __forceinline__ uint64_t* mbar_stage(uint64_t* base, int stage) {
 }
 
 // Prefetch tile using TMA - extracted from lambda for better performance
-template<int TileM, int TileK>
+template<int TileM, int TileK, int L_template>
 __device__ __forceinline__ void prefetch_tile(
     int stage, int k_tile_base,
     bool use_tma_a, bool is_producer, int warp_id, int lane_id,
-    int m_tile, int K_packed, int K_scales_padded, int M, int L, int batch,
+    int m_tile, int K_packed, int K_scales_padded, int M, int L_runtime, int batch,
     uint8_t** a_packed_stage, uint8_t** sfa_stage, uint64_t* mbar_a,
     const CUtensorMap* desc_A, const CUtensorMap* desc_SFA
 ) {
+    // Use template parameter if it's a compile-time constant (1 or >1), otherwise fallback to runtime L
+    // But for Rank-2 kernel, we MUST use a constant 1 to optimize away cluster code.
+    // L_template should be 1 for Rank-2, and 0 (or actual L if constant) for Rank-3.
+    // If L_template is 1, we force L=1 path. If L_template is not 1 (e.g. 0), we use L_runtime.
+    
+    int L = (L_template == 1) ? 1 : L_runtime;
     constexpr int TileKPacked = TileK / 2;
 
     if (use_tma_a && is_producer) {
@@ -1027,10 +1033,11 @@ fp4_gemv_rank2_cta(
 #endif
 
     // Prefetch first tiles using TMA
-    prefetch_tile<TileM, TileK>(
+    // Prefetch first tiles using TMA
+    prefetch_tile<TileM, TileK, 1>(
         0, 0,
         use_tma_a, is_producer, warp_id, lane_id,
-        m_tile, K_packed, K_scales_padded, M, L, batch,
+        m_tile, K_packed, K_scales_padded, M, 1, batch,
         a_packed_stage, sfa_stage, mbar_a,
         desc_A, desc_SFA
     );
@@ -1046,10 +1053,10 @@ fp4_gemv_rank2_cta(
             // printf("DEBUG: About to call second prefetch_tile, TileK=%d K=%d\n", TileK, K);
         }
 #endif
-        prefetch_tile<TileM, TileK>(
+        prefetch_tile<TileM, TileK, 1>(
             1, TileK,
             use_tma_a, is_producer, warp_id, lane_id,
-            m_tile, K_packed, K_scales_padded, M, L, batch,
+            m_tile, K_packed, K_scales_padded, M, 1, batch,
             a_packed_stage, sfa_stage, mbar_a,
             desc_A, desc_SFA
         );
@@ -1740,7 +1747,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
 #endif
 
     // Prefetch first tiles using TMA
-    prefetch_tile<TileM, TileK>(
+    prefetch_tile<TileM, TileK, 0>(
         0, 0,
         use_tma_a, is_producer, warp_id, lane_id,
         m_tile, K_packed, K_scales_padded, M, L, batch,
@@ -1759,7 +1766,7 @@ fp4_gemv_rank3_cluster( // <- kernel start here
             // printf("DEBUG: About to call second prefetch_tile, TileK=%d K=%d\n", TileK, K);
         }
 #endif
-        prefetch_tile<TileM, TileK>(
+        prefetch_tile<TileM, TileK, 0>(
             1, TileK,
             use_tma_a, is_producer, warp_id, lane_id,
             m_tile, K_packed, K_scales_padded, M, L, batch,
@@ -2030,6 +2037,10 @@ void launch_fp4_gemv_optimized(
     const uint8_t* SFA_ptr = SFA.data_ptr<uint8_t>();
     const uint8_t* SFB_ptr = SFB.data_ptr<uint8_t>();
     half* D_ptr = reinterpret_cast<half*>(D.data_ptr<at::Half>());
+
+    printf("LAUNCH DEBUG: M=%lld K=%lld L=%lld\n",
+           (long long)M, (long long)K, (long long)L);
+    fflush(stdout);
 
     constexpr int kTileM = 128;
     constexpr int kTileK = 256;  // 256 elements = 128 packed bytes (required for SWIZZLE_128B)
@@ -2508,6 +2519,13 @@ void launch_fp4_gemv_optimized(
         // Rank-3: Cluster kernel
         kernel_ptr = (void const*)fp4_gemv_rank3_cluster<kTileM, kTileK, kThreads>;
     }
+
+    if (L == 1) {
+        printf("LAUNCH DEBUG: using fp4_gemv_rank2_cta\n");
+    } else {
+        printf("LAUNCH DEBUG: using fp4_gemv_rank3_cluster\n");
+    }
+    fflush(stdout);
 
     cudaFuncAttributes attr;
     cudaError_t attr_err = cudaFuncGetAttributes(&attr, kernel_ptr);
