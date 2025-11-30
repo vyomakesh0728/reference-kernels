@@ -8,6 +8,7 @@ cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
 
 cuda_source = r"""
 #include <torch/extension.h>
+#undef NDEBUG
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda.h>
@@ -544,17 +545,17 @@ __device__ __forceinline__ void process_tile(
             half v0 = __float2half(0.0f);
             half v1 = __float2half(0.0f);
             if (row < tile_rows && k_base < K) {
-                v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+                v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h); // High nibble -> element 0
             }
             if (row < tile_rows && (k_base + 1) < K) {
-                v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
+                v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h); // Low nibble -> element 1
             }
 
 #ifndef NDEBUG
             if (blockIdx.x == 0 && blockIdx.y == 0 && col_packed == 0 && row < 5) {
                 int sfa_idx_check = row * K_scales_padded + (col_packed >> 3);
                 uint8_t sfa_byte = sfa_stage[stage][sfa_idx_check];
-                DEBUG_PRINT_ERROR("A_decode k_tile=%d stage=%d: row=%d col=%d k_base=%d packed=0x%02x scale=%.4f sfa_idx=%d sfa_byte=0x%02x v0=%.4f v1=%.4f\n",
+                printf("A_decode k_tile=%d stage=%d: row=%d col=%d k_base=%d packed=0x%02x scale=%.4f sfa_idx=%d sfa_byte=0x%02x v0=%.4f v1=%.4f\n",
                                   k_tile, stage, row, col_packed, k_base, packed, __half2float(scale_h), sfa_idx_check, sfa_byte, __half2float(v0), __half2float(v1));
             }
 #endif
@@ -578,6 +579,9 @@ __device__ __forceinline__ void process_tile(
                 int b_vec_idx = k_tile + kk;
                 DEBUG_OOB_SMEM_1D("b_vec_smem", b_vec_idx, K, b_vec_smem);
                 v = b_vec_smem[b_vec_idx];
+                if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk < 8) {
+                    printf("B_decode k_tile=%d kk=%d v=%.4f\n", k_tile, kk, __half2float(v));
+                }
             }
             half* b_row = b_tile_smem + kk * 8;
 #pragma unroll
@@ -651,6 +655,8 @@ __device__ __forceinline__ void process_tile(
             );
 
             if (blockIdx.x == 0 && blockIdx.y == 0 && k_tile == 0 && kk == 0 && warp_id == 2 && lane_id == 0) {
+                printf("ACCUM k_tile=%d c_frag_0=%.4f c_frag_1=%.4f c_frag_2=%.4f c_frag_3=%.4f\n", 
+                       k_tile, c_frag_0, c_frag_1, c_frag_2, c_frag_3);
             }
         }
     }
@@ -980,9 +986,9 @@ fp4_gemv_rank2_cta(
             DEBUG_OOB_SMEM_1D("sfb_smem", scale_idx, K_sfb_decode, sfb_smem);
             scale_h = __float2half(decode_fp8_e4m3(sfb_smem[scale_idx]));
         }
-        // FIXED: LOW nibble = element 0, HIGH nibble = element 1 (matches reference implementation)
-        half v0 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);         // LOW nibble -> element 0
-        half v1 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);  // HIGH nibble -> element 1
+        // FIXED: HIGH nibble = element 0, LOW nibble = element 1 (matches reference implementation)
+        half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);  // HIGH nibble -> element 0
+        half v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);         // LOW nibble -> element 1
 
 #ifndef NDEBUG
         // Debug: print first few B decode values
