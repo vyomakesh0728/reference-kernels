@@ -1559,7 +1559,8 @@ fp4_gemv_rank3_cluster( // <- kernel start here
     }
 
     // Issue TMA loads
-    if (warp_id == 0 && lane_id == 0) {
+    // FIX: Only CTA0 in the pair issues the multicast TMA to avoid double data/barrier updates
+    if (warp_id == 0 && lane_id == 0 && cta_rank == 0) {
 
         // Issue all TMA loads (barrier expects total bytes from all loads)
         for (int tile_idx = 0; tile_idx < b_chunks; ++tile_idx) {
