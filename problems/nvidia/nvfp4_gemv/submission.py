@@ -2639,20 +2639,9 @@ void launch_fp4_gemv_optimized(
         // Verify launch config
         printf("Launch config verification:\n");
         printf("  kernel_ptr=%p\n", kernel_ptr);
-        printf("  launch_config.gridDim=(%u,%u,%u)\n",
-               launch_config.gridDim.x, launch_config.gridDim.y, launch_config.gridDim.z);
-        printf("  launch_config.blockDim=(%u,%u,%u)\n",
-               launch_config.blockDim.x, launch_config.blockDim.y, launch_config.blockDim.z);
-        printf("  launch_config.dynamicSmemBytes=%zu\n", launch_config.dynamicSmemBytes);
-        printf("  launch_config.numAttrs=%d\n", launch_config.numAttrs);
-        if (launch_config.numAttrs > 0) {
-            printf("  launch_attr[0].id=%d (should be %d for ClusterDimension)\n",
-                   launch_config.attrs[0].id, cudaLaunchAttributeClusterDimension);
-            printf("  cluster dims=(%u,%u,%u)\n",
-                   launch_config.attrs[0].val.clusterDim.x,
-                   launch_config.attrs[0].val.clusterDim.y,
-                   launch_config.attrs[0].val.clusterDim.z);
-        }
+        printf("  grid=(%u,%u,%u)\n", grid.x, grid.y, grid.z);
+        printf("  block=(%u,%u,%u)\n", block.x, block.y, block.z);
+        printf("  shared_bytes=%zu\n", shared_bytes);
     }
 
     if (L == 1) {
