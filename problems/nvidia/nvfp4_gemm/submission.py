@@ -297,7 +297,7 @@ __device__ __forceinline__ void prefetch_tile(
             }
             if (valid_sfa_m && valid_sfa_k) {
                 tma_load_2d_cta_no_arrive(
-                    sfa_stage[stage], desc_SFA, sfa_c1, sfa_c0, mbar_stage(mbar_a, stage)  // M,K order
+                    sfa_stage[stage], desc_SFA, sfa_c0, sfa_c1, mbar_stage(mbar_a, stage)  // K,M order
                 );
             }
 
@@ -327,7 +327,7 @@ __device__ __forceinline__ void prefetch_tile(
             }
             if (valid_sfb_n && valid_sfb_k) {
                 tma_load_2d_cta_no_arrive(
-                    sfb_stage[stage], desc_SFB, sfb_c1, sfb_c0, mbar_stage(mbar_b, stage)  // N,K order
+                    sfb_stage[stage], desc_SFB, sfb_c0, sfb_c1, mbar_stage(mbar_b, stage)  // K,N order
                 );
             }
         }
@@ -782,14 +782,15 @@ void launch_fp4_gemm_optimized(
         }
     }
 
-    // SFA: M x K_scales K-major (task.yml)
+    // SFA: M x K_scales in K-major order (task.yml)
+    // K-major means K_scales is fastest (contiguous), so TMA dims = [K_scales, M]
     {
         cuuint32_t box_sfa_k = 128; // SWIZZLE_128B requires 128 bytes
         cuuint32_t box_sfa_m = kTileM;
         
-        cuuint64_t dims_SFA[2] = {static_cast<cuuint64_t>(M), static_cast<cuuint64_t>(K_scales_padded)};
-        cuuint32_t box_SFA[2] = {box_sfa_m, box_sfa_k};
-        cuuint64_t strides_SFA[1] = {1};  // K-major: 1 byte stride over K
+        cuuint64_t dims_SFA[2] = {static_cast<cuuint64_t>(K_scales_padded), static_cast<cuuint64_t>(M)};
+        cuuint32_t box_SFA[2] = {box_sfa_k, box_sfa_m};
+        cuuint64_t strides_SFA[1] = {static_cast<cuuint64_t>(K_scales_padded)};  // Row stride in bytes
 
         CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      2, SFA_ptr, dims_SFA, strides_SFA, box_SFA);
@@ -800,15 +801,16 @@ void launch_fp4_gemm_optimized(
         }
     }
 
-    // SFB: N x K_scales K-major (task.yml)
+    // SFB: N x K_scales in K-major order (task.yml)
+    // K-major means K_scales is fastest (contiguous), so TMA dims = [K_scales, N]
     {
         cuuint32_t box_sfb_k = 128; // SWIZZLE_128B
         cuuint32_t box_sfb_n = kTileN;
         
         // SFB is N x K_scales K-major (matching task.yml layout)
-        cuuint64_t dims_SFB[2] = {static_cast<cuuint64_t>(N), static_cast<cuuint64_t>(K_scales_padded)};
-        cuuint32_t box_SFB[2] = {box_sfb_n, box_sfb_k};
-        cuuint64_t strides_SFB[1] = {1};  // K-major: 1 byte stride over K
+        cuuint64_t dims_SFB[2] = {static_cast<cuuint64_t>(K_scales_padded), static_cast<cuuint64_t>(N)};
+        cuuint32_t box_SFB[2] = {box_sfb_k, box_sfb_n};
+        cuuint64_t strides_SFB[1] = {static_cast<cuuint64_t>(K_scales_padded)};  // Row stride in bytes
 
         CUresult resSFB = encode_tma_matrix(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      2, SFB_ptr, dims_SFB, strides_SFB, box_SFB);
