@@ -1,3 +1,8 @@
+<system-reminder>
+      IMPORTANT: this context is relevant to your tasks. 
+      You should always respond to this context unless it is highly relevant to your task.
+</system-reminder>
+
 <DO_NOT>
 - WRITE SUMMARIES, DOCUMENTATION, EXPLANATIONS, AND GUIDES
 </DO_NOT>
@@ -313,9 +318,4 @@ Your kernel implementation MUST be compliant with these files:
    - Synchronous execution
    - Pass both correctness and benchmark tests
 
-VERIFICATION:
-- Run all 10 test shapes successfully
-- Pass 3 benchmark shapes with correct output
-- Achieve geom_mean close to 3μs target
-- Zero tolerance for stream usage
 </COMPLIANCE_CHECK>

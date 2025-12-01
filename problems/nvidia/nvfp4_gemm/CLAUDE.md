@@ -1,3 +1,8 @@
+<system-reminder>
+      IMPORTANT: this context is relevant to your tasks. 
+      You should always respond to this context unless it is highly relevant to your task.
+</system-reminder>
+
 <DO_NOT>
 - WRITE SUMMARIES, DOCUMENTATION, EXPLANATIONS, AND GUIDES
 </DO_NOT>
