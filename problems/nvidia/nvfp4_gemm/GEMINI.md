@@ -38,7 +38,7 @@ If the task is unreasonable or infeasible, or if any of the tests are incorrect,
 </CODE_STYLE>
 
 <CLEAN_UP>
-The current submission_copy.py contains legacy GEMV code and RANK-3 (L=4, L=8) cluster logic that must be removed:
+The current submission.py contains legacy GEMV code and RANK-3 (L=4, L=8) cluster logic that must be removed:
 
 REMOVE ALL RANK-3 LOGIC:
   - tma_load_3d_cluster_noarrive() function
