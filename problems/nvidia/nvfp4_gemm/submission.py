@@ -995,6 +995,18 @@ def custom_kernel(data: input_t) -> output_t:
     sfa_2d = sfa_ref_cpu[..., 0].contiguous()
     sfb_2d = sfb_ref_cpu[..., 0].contiguous()
     
+    # K_scales_padded for SWIZZLE_128B (must be at least 128 bytes)
+    K_scales_padded = max(128, ((K_scales + 15) // 16) * 16)
+    
+    # CRITICAL: Pad scale tensors to match K_scales_padded
+    # TMA will try to load K_scales_padded bytes per row, so tensors must have that width
+    if sfa_2d.shape[1] < K_scales_padded:
+        padding = K_scales_padded - sfa_2d.shape[1]
+        sfa_2d = torch.nn.functional.pad(sfa_2d, (0, padding), value=0)
+    if sfb_2d.shape[1] < K_scales_padded:
+        padding = K_scales_padded - sfb_2d.shape[1]
+        sfb_2d = torch.nn.functional.pad(sfb_2d, (0, padding), value=0)
+    
     # Debug: Check tensor properties
     print(f"\n=== Python Tensor Debug ===")
     print(f"SFA device: {sfa_2d.device}, dtype: {sfa_2d.dtype}, shape: {sfa_2d.shape}")
@@ -1007,12 +1019,9 @@ def custom_kernel(data: input_t) -> output_t:
     
     print(f"SFA_bytes device: {sfa_bytes.device}, shape: {sfa_bytes.shape}, stride: {sfa_bytes.stride()}")
     print(f"SFB_bytes device: {sfb_bytes.device}, shape: {sfb_bytes.shape}, stride: {sfb_bytes.stride()}")
-
-    # K_scales_padded for SWIZZLE_128B
-    K_scales_padded = max(128, ((K_scales + 15) // 16) * 16)
     print(f"K_scales: {K_scales}, K_scales_padded: {K_scales_padded}")
-    print(f"Expected SFA size: M={M} x K_scales={K_scales}")
-    print(f"Expected SFB size: N={N} x K_scales={K_scales}")
+    print(f"Expected SFA size: M={M} x K_scales_padded={K_scales_padded}")
+    print(f"Expected SFB size: N={N} x K_scales_padded={K_scales_padded}")
     print(f"===========================\n")
 
     # Launch kernel with 2D tensors
