@@ -961,9 +961,26 @@ def custom_kernel(data: input_t) -> output_t:
 
     a, b, sfa_ref_cpu, sfb_ref_cpu, sfa_permuted, sfb_permuted, c = data
 
+    # Debug: Print shapes and alignment
+    print(f"A shape: {a.shape}, stride: {a.stride()}, ptr: {a.data_ptr():#x}")
+    print(f"B shape: {b.shape}, stride: {b.stride()}, ptr: {b.data_ptr():#x}")
+    print(f"A aligned: {a.data_ptr() % 128 == 0}")
+    print(f"B aligned: {b.data_ptr() % 128 == 0}")
+
     M, N, L = c.shape
     K = a.shape[1] * 2
     K_scales = K // 16
+
+    print(f"TMA params: M={m}, N={n}, K={k}, K_packed={k_packed}")
+    print(f"Box dims: [{128}, {128}]")
+    print(f"Global dims A: [{k_packed}, {m}]")
+    print(f"Global dims B: [{k_packed}, {n}]")
+    
+    # Check if dimensions are valid
+    assert k % 256 == 0, f"K must be divisible by 256: {k}"
+    assert k_packed >= 128, f"K_packed too small: {k_packed}"
+    assert m >= 128, f"M too small: {m}"
+    assert n >= 128, f"N too small: {n}"
 
     # CRITICAL: Extract 2D slices for TMA descriptor creation
     # Input tensors are [M, K/2, L] and [N, K/2, L] but TMA expects 2D
