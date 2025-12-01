@@ -372,27 +372,9 @@ __device__ __forceinline__ void process_tile(
             
             half scale_h = __float2half(0.0f);
             if (row < tile_rows && scale_col < scale_count) {
-                // Permuted scale layout: [32, 4, rest_m, 4, rest_k, L]
-                // For a given row and global_k_scale:
-                int mm32 = row % 32;
-                int mm4 = (row % 128) / 32;
-                int mm = row / 128;
-                int kk4 = global_k_scale % 4;
-                int kk = global_k_scale / 4;
-                
-                // Calculate permuted index
-                // stride order: L fastest, then rest_k, then 4, then rest_m, then 4, then 32
-                // Assuming L=1 (batch dimension)
-                int rest_m_size = (M + 127) / 128;
-                int rest_k_size = (K_scales_padded + 3) / 4;
-                
-                int perm_idx = mm32 + 
-                              mm4 * 32 + 
-                              mm * 32 * 4 +
-                              kk4 * 32 * 4 * rest_m_size +
-                              kk * 32 * 4 * rest_m_size * 4;
-                
-                scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][perm_idx]));
+                // Simple K-major layout: [M, K_scales] with K_scales contiguous
+                int scale_idx = row * K_scales_padded + global_k_scale;
+                scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][scale_idx]));
             }
 
             half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
@@ -418,24 +400,9 @@ __device__ __forceinline__ void process_tile(
             
             half scale_h = __float2half(0.0f);
             if (row < tile_cols && scale_col < scale_count) {
-                // Permuted scale layout: [32, 4, rest_n, 4, rest_k, L]
-                int mm32 = row % 32;
-                int mm4 = (row % 128) / 32;
-                int mm = row / 128;
-                int kk4 = global_k_scale % 4;
-                int kk = global_k_scale / 4;
-                
-                // Calculate permuted index
-                int rest_n_size = (N + 127) / 128;
-                int rest_k_size = (K_scales_padded + 3) / 4;
-                
-                int perm_idx = mm32 + 
-                              mm4 * 32 + 
-                              mm * 32 * 4 +
-                              kk4 * 32 * 4 * rest_n_size +
-                              kk * 32 * 4 * rest_n_size * 4;
-                
-                scale_h = __float2half(decode_fp8_e4m3(sfb_stage[stage][perm_idx]));
+                // Simple K-major layout: [N, K_scales] with K_scales contiguous
+                int scale_idx = row * K_scales_padded + global_k_scale;
+                scale_h = __float2half(decode_fp8_e4m3(sfb_stage[stage][scale_idx]));
             }
 
             half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
@@ -1011,8 +978,8 @@ def custom_kernel(data: input_t) -> output_t:
 
     # Extract 2D slices for scales
     # Permuted scales: [32, 4, rest_m/n, 4, rest_k, L] -> remove L dimension
-    sfa_2d = sfa_permuted[..., 0].contiguous()
-    sfb_2d = sfb_permuted[..., 0].contiguous()
+    sfa_2d = sfa_ref_cpu[..., 0].contiguous()
+    sfb_2d = sfb_ref_cpu[..., 0].contiguous()
     
     sfa_bytes = sfa_2d.view(torch.uint8)
     sfb_bytes = sfb_2d.view(torch.uint8)
