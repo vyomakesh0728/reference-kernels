@@ -719,31 +719,35 @@ void launch_fp4_gemm_optimized(
         cuuint32_t box_A[2] = {static_cast<cuuint32_t>(kTileKPacked), static_cast<cuuint32_t>(kTileM)};
         cuuint64_t strides_A[1] = {static_cast<cuuint64_t>(K/2)};
         
+        printf("TMA A: dims=[%llu, %llu], box=[%u, %u], strides=[%llu], ptr=%p\n",
+               dims_A[0], dims_A[1], box_A[0], box_A[1], strides_A[0], A_ptr);
+        
         CUresult resA = encode_tma_matrix(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      2, A_ptr, dims_A, strides_A, box_A);
-        if (resA != CUDA_SUCCESS) tma_ok = false;
-        else {
+        if (resA != CUDA_SUCCESS) {
+            printf("ERROR: TMA A descriptor failed with code %d\n", resA);
+            tma_ok = false;
+        } else {
             check_cuda(cudaMalloc(&d_map_A, sizeof(CUtensorMap)), "cudaMalloc d_map_A");
             check_cuda(cudaMemcpy(d_map_A, map_A_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_A");
         }
     }
 
     // B: N x K (Rank-2) - GEMM
-    // ZERO-COPY CONFIGURATION:
-    // - B is stored in native [N, K/2, L] layout in global memory (PyTorch row-major)
-    // - TMA descriptor matches this layout exactly - NO transpose/copy needed!
-    // - dims[2] = {K/2, N} follows column-major convention (fastest, slowest)
-    // - strides[1] = {K/2} is the row stride in bytes
-    // - This achieves maximum memory bandwidth on B200!
     {
         cuuint64_t dims_B[2] = {static_cast<cuuint64_t>(K/2), static_cast<cuuint64_t>(N)};
         cuuint32_t box_B[2] = {static_cast<cuuint32_t>(kTileKPacked), static_cast<cuuint32_t>(kTileN)};
         cuuint64_t strides_B[1] = {static_cast<cuuint64_t>(K/2)};
         
+        printf("TMA B: dims=[%llu, %llu], box=[%u, %u], strides=[%llu], ptr=%p\n",
+               dims_B[0], dims_B[1], box_B[0], box_B[1], strides_B[0], B_ptr);
+        
         CUresult resB = encode_tma_matrix(map_B_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      2, B_ptr, dims_B, strides_B, box_B);
-        if (resB != CUDA_SUCCESS) tma_ok = false;
-        else {
+        if (resB != CUDA_SUCCESS) {
+            printf("ERROR: TMA B descriptor failed with code %d\n", resB);
+            tma_ok = false;
+        } else {
             check_cuda(cudaMalloc(&d_map_B, sizeof(CUtensorMap)), "cudaMalloc d_map_B");
             check_cuda(cudaMemcpy(d_map_B, map_B_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_B");
         }
@@ -759,10 +763,15 @@ void launch_fp4_gemm_optimized(
         cuuint32_t box_SFA[2] = {box_sfa_k, box_sfa_m};
         cuuint64_t strides_SFA[1] = {static_cast<cuuint64_t>(K_scales_padded)};  // Row stride in bytes
 
+        printf("TMA SFA: dims=[%llu, %llu], box=[%u, %u], strides=[%llu], ptr=%p, K_scales_padded=%lld\n",
+               dims_SFA[0], dims_SFA[1], box_SFA[0], box_SFA[1], strides_SFA[0], SFA_ptr, K_scales_padded);
+
         CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      2, SFA_ptr, dims_SFA, strides_SFA, box_SFA);
-        if (resSFA != CUDA_SUCCESS) tma_ok = false;
-        else {
+        if (resSFA != CUDA_SUCCESS) {
+            printf("ERROR: TMA SFA descriptor failed with code %d\n", resSFA);
+            tma_ok = false;
+        } else {
             check_cuda(cudaMalloc(&d_map_SFA, sizeof(CUtensorMap)), "cudaMalloc d_map_SFA");
             check_cuda(cudaMemcpy(d_map_SFA, map_SFA_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFA");
         }
@@ -779,10 +788,15 @@ void launch_fp4_gemm_optimized(
         cuuint32_t box_SFB[2] = {box_sfb_k, box_sfb_n};
         cuuint64_t strides_SFB[1] = {static_cast<cuuint64_t>(K_scales_padded)};  // Row stride in bytes
 
+        printf("TMA SFB: dims=[%llu, %llu], box=[%u, %u], strides=[%llu], ptr=%p, K_scales_padded=%lld\n",
+               dims_SFB[0], dims_SFB[1], box_SFB[0], box_SFB[1], strides_SFB[0], SFB_ptr, K_scales_padded);
+
         CUresult resSFB = encode_tma_matrix(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      2, SFB_ptr, dims_SFB, strides_SFB, box_SFB);
-        if (resSFB != CUDA_SUCCESS) tma_ok = false;
-        else {
+        if (resSFB != CUDA_SUCCESS) {
+            printf("ERROR: TMA SFB descriptor failed with code %d\n", resSFB);
+            tma_ok = false;
+        } else {
             check_cuda(cudaMalloc(&d_map_SFB, sizeof(CUtensorMap)), "cudaMalloc d_map_SFB");
             check_cuda(cudaMemcpy(d_map_SFB, map_SFB_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFB");
         }
@@ -977,15 +991,29 @@ def custom_kernel(data: input_t) -> output_t:
     b_bytes = b_2d.view(torch.uint8)
 
     # Extract 2D slices for scales
-    # Permuted scales: [32, 4, rest_m/n, 4, rest_k, L] -> remove L dimension
+    # Simple scales: [M/N, K/16, L] -> remove L dimension
     sfa_2d = sfa_ref_cpu[..., 0].contiguous()
     sfb_2d = sfb_ref_cpu[..., 0].contiguous()
     
+    # Debug: Check tensor properties
+    print(f"\n=== Python Tensor Debug ===")
+    print(f"SFA device: {sfa_2d.device}, dtype: {sfa_2d.dtype}, shape: {sfa_2d.shape}")
+    print(f"SFB device: {sfb_2d.device}, dtype: {sfb_2d.dtype}, shape: {sfb_2d.shape}")
+    print(f"SFA is_contiguous: {sfa_2d.is_contiguous()}, data_ptr: {sfa_2d.data_ptr():#x}")
+    print(f"SFB is_contiguous: {sfb_2d.is_contiguous()}, data_ptr: {sfb_2d.data_ptr():#x}")
+    
     sfa_bytes = sfa_2d.view(torch.uint8)
     sfb_bytes = sfb_2d.view(torch.uint8)
+    
+    print(f"SFA_bytes device: {sfa_bytes.device}, shape: {sfa_bytes.shape}, stride: {sfa_bytes.stride()}")
+    print(f"SFB_bytes device: {sfb_bytes.device}, shape: {sfb_bytes.shape}, stride: {sfb_bytes.stride()}")
 
     # K_scales_padded for SWIZZLE_128B
     K_scales_padded = max(128, ((K_scales + 15) // 16) * 16)
+    print(f"K_scales: {K_scales}, K_scales_padded: {K_scales_padded}")
+    print(f"Expected SFA size: M={M} x K_scales={K_scales}")
+    print(f"Expected SFB size: N={N} x K_scales={K_scales}")
+    print(f"===========================\n")
 
     # Launch kernel with 2D tensors
     mod = get_module()
