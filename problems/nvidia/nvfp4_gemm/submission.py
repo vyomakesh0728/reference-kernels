@@ -967,14 +967,19 @@ def custom_kernel(data: input_t) -> output_t:
     print(f"A aligned: {a.data_ptr() % 128 == 0}")
     print(f"B aligned: {b.data_ptr() % 128 == 0}")
 
+    # ✅ DEFINE VARIABLES FIRST
     M, N, L = c.shape
-    K = a.shape[1] * 2
-    K_scales = K // 16
+    K = a.shape[1] * 2  # a.shape[1] is K/2 (packed)
+    kpacked = K // 2
+    Kscales = K // 16
 
-    print(f"TMA params: M={m}, N={n}, K={k}, K_packed={k_packed}")
-    print(f"Box dims: [{128}, {128}]")
-    print(f"Global dims A: [{k_packed}, {m}]")
-    print(f"Global dims B: [{k_packed}, {n}]")
+    # ✅ NOW you can print them
+    print(f"TMA params: M={M}, N={N}, K={K}, K_packed={kpacked}")
+    print(f"Box dims: [128, 128]")
+    print(f"Global dims A: [{kpacked}, {M}]")
+    print(f"Global dims B: [{kpacked}, {N}]")
+
+    
     
     # Check if dimensions are valid
     assert k % 256 == 0, f"K must be divisible by 256: {k}"
