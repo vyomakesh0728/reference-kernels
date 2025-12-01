@@ -970,22 +970,22 @@ def custom_kernel(data: input_t) -> output_t:
     # ✅ DEFINE VARIABLES FIRST
     M, N, L = c.shape
     K = a.shape[1] * 2  # a.shape[1] is K/2 (packed)
-    kpacked = K // 2
-    Kscales = K // 16
+    k_packed = K // 2
+    K_scales = K // 16
 
     # ✅ NOW you can print them
-    print(f"TMA params: M={M}, N={N}, K={K}, K_packed={kpacked}")
+    print(f"TMA params: M={M}, N={N}, K={K}, K_packed={k_packed}")
     print(f"Box dims: [128, 128]")
-    print(f"Global dims A: [{kpacked}, {M}]")
-    print(f"Global dims B: [{kpacked}, {N}]")
+    print(f"Global dims A: [{k_packed}, {M}]")
+    print(f"Global dims B: [{k_packed}, {N}]")
 
     
     
     # Check if dimensions are valid
-    assert k % 256 == 0, f"K must be divisible by 256: {k}"
+    assert K % 256 == 0, f"K must be divisible by 256: {K}"
     assert k_packed >= 128, f"K_packed too small: {k_packed}"
-    assert m >= 128, f"M too small: {m}"
-    assert n >= 128, f"N too small: {n}"
+    assert M >= 128, f"M too small: {M}"
+    assert N >= 128, f"N too small: {N}"
 
     # CRITICAL: Extract 2D slices for TMA descriptor creation
     # Input tensors are [M, K/2, L] and [N, K/2, L] but TMA expects 2D
