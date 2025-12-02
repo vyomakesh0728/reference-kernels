@@ -42,6 +42,10 @@ CUresult encode_tma_matrix(
     CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
     CUtensorMapL2promotion l2Promotion = CU_TENSOR_MAP_L2_PROMOTION_NONE;
     CUtensorMapFloatOOBfill oobFill = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+    cuuint32_t elementStrides[5];
+    for (cuuint32_t i = 0; i < tensorRank && i < 5; ++i) {
+        elementStrides[i] = 1;
+    }
 
     return cuTensorMapEncodeTiled(
         tensorMap,
@@ -51,7 +55,7 @@ CUresult encode_tma_matrix(
         globalDim,
         globalStrides,
         boxDim,
-        nullptr,  // elementStrides (default)
+        elementStrides,  // elementStrides (default)
         CU_TENSOR_MAP_INTERLEAVE_NONE,
         swizzle,
         l2Promotion,
@@ -495,7 +499,7 @@ fp4_gemm_rank2_cta(
     constexpr int TileKPacked = TileK / 2;
     constexpr int TileN = 128; // Fixed TileN matching TileM
     constexpr int SfaBoxK = 128;  // Rank-2 GEMM: SWIZZLE_128B
-    constexpr int StageCount = 3;
+    constexpr int StageCount = 1; // Single-stage pipeline to fit within per-block shared memory limit on B200
     constexpr int a_stride = TileK + 8;
     constexpr int b_stride = TileK + 8;
 
@@ -834,26 +838,26 @@ void launch_fp4_gemm_optimized(
     size_t offset = 0;
     auto align = [&](size_t x, size_t a) { return (x + a - 1) & ~(a - 1); };
     
-    // Mbarriers
+    // Mbarriers (StageCount = 1)
     offset = align(offset, 16);
-    offset += 3 * 16; // mbar_a
-    offset += 3 * 16; // mbar_b
+    offset += 1 * 16; // mbar_a
+    offset += 1 * 16; // mbar_b
     
-    // TMA A
+    // TMA A (StageCount = 1)
     offset = align(offset, 1024);
-    offset += 3 * kTileM * kTileKPacked;
+    offset += 1 * kTileM * kTileKPacked;
     
-    // TMA B
+    // TMA B (StageCount = 1)
     offset = align(offset, 1024);
-    offset += 3 * kTileN * kTileKPacked;
+    offset += 1 * kTileN * kTileKPacked;
     
-    // TMA SFA
+    // TMA SFA (StageCount = 1)
     offset = align(offset, 1024);
-    offset += 3 * kTileM * 128;
+    offset += 1 * kTileM * 128;
     
-    // TMA SFB
+    // TMA SFB (StageCount = 1)
     offset = align(offset, 1024);
-    offset += 3 * kTileN * 128;
+    offset += 1 * kTileN * 128;
     
     // Decoded A
     offset = align(offset, 128);
