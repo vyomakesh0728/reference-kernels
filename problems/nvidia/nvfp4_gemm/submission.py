@@ -270,17 +270,27 @@ __device__ __forceinline__ void prefetch_tile(
             uint32_t c_k_packed = static_cast<uint32_t>(k_tile_base >> 1);
             uint32_t c_k_scales = static_cast<uint32_t>(k_tile_base >> 4);
 
+            // Relaxed guards: Allow partial tiles
+            // TMA handles OOB by zero-filling (if configured) or we rely on padding.
+            // Since we padded the tensors in Python, we can safely load full tiles.
+            // Just check if the start of the tile is within bounds.
+            bool valid_m = (c_m < M);
+            bool valid_k = (c_k_packed < K_packed);
+
             // --- TMA Load A (M x K) ---
             uint32_t c0_a = c_k_packed;
             uint32_t c1_a = c_m;
-            bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
-            bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
+            // The original valid_k and valid_m checks were:
+            // bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
+            // bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
             // --- TMA Load SFA (M x K_scales) ---
             // Align K coordinate to SfaBoxK
+            // Align K coordinate to SfaBoxK
             uint32_t sfa_c0 = (c_k_scales / SfaBoxK) * SfaBoxK;
             uint32_t sfa_c1 = c_m;
-            bool valid_sfa_k = (sfa_c0 + SfaBoxK) <= static_cast<uint32_t>(K_scales_padded);
+            // Always load full tile if M is valid. K is padded, so no OOB check needed for K.
+            bool valid_sfa_k = true; 
             bool valid_sfa_m = valid_m;
 
             // Calculate expected bytes for mbar_a
@@ -305,12 +315,14 @@ __device__ __forceinline__ void prefetch_tile(
             // B is N x K. TMA dims: [K_packed, N].
             uint32_t c0_b = c_k_packed;
             uint32_t c1_b = c_n;
-            bool valid_n = (c_n + TileM) <= static_cast<uint32_t>(N); // TileM used for N tile size too (128)
+            // Relaxed guard for N
+            bool valid_n = (c_n < N);
 
             // --- TMA Load SFB (N x K_scales) ---
             uint32_t sfb_c0 = (c_k_scales / SfaBoxK) * SfaBoxK;
             uint32_t sfb_c1 = c_n;
-            bool valid_sfb_k = valid_sfa_k; // Same K scale dimension
+            // Always load full tile if N is valid. K is padded.
+            bool valid_sfb_k = true; 
             bool valid_sfb_n = valid_n;
 
             // Calculate expected bytes for mbar_b
@@ -373,7 +385,12 @@ __device__ __forceinline__ void process_tile(
             half scale_h = __float2half(0.0f);
             if (row < tile_rows && scale_col < scale_count) {
                 // Simple K-major layout: [M, K_scales] with K_scales contiguous
-                int scale_idx = row * K_scales_padded + global_k_scale;
+                // TMA loads 128-byte tiles. We need the index within the loaded tile.
+                // global_k_scale is the absolute K scale index.
+                // The tile starts at (global_k_scale / 128) * 128.
+                // The offset within the tile is global_k_scale % 128.
+                // The row stride in the 128-wide tile is 128.
+                int scale_idx = row * 128 + (global_k_scale % 128);
                 scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][scale_idx]));
             }
 
@@ -401,7 +418,8 @@ __device__ __forceinline__ void process_tile(
             half scale_h = __float2half(0.0f);
             if (row < tile_cols && scale_col < scale_count) {
                 // Simple K-major layout: [N, K_scales] with K_scales contiguous
-                int scale_idx = row * K_scales_padded + global_k_scale;
+                // TMA loads 128-byte tiles. We need the index within the loaded tile.
+                int scale_idx = row * 128 + (global_k_scale % 128);
                 scale_h = __float2half(decode_fp8_e4m3(sfb_stage[stage][scale_idx]));
             }
 
@@ -999,7 +1017,7 @@ def custom_kernel(data: input_t) -> output_t:
     sfb_2d = sfb_ref_cpu[..., 0].contiguous()
     
     # K_scales_padded for SWIZZLE_128B (must be at least 128 bytes)
-    K_scales_padded = max(128, ((K_scales + 15) // 16) * 16)
+    K_scales_padded = max(128, ((K_scales + 127) // 128) * 128)
     
     # CRITICAL: Pad scale tensors to match K_scales_padded
     # TMA will try to load K_scales_padded bytes per row, so tensors must have that width
