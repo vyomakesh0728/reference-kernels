@@ -40,7 +40,7 @@ CUresult encode_tma_matrix(
     const cuuint32_t* boxDim
 ) {
     CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
-    CUtensorMapL2promotion l2Promotion = CU_TENSOR_MAP_L2_PROMOTION_L2_128B;
+    CUtensorMapL2promotion l2Promotion = CU_TENSOR_MAP_L2_PROMOTION_NONE;
     CUtensorMapFloatOOBfill oobFill = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
 
     return cuTensorMapEncodeTiled(
@@ -708,7 +708,10 @@ void launch_fp4_gemm_optimized(
     static_assert(kTileN <= kTMABoxLimit, "kTileN exceeds TMA box limit");
 
     // --- TMA Descriptors ---
-    CUtensorMap map_A, map_B, map_SFA, map_SFB;
+    alignas(64) CUtensorMap map_A;
+    alignas(64) CUtensorMap map_B;
+    alignas(64) CUtensorMap map_SFA;
+    alignas(64) CUtensorMap map_SFB;
     CUtensorMap *d_map_A = nullptr, *d_map_B = nullptr, *d_map_SFA = nullptr, *d_map_SFB = nullptr;
     CUtensorMap *map_A_ptr = &map_A, *map_B_ptr = &map_B, *map_SFA_ptr = &map_SFA, *map_SFB_ptr = &map_SFB;
     bool tma_ok = true;
