@@ -429,8 +429,10 @@ __device__ __forceinline__ void process_tile(
                 }
             }
 
-            half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
-            half v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+            half v0, v1;
+            decode_fp4x2_hw(packed, v0, v1);
+            v0 = __hmul(v0, scale_h);
+            v1 = __hmul(v1, scale_h);
 
             half* a_dst = a_f16_smem + row * a_stride;
             a_dst[col_packed * 2] = v0;
@@ -460,8 +462,10 @@ __device__ __forceinline__ void process_tile(
                 }
             }
 
-            half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
-            half v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
+            half v0, v1;
+            decode_fp4x2_hw(packed, v0, v1);
+            v0 = __hmul(v0, scale_h);
+            v1 = __hmul(v1, scale_h);
 
             int k0 = col_packed * 2;
             int k1 = k0 + 1;
