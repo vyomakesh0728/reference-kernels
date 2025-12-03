@@ -1590,3 +1590,32 @@ def debug_scales(data: input_t) -> None:
     print(f"\nNeeded scale for [0,0]: {needed_scale:.4f}")
     print(f"scale_a[0,:] = {sfa_ref16[0,:].tolist()}")
     print(f"scale_b[0,:] = {sfb_ref16[0,:].tolist()}")
+
+    # === Test: Power-of-2 scales applied to partial sums ===
+    # C[m,n] = sum_kb (partial[m,n,kb] * 2^scale_a[m,kb] * 2^scale_b[n,kb])
+    c_pow2_partial = torch.zeros((M, N), dtype=torch.float32, device=device)
+    for kb in range(K_scales):
+        k_start = kb * 16
+        k_end = min((kb + 1) * 16, K)
+        a_block = out_a[:, k_start:k_end].float()
+        b_block = out_b[:, k_start:k_end].float()
+        partial = a_block @ b_block.T
+        # Apply 2^scale for this K-block
+        pow2_sfa_kb = torch.pow(2.0, sfa_ref16[:, kb:kb+1].float())  # [M, 1]
+        pow2_sfb_kb = torch.pow(2.0, sfb_ref16[:, kb:kb+1].float())  # [N, 1]
+        c_pow2_partial += partial * pow2_sfa_kb * pow2_sfb_kb.T
+    c_pow2_partial_fp16 = c_pow2_partial.half()
+    
+    diff_pow2_partial = (c_pow2_partial_fp16 - c_ref_mm).abs()
+    max_abs_pow2_partial = diff_pow2_partial.max().item()
+    max_rel_pow2_partial = (diff_pow2_partial / denom).max().item()
+    print(f"\nPow2-partial-sum GEMM max abs diff: {max_abs_pow2_partial}")
+    print(f"Pow2-partial-sum GEMM max rel diff: {max_rel_pow2_partial}")
+    print(f"c_pow2_partial[0,0] = {c_pow2_partial_fp16[0,0].item()}")
+    
+    # Compute what average pow2 scale product would be for [0,0]
+    pow2_a = torch.pow(2.0, sfa_ref16[0,:].float())
+    pow2_b = torch.pow(2.0, sfb_ref16[0,:].float())
+    pow2_products = pow2_a * pow2_b
+    avg_pow2 = pow2_products.mean().item()
+    print(f"Average 2^scale_a * 2^scale_b for row 0: {avg_pow2:.4f}")
