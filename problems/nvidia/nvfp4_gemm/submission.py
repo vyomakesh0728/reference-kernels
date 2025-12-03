@@ -77,7 +77,8 @@ __device__ __forceinline__ half decode_fp4_e2m1(uint8_t nibble) {
 
 __device__ __forceinline__ float decode_fp8_e4m3(uint8_t val) {
     cutlass::float_e4m3_t fp8_val = *reinterpret_cast<cutlass::float_e4m3_t*>(&val);
-    return __half2float(__float2half_rn(fp8_val));
+    // CRITICAL: _scaled_mm uses |scale| - block scales must be positive magnitudes
+    return fabsf(__half2float(__float2half_rn(fp8_val)));
 }
 
 // Hardware FP4 decode helper using cvt.rn.f16x2.e2m1x2, adapted from gau.py.
