@@ -1646,8 +1646,34 @@ def debug_scales(data: input_t) -> None:
         pytorch_val = sfa_ref16[0, i].item()
         print(f"  byte {byte_val}: manual={decoded:.4f}, pytorch={pytorch_val:.4f}")
 
-    # === Try using the ACTUAL FP8 decoded values as-is (no 2^) ===
-    # Just to be thorough - use the decoded FP8 values directly
-    print(f"\nDirect FP8 scale interpretation (no transformation):")
-    c_direct = c_hw_noscale * 1.0  # start with no-scale
-    # This should equal c_hw_noscale since we're not applying anything new
+    # === Try absolute value of scales ===
+    # Maybe _scaled_mm uses |scale| since block scales should be positive
+    a_scale_abs = a_scale.abs()
+    b_scale_abs = b_scale.abs()
+    c_abs_scale = (out_a * a_scale_abs) @ (out_b * b_scale_abs).T
+    diff_abs = (c_abs_scale - c_ref_mm).abs()
+    print(f"\nAbs-scale GEMM max abs diff: {diff_abs.max().item()}")
+    print(f"c_abs_scale[0,0] = {c_abs_scale[0,0].item()}")
+
+    # === Try 2^|scale| (power of 2 of absolute value) ===
+    a_scale_pow2_abs = torch.pow(2.0, a_scale.abs().float()).half()
+    b_scale_pow2_abs = torch.pow(2.0, b_scale.abs().float()).half()
+    c_pow2_abs = (out_a * a_scale_pow2_abs) @ (out_b * b_scale_pow2_abs).T
+    diff_pow2_abs = (c_pow2_abs - c_ref_mm).abs()
+    print(f"Pow2-abs-scale GEMM max abs diff: {diff_pow2_abs.max().item()}")
+    print(f"c_pow2_abs[0,0] = {c_pow2_abs[0,0].item()}")
+
+    # === Try scale + offset (e.g., scale + 1 to make all positive) ===
+    offset = 4  # Make all scales positive: -3+4=1, 2+4=6
+    a_scale_offset = (a_scale + offset)
+    b_scale_offset = (b_scale + offset)
+    c_offset = (out_a * a_scale_offset) @ (out_b * b_scale_offset).T
+    diff_offset = (c_offset - c_ref_mm).abs()
+    print(f"Scale+{offset} GEMM max abs diff: {diff_offset.max().item()}")
+
+    # === Try 2^(scale + offset) ===
+    a_scale_pow2_off = torch.pow(2.0, (a_scale + 1).float()).half()
+    b_scale_pow2_off = torch.pow(2.0, (b_scale + 1).float()).half()
+    c_pow2_off = (out_a * a_scale_pow2_off) @ (out_b * b_scale_pow2_off).T
+    diff_pow2_off = (c_pow2_off - c_ref_mm).abs()
+    print(f"Pow2(scale+1) GEMM max abs diff: {diff_pow2_off.max().item()}")
