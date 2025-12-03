@@ -1424,3 +1424,44 @@ def debug_scales(data: input_t) -> None:
     max_rel_diff = (diff_c / denom).max().item()
     print(f"GEMM debug max abs diff: {max_abs_diff}")
     print(f"GEMM debug max rel diff: {max_rel_diff}")
+
+    # === GEMM using to_blocked scale semantics (Python only) ===
+    # Build index maps from (row, k_block) -> flattened scale index implied by to_blocked.
+    rows_a, K_scales = sfa_ref_cpu[..., 0].shape  # [M, K_scales]
+    rows_b, _ = sfb_ref_cpu[..., 0].shape         # [N, K_scales]
+
+    # A-side index map
+    ids_a = torch.arange(rows_a * K_scales, device=device, dtype=torch.int64).view(rows_a, K_scales)
+    flat_ids_a = to_blocked(ids_a)
+    inv_a = torch.empty_like(flat_ids_a)
+    inv_a[flat_ids_a] = torch.arange(flat_ids_a.numel(), device=device, dtype=torch.int64)
+    idx_map_a = inv_a.view(rows_a, K_scales)
+
+    scale_a_flat = to_blocked(sfa_ref_cpu[:, :, 0]).to(device=device, dtype=torch.float16)
+    k_idx = torch.arange(K, device=device)
+    k_block = (k_idx // 16).view(1, -1).expand(rows_a, -1)  # [M, K]
+    idx_flat_full_a = idx_map_a.gather(1, k_block)
+    a_scale_blocked = scale_a_flat[idx_flat_full_a]
+
+    # B-side index map
+    ids_b = torch.arange(rows_b * K_scales, device=device, dtype=torch.int64).view(rows_b, K_scales)
+    flat_ids_b = to_blocked(ids_b)
+    inv_b = torch.empty_like(flat_ids_b)
+    inv_b[flat_ids_b] = torch.arange(flat_ids_b.numel(), device=device, dtype=torch.int64)
+    idx_map_b = inv_b.view(rows_b, K_scales)
+
+    k_block_b = (k_idx // 16).view(1, -1).expand(rows_b, -1)  # [N, K]
+    scale_b_flat = to_blocked(sfb_ref_cpu[:, :, 0]).to(device=device, dtype=torch.float16)
+    idx_flat_full_b = idx_map_b.gather(1, k_block_b)
+    b_scale_blocked = scale_b_flat[idx_flat_full_b]
+
+    # Apply blocked scales to LUT-decoded FP4 (a_fp4, b_fp4)
+    a_dec_blocked = a_fp4 * a_scale_blocked
+    b_dec_blocked = b_fp4 * b_scale_blocked
+
+    c_blocked = a_dec_blocked @ b_dec_blocked.transpose(0, 1)
+    diff_c_blocked = (c_blocked - c_ref_mm).abs()
+    max_abs_blocked = diff_c_blocked.max().item()
+    max_rel_blocked = (diff_c_blocked / denom).max().item()
+    print(f"Blocked GEMM max abs diff: {max_abs_blocked}")
+    print(f"Blocked GEMM max rel diff: {max_rel_blocked}")
