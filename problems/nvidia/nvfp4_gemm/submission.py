@@ -3,6 +3,7 @@ import os
 import torch
 from task import input_t, output_t
 from torch.utils.cpp_extension import load_inline
+from reference import to_blocked
 
 cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
 
@@ -1378,3 +1379,26 @@ def debug_scales(data: input_t) -> None:
     diff_b = (out_b - b_dec_ref).abs()
     print(f"Decode A max abs diff: {diff_a.max().item()}")
     print(f"Decode B max abs diff: {diff_b.max().item()}")
+
+    a_ref = a[:, :, 0]
+    b_ref = b[:, :, 0]
+    scale_a = to_blocked(sfa_ref_cpu[:, :, 0]).to(device)
+    scale_b = to_blocked(sfb_ref_cpu[:, :, 0]).to(device)
+
+    c_ref_mm = torch._scaled_mm(
+        a_ref,
+        b_ref.transpose(0, 1),
+        scale_a,
+        scale_b,
+        bias=None,
+        out_dtype=torch.float16,
+    )
+
+    c_debug = out_a @ out_b.transpose(0, 1)
+
+    diff_c = (c_debug - c_ref_mm).abs()
+    max_abs_diff = diff_c.max().item()
+    denom = c_ref_mm.abs().clamp_min(1e-4)
+    max_rel_diff = (diff_c / denom).max().item()
+    print(f"GEMM debug max abs diff: {max_abs_diff}")
+    print(f"GEMM debug max rel diff: {max_rel_diff}")
