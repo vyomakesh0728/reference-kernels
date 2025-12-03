@@ -1548,3 +1548,19 @@ def debug_scales(data: input_t) -> None:
     print(f"c_ref_mm[0,0] = {c_ref_mm[0,0].item()}")
     print(f"c_debug[0,0] = {c_debug[0,0].item()}")
     print(f"c_hw_noscale[0,0] = {c_hw_noscale[0,0].item()}")
+
+    # === Test power-of-2 scale interpretation ===
+    # In block-scaled FP4, scale might be: decoded = fp4_value * 2^scale
+    a_scale_pow2 = torch.pow(2.0, a_scale.float()).half()  # 2^scale for each element
+    b_scale_pow2 = torch.pow(2.0, b_scale.float()).half()
+    
+    a_dec_pow2 = out_a * a_scale_pow2
+    b_dec_pow2 = out_b * b_scale_pow2
+    c_pow2 = a_dec_pow2 @ b_dec_pow2.T
+    
+    diff_pow2 = (c_pow2 - c_ref_mm).abs()
+    max_abs_pow2 = diff_pow2.max().item()
+    max_rel_pow2 = (diff_pow2 / denom).max().item()
+    print(f"\nPower-of-2 scale GEMM max abs diff: {max_abs_pow2}")
+    print(f"Power-of-2 scale GEMM max rel diff: {max_rel_pow2}")
+    print(f"c_pow2[0,0] = {c_pow2[0,0].item()}")
