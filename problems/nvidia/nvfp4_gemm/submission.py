@@ -1492,3 +1492,24 @@ def debug_scales(data: input_t) -> None:
     # Compare kernel-based GEMM vs Python blocked GEMM directly
     inter_diff = (c_debug - c_blocked).abs().max().item()
     print(f"c_debug vs c_blocked max abs diff: {inter_diff}")
+
+    # === Partial-sum GEMM (apply scales to K-block partial sums, not element-wise) ===
+    # This matches how _scaled_mm actually applies block scales
+    c_partial = torch.zeros((M, N), dtype=torch.float32, device=device)
+    for kb in range(K_scales):
+        k_start = kb * 16
+        k_end = min((kb + 1) * 16, K)
+        a_block = out_a[:, k_start:k_end].float()  # [M, block_size]
+        b_block = out_b[:, k_start:k_end].float()  # [N, block_size]
+        partial = a_block @ b_block.T              # [M, N] partial sum
+        # Apply scales for this K-block: scale_a[m,kb] * scale_b[n,kb]
+        sfa_kb = sfa_ref16[:, kb:kb+1].float()     # [M, 1]
+        sfb_kb = sfb_ref16[:, kb:kb+1].float()     # [N, 1]
+        c_partial += partial * sfa_kb * sfb_kb.T
+    c_partial_fp16 = c_partial.half()
+    
+    diff_partial = (c_partial_fp16 - c_ref_mm).abs()
+    max_abs_partial = diff_partial.max().item()
+    max_rel_partial = (diff_partial / denom).max().item()
+    print(f"Partial-sum GEMM max abs diff: {max_abs_partial}")
+    print(f"Partial-sum GEMM max rel diff: {max_rel_partial}")
