@@ -660,7 +660,9 @@ fp4_gemm_rank2_cta(
         // Process tile
         process_tile<TileM, TileN, TileK, Threads>(
             k_tile, stage, tile_rows, tile_cols,
+            m_tile, n_tile,
             a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
+            SFA_packed, SFB_packed,
             a_f16_smem, b_f16_smem,
             M, N, K, K_scales_padded,
             tid, warp_id, lane_id,
