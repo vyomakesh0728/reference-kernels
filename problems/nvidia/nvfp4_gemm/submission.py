@@ -1023,15 +1023,7 @@ fp4_scale_debug_rank2_cta(
             decode_fp4x2_hw(packed, v0, v1);
             half v = (k & 1) ? v1 : v0;
 
-            int  j = k >> 4;                      // K_block = k/16
-            half scale_h = __float2half(0.0f);
-            if (j < K_scales) {
-                int scale_idx = m_global * K_scales_padded + j;
-                uint8_t sfa_byte = SFA_packed[scale_idx];
-                scale_h = __float2half(decode_fp8_e4m3(sfa_byte));
-            }
-
-            OUT_A[m_global * K + k] = __hmul(v, scale_h);
+            OUT_A[m_global * K + k] = v;
         }
     }
 
@@ -1050,15 +1042,7 @@ fp4_scale_debug_rank2_cta(
             decode_fp4x2_hw(packed, v0, v1);
             half v = (k & 1) ? v1 : v0;
 
-            int  j = k >> 4;
-            half scale_h = __float2half(0.0f);
-            if (j < K_scales) {
-                int scale_idx = n_global * K_scales_padded + j;
-                uint8_t sfb_byte = SFB_packed[scale_idx];
-                scale_h = __float2half(decode_fp8_e4m3(sfb_byte));
-            }
-
-            OUT_B[n_global * K + k] = __hmul(v, scale_h);
+            OUT_B[n_global * K + k] = v;
         }
     }
 #endif
@@ -1379,7 +1363,7 @@ def debug_scales(data: input_t) -> None:
     k_idx = torch.arange(K, device=device)
     scale_idx = (k_idx // 16).view(1, -1).expand(M_a, -1)             # [M, K]
     a_scale = sfa_scale.gather(1, scale_idx)
-    a_dec_ref = a_fp4 * a_scale
+    a_dec_ref = a_fp4
 
     # B decode (Python)
     b_u8 = b_bytes  # [N, K/2]
@@ -1395,7 +1379,7 @@ def debug_scales(data: input_t) -> None:
     sfb_scale = sfb_ref_cpu[..., 0].to(device=device, dtype=torch.float16)  # [N, K_scales]
     scale_idx_b = (k_idx // 16).view(1, -1).expand(N_b, -1)
     b_scale = sfb_scale.gather(1, scale_idx_b)
-    b_dec_ref = b_fp4 * b_scale
+    b_dec_ref = b_fp4
 
     diff_a = (out_a - a_dec_ref).abs()
     diff_b = (out_b - b_dec_ref).abs()
@@ -1416,7 +1400,9 @@ def debug_scales(data: input_t) -> None:
         out_dtype=torch.float16,
     )
 
-    c_debug = out_a @ out_b.transpose(0, 1)
+    a_dec_kmajor = out_a * a_scale
+    b_dec_kmajor = out_b * b_scale
+    c_debug = a_dec_kmajor @ b_dec_kmajor.transpose(0, 1)
 
     diff_c = (c_debug - c_ref_mm).abs()
     max_abs_diff = diff_c.max().item()
@@ -1456,8 +1442,8 @@ def debug_scales(data: input_t) -> None:
     b_scale_blocked = scale_b_flat[idx_flat_full_b]
 
     # Apply blocked scales to LUT-decoded FP4 (a_fp4, b_fp4)
-    a_dec_blocked = a_fp4 * a_scale_blocked
-    b_dec_blocked = b_fp4 * b_scale_blocked
+    a_dec_blocked = out_a * a_scale_blocked
+    b_dec_blocked = out_b * b_scale_blocked
 
     c_blocked = a_dec_blocked @ b_dec_blocked.transpose(0, 1)
     diff_c_blocked = (c_blocked - c_ref_mm).abs()
