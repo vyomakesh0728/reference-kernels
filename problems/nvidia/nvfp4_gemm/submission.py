@@ -1441,6 +1441,16 @@ def debug_scales(data: input_t) -> None:
     idx_flat_full_b = idx_map_b.gather(1, k_block_b)
     b_scale_blocked = scale_b_flat[idx_flat_full_b]
 
+    # Direct inverse-to_blocked check for scale tensors
+    sfa_ref16 = sfa_ref_cpu[..., 0].to(device=device, dtype=torch.float16)
+    sfb_ref16 = sfb_ref_cpu[..., 0].to(device=device, dtype=torch.float16)
+    recon_sfa = scale_a_flat[idx_map_a]
+    recon_sfb = scale_b_flat[idx_map_b]
+    inv_diff_sfa = (recon_sfa - sfa_ref16).abs().max().item()
+    inv_diff_sfb = (recon_sfb - sfb_ref16).abs().max().item()
+    print(f"Inverse to_blocked SFA max abs diff: {inv_diff_sfa}")
+    print(f"Inverse to_blocked SFB max abs diff: {inv_diff_sfb}")
+
     # Apply blocked scales to LUT-decoded FP4 (a_fp4, b_fp4)
     a_dec_blocked = out_a * a_scale_blocked
     b_dec_blocked = out_b * b_scale_blocked
