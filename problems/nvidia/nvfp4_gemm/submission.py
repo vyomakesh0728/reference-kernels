@@ -357,8 +357,11 @@ __device__ __forceinline__ void prefetch_tile(
 template<int TileM, int TileN, int TileK, int Threads>
 __device__ __forceinline__ void process_tile(
     int k_tile, int stage, int tile_rows, int tile_cols,
+    int m_tile, int n_tile,
     uint8_t** a_packed_stage, uint8_t** b_packed_stage,
     uint8_t** sfa_stage, uint8_t** sfb_stage,
+    const uint8_t* __restrict__ SFA_packed,
+    const uint8_t* __restrict__ SFB_packed,
     half* a_f16_smem, half* b_f16_smem,
     const int M, const int N, const int K, const int K_scales_padded,
     const int tid, const int warp_id, const int lane_id,
@@ -368,6 +371,8 @@ __device__ __forceinline__ void process_tile(
     constexpr int TileKPacked = TileK / 2;
     constexpr int a_stride = TileK + 8;
     constexpr int b_stride = TileK + 8; 
+
+    const int K_scales = (K + 15) >> 4; // one FP8 scale per 16 FP4 values
 
     int curr_k = (K - k_tile) < TileK ? (K - k_tile) : TileK;
     int curr_cols_a = (curr_k + 1) >> 1;
@@ -385,17 +390,15 @@ __device__ __forceinline__ void process_tile(
             
             int scale_col = col_packed >> 3;
             int global_k_scale = (k_tile >> 4) + scale_col;
-            
+
             half scale_h = __float2half(0.0f);
             if (row < tile_rows && scale_col < scale_count) {
-                // Simple K-major layout: [M, K_scales] with K_scales contiguous
-                // TMA loads 128-byte tiles. We need the index within the loaded tile.
-                // global_k_scale is the absolute K scale index.
-                // The tile starts at (global_k_scale / 128) * 128.
-                // The offset within the tile is global_k_scale % 128.
-                // The row stride in the 128-wide tile is 128.
-                int scale_idx = row * 128 + (global_k_scale % 128);
-                scale_h = __float2half(decode_fp8_e4m3(sfa_stage[stage][scale_idx]));
+                int m_global = m_tile + row;
+                if (m_global < M && global_k_scale < K_scales) {
+                    int scale_idx_global = m_global * K_scales_padded + global_k_scale;
+                    uint8_t sfa_byte = SFA_packed[scale_idx_global];
+                    scale_h = __float2half(decode_fp8_e4m3(sfa_byte));
+                }
             }
 
             half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
@@ -418,13 +421,15 @@ __device__ __forceinline__ void process_tile(
 
             int scale_col = col_packed >> 3;
             int global_k_scale = (k_tile >> 4) + scale_col;
-            
+
             half scale_h = __float2half(0.0f);
             if (row < tile_cols && scale_col < scale_count) {
-                // Simple K-major layout: [N, K_scales] with K_scales contiguous
-                // TMA loads 128-byte tiles. We need the index within the loaded tile.
-                int scale_idx = row * 128 + (global_k_scale % 128);
-                scale_h = __float2half(decode_fp8_e4m3(sfb_stage[stage][scale_idx]));
+                int n_global = n_tile + row;
+                if (n_global < N && global_k_scale < K_scales) {
+                    int scale_idx_global = n_global * K_scales_padded + global_k_scale;
+                    uint8_t sfb_byte = SFB_packed[scale_idx_global];
+                    scale_h = __float2half(decode_fp8_e4m3(sfb_byte));
+                }
             }
 
             half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
