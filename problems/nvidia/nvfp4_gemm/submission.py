@@ -1341,7 +1341,7 @@ def debug_scales(data: input_t) -> None:
     a_fp4[:, 0::2] = lut[hi]
     a_fp4[:, 1::2] = lut[lo]
 
-    sfa_scale = sfa_ref_cpu[..., 0].to(torch.float16, device=device)  # [M, K_scales]
+    sfa_scale = sfa_ref_cpu[..., 0].to(device=device, dtype=torch.float16)  # [M, K_scales]
     k_idx = torch.arange(K, device=device)
     scale_idx = (k_idx // 16).view(1, -1).expand(M_a, -1)             # [M, K]
     a_scale = sfa_scale.gather(1, scale_idx)
@@ -1358,7 +1358,7 @@ def debug_scales(data: input_t) -> None:
     b_fp4[:, 0::2] = lut[hi_b]
     b_fp4[:, 1::2] = lut[lo_b]
 
-    sfb_scale = sfb_ref_cpu[..., 0].to(torch.float16, device=device)  # [N, K_scales]
+    sfb_scale = sfb_ref_cpu[..., 0].to(device=device, dtype=torch.float16)  # [N, K_scales]
     scale_idx_b = (k_idx // 16).view(1, -1).expand(N_b, -1)
     b_scale = sfb_scale.gather(1, scale_idx_b)
     b_dec_ref = b_fp4 * b_scale
