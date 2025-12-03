@@ -917,59 +917,134 @@ void launch_fp4_gemm_optimized(
 template<int TileM, int TileK, int Threads>
 __global__ void __launch_bounds__(Threads)
 fp4_scale_debug_rank2_cta(
+    const uint8_t* __restrict__ A_packed,
+    const uint8_t* __restrict__ B_packed,
     const uint8_t* __restrict__ SFA_packed,
     const uint8_t* __restrict__ SFB_packed,
     uint8_t* __restrict__ OUT_SFA,
     uint8_t* __restrict__ OUT_SFB,
+    half* __restrict__ OUT_A,
+    half* __restrict__ OUT_B,
     const int M, const int N, const int K, const int L, const int K_scales_padded
 ) {
 #if __CUDA_ARCH__ >= 900
     constexpr int TileN = 128;
     const int tid = threadIdx.x;
 
-    const int batch = blockIdx.z;
+    const int batch  = blockIdx.z;
     const int m_tile = blockIdx.x * TileM;
     const int n_tile = blockIdx.y * TileN;
 
     if (batch >= L || m_tile >= M || n_tile >= N) return;
 
-    int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
-    int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
-    int K_scales = K / 16;
+    int tile_rows   = (M - m_tile) < TileM ? (M - m_tile) : TileM;
+    int tile_cols   = (N - n_tile) < TileN ? (N - n_tile) : TileN;
+    int K_scales    = K / 16;
+    int K_packed    = K / 2;
 
-    // Copy A-side scales: simple K-major layout [M, K_scales_padded]
-    for (int idx = tid; idx < tile_rows * K_scales; idx += Threads) {
-        int row = idx / K_scales;
-        int j = idx - row * K_scales;
-        int m_global = m_tile + row;
-        if (m_global < M) {
-            int src_idx = m_global * K_scales_padded + j;
-            OUT_SFA[src_idx] = SFA_packed[src_idx];
+    // --- Copy A-side scales: [M, K_scales_padded] ---
+    // Only CTAs with n_tile == 0 to avoid write races.
+    if (n_tile == 0) {
+        for (int idx = tid; idx < tile_rows * K_scales; idx += Threads) {
+            int row      = idx / K_scales;
+            int j        = idx - row * K_scales;
+            int m_global = m_tile + row;
+            if (m_global < M) {
+                int src_idx = m_global * K_scales_padded + j;
+                OUT_SFA[src_idx] = SFA_packed[src_idx];
+            }
         }
     }
 
-    // Copy B-side scales: simple K-major layout [N, K_scales_padded]
-    for (int idx = tid; idx < tile_cols * K_scales; idx += Threads) {
-        int row = idx / K_scales;
-        int j = idx - row * K_scales;
-        int n_global = n_tile + row;
-        if (n_global < N) {
-            int src_idx = n_global * K_scales_padded + j;
-            OUT_SFB[src_idx] = SFB_packed[src_idx];
+    // --- Copy B-side scales: [N, K_scales_padded] ---
+    // Only CTAs with m_tile == 0 to avoid write races.
+    if (m_tile == 0) {
+        for (int idx = tid; idx < tile_cols * K_scales; idx += Threads) {
+            int row      = idx / K_scales;
+            int j        = idx - row * K_scales;
+            int n_global = n_tile + row;
+            if (n_global < N) {
+                int src_idx = n_global * K_scales_padded + j;
+                OUT_SFB[src_idx] = SFB_packed[src_idx];
+            }
+        }
+    }
+
+    // --- Decode A: OUT_A [M, K] ---
+    // Only CTAs with n_tile == 0 write A rows.
+    if (n_tile == 0) {
+        for (int idx = tid; idx < tile_rows * K; idx += Threads) {
+            int row      = idx / K;
+            int k        = idx - row * K;
+            int m_global = m_tile + row;
+            if (m_global >= M) continue;
+
+            int  k_packed = k >> 1;               // K/2 index
+            uint8_t packed = A_packed[m_global * K_packed + k_packed];
+            uint8_t nibble = (k & 1)
+                ? (packed & 0x0F)
+                : ((packed >> 4) & 0x0F);
+
+            half v = decode_fp4_e2m1(nibble);
+
+            int  j = k >> 4;                      // K_block = k/16
+            half scale_h = __float2half(0.0f);
+            if (j < K_scales) {
+                int scale_idx = m_global * K_scales_padded + j;
+                uint8_t sfa_byte = SFA_packed[scale_idx];
+                scale_h = __float2half(decode_fp8_e4m3(sfa_byte));
+            }
+
+            OUT_A[m_global * K + k] = __hmul(v, scale_h);
+        }
+    }
+
+    // --- Decode B: OUT_B [N, K] ---
+    // Only CTAs with m_tile == 0 write B rows.
+    if (m_tile == 0) {
+        for (int idx = tid; idx < tile_cols * K; idx += Threads) {
+            int row      = idx / K;
+            int k        = idx - row * K;
+            int n_global = n_tile + row;
+            if (n_global >= N) continue;
+
+            int  k_packed = k >> 1;
+            uint8_t packed = B_packed[n_global * K_packed + k_packed];
+            uint8_t nibble = (k & 1)
+                ? (packed & 0x0F)
+                : ((packed >> 4) & 0x0F);
+
+            half v = decode_fp4_e2m1(nibble);
+
+            int  j = k >> 4;
+            half scale_h = __float2half(0.0f);
+            if (j < K_scales) {
+                int scale_idx = n_global * K_scales_padded + j;
+                uint8_t sfb_byte = SFB_packed[scale_idx];
+                scale_h = __float2half(decode_fp8_e4m3(sfb_byte));
+            }
+
+            OUT_B[n_global * K + k] = __hmul(v, scale_h);
         }
     }
 #endif
 }
 
 void launch_fp4_scale_debug(
+    torch::Tensor A_bytes, torch::Tensor B_bytes,
     torch::Tensor SFA, torch::Tensor SFB,
     torch::Tensor OUT_SFA, torch::Tensor OUT_SFB,
+    torch::Tensor OUT_A, torch::Tensor OUT_B,
     int64_t M, int64_t N, int64_t K, int64_t L, int64_t K_scales_padded
 ) {
-    const uint8_t* SFA_ptr = SFA.data_ptr<uint8_t>();
-    const uint8_t* SFB_ptr = SFB.data_ptr<uint8_t>();
-    uint8_t* OUT_SFA_ptr = OUT_SFA.data_ptr<uint8_t>();
-    uint8_t* OUT_SFB_ptr = OUT_SFB.data_ptr<uint8_t>();
+    const uint8_t* A_ptr    = A_bytes.data_ptr<uint8_t>();
+    const uint8_t* B_ptr    = B_bytes.data_ptr<uint8_t>();
+    const uint8_t* SFA_ptr  = SFA.data_ptr<uint8_t>();
+    const uint8_t* SFB_ptr  = SFB.data_ptr<uint8_t>();
+    uint8_t* OUT_SFA_ptr    = OUT_SFA.data_ptr<uint8_t>();
+    uint8_t* OUT_SFB_ptr    = OUT_SFB.data_ptr<uint8_t>();
+    half* OUT_A_ptr         = reinterpret_cast<half*>(OUT_A.data_ptr<at::Half>());
+    half* OUT_B_ptr         = reinterpret_cast<half*>(OUT_B.data_ptr<at::Half>());
 
     constexpr int kTileM = 128;
     constexpr int kTileN = 128;
@@ -982,7 +1057,6 @@ void launch_fp4_scale_debug(
     grid.z = L;
 
     dim3 block(kThreads, 1, 1);
-
     size_t shared_bytes = 0;
 
     auto kernel_ptr = (void*)fp4_scale_debug_rank2_cta<kTileM, kTileK, kThreads>;
@@ -994,10 +1068,14 @@ void launch_fp4_scale_debug(
     int K_scales_padded_int = static_cast<int>(K_scales_padded);
 
     void* kernel_args[] = {
+        (void*)&A_ptr,
+        (void*)&B_ptr,
         (void*)&SFA_ptr,
         (void*)&SFB_ptr,
         (void*)&OUT_SFA_ptr,
         (void*)&OUT_SFB_ptr,
+        (void*)&OUT_A_ptr,
+        (void*)&OUT_B_ptr,
         &M_int,
         &N_int,
         &K_int,
@@ -1005,8 +1083,9 @@ void launch_fp4_scale_debug(
         &K_scales_padded_int
     };
 
-    check_cuda(cudaLaunchKernel(kernel_ptr, grid, block, kernel_args, shared_bytes, 0), "cudaLaunchKernel debug");
-} 
+    check_cuda(cudaLaunchKernel(kernel_ptr, grid, block, kernel_args, shared_bytes, 0),
+               "cudaLaunchKernel debug");
+}
 """
 
 cpp_source = """
@@ -1018,8 +1097,10 @@ void launch_fp4_gemm_optimized(
 );
 
 void launch_fp4_scale_debug(
+    torch::Tensor A_bytes, torch::Tensor B_bytes,
     torch::Tensor SFA, torch::Tensor SFB,
     torch::Tensor OUT_SFA, torch::Tensor OUT_SFB,
+    torch::Tensor OUT_A, torch::Tensor OUT_B,
     int64_t M, int64_t N, int64_t K, int64_t L, int64_t K_scales_padded
 );
 """
@@ -1166,15 +1247,23 @@ def custom_kernel(data: input_t) -> output_t:
 
     return c
 
-
 def debug_scales(data: input_t) -> None:
     a, b, sfa_ref_cpu, sfb_ref_cpu, sfa_permuted, sfb_permuted, c = data
+
+    device = a.device
 
     M, N, L = c.shape
     K = a.shape[1] * 2
     K_scales = K // 16
     K_scales_padded = max(128, ((K_scales + 127) // 128) * 128)
 
+    # A/B bytes: [M, K/2], [N, K/2]
+    a_2d = a[:, :, 0].contiguous()
+    b_2d = b[:, :, 0].contiguous()
+    a_bytes = a_2d.view(torch.uint8)
+    b_bytes = b_2d.view(torch.uint8)
+
+    # Scales 2D and pad to K_scales_padded
     sfa_2d = sfa_ref_cpu[..., 0].contiguous()
     sfb_2d = sfb_ref_cpu[..., 0].contiguous()
 
@@ -1191,12 +1280,20 @@ def debug_scales(data: input_t) -> None:
     debug_sfa = torch.zeros_like(sfa_bytes)
     debug_sfb = torch.zeros_like(sfb_bytes)
 
+    # Outputs for decoded A/B
+    out_a = torch.empty((M, K), dtype=torch.float16, device=device)
+    out_b = torch.empty((N, K), dtype=torch.float16, device=device)
+
     mod = get_module()
     mod.launch_fp4_scale_debug(
-        sfa_bytes, sfb_bytes, debug_sfa, debug_sfb,
+        a_bytes, b_bytes,
+        sfa_bytes, sfb_bytes,
+        debug_sfa, debug_sfb,
+        out_a, out_b,
         M, N, K, 1, K_scales_padded,
     )
 
+    # === Scale byte debug as before ===
     ref_sfa_bytes = sfa_ref_cpu[..., 0].contiguous().view(torch.uint8)
     ref_sfb_bytes = sfb_ref_cpu[..., 0].contiguous().view(torch.uint8)
 
@@ -1212,7 +1309,6 @@ def debug_scales(data: input_t) -> None:
     print("Scale debug SFA mismatches:", int(diff_sfa.sum().item()))
     print("Scale debug SFB mismatches:", int(diff_sfb.sum().item()))
 
-    # Print a few small slices to diagnose permutation/offset
     max_rows_sfa = min(4, M)
     max_rows_sfb = min(4, N)
     max_cols = min(16, K_scales_used)
@@ -1226,3 +1322,48 @@ def debug_scales(data: input_t) -> None:
     for r in range(max_rows_sfb):
         print(f"row {r} debug:", debug_sfb_cpu[r, :max_cols].tolist())
         print(f"row {r}  ref :", ref_sfb_cpu[r, :max_cols].tolist())
+
+    # === FP4+FP8 decode verification for A/B ===
+    lut = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+         -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+        dtype=torch.float16, device=device,
+    )
+
+    # A decode (Python)
+    a_u8 = a_bytes  # [M, K/2]
+    M_a, K_packed = a_u8.shape
+    assert K_packed * 2 == K
+    hi = ((a_u8.long() >> 4) & 0xF)
+    lo = (a_u8.long() & 0xF)
+
+    a_fp4 = torch.empty((M_a, K), dtype=torch.float16, device=device)
+    a_fp4[:, 0::2] = lut[hi]
+    a_fp4[:, 1::2] = lut[lo]
+
+    sfa_scale = sfa_ref_cpu[..., 0].to(torch.float16, device=device)  # [M, K_scales]
+    k_idx = torch.arange(K, device=device)
+    scale_idx = (k_idx // 16).view(1, -1).expand(M_a, -1)             # [M, K]
+    a_scale = sfa_scale.gather(1, scale_idx)
+    a_dec_ref = a_fp4 * a_scale
+
+    # B decode (Python)
+    b_u8 = b_bytes  # [N, K/2]
+    N_b, K_packed_b = b_u8.shape
+    assert K_packed_b * 2 == K
+    hi_b = ((b_u8.long() >> 4) & 0xF)
+    lo_b = (b_u8.long() & 0xF)
+
+    b_fp4 = torch.empty((N_b, K), dtype=torch.float16, device=device)
+    b_fp4[:, 0::2] = lut[hi_b]
+    b_fp4[:, 1::2] = lut[lo_b]
+
+    sfb_scale = sfb_ref_cpu[..., 0].to(torch.float16, device=device)  # [N, K_scales]
+    scale_idx_b = (k_idx // 16).view(1, -1).expand(N_b, -1)
+    b_scale = sfb_scale.gather(1, scale_idx_b)
+    b_dec_ref = b_fp4 * b_scale
+
+    diff_a = (out_a - a_dec_ref).abs()
+    diff_b = (out_b - b_dec_ref).abs()
+    print(f"Decode A max abs diff: {diff_a.max().item()}")
+    print(f"Decode B max abs diff: {diff_b.max().item()}")
