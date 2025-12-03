@@ -99,12 +99,16 @@ __device__ __forceinline__ void fp4x8_to_fp16x2x4(int *out, int in) {
 }
 
 __device__ __forceinline__ void decode_fp4x2_hw(uint8_t packed, half &h0, half &h1) {
+    // Hardware cvt.rn.f16x2.e2m1x2 decodes: low nibble first, high nibble second
+    // But Python does: hi = byte >> 4, lo = byte & 0xF (hi first, lo second)
+    // So we need to swap: h0 = hi nibble (>>4), h1 = lo nibble (&0xF)
     int out_i32[4];
     int in32 = static_cast<int>(packed);
     fp4x8_to_fp16x2x4(out_i32, in32);
     half2 pair = *reinterpret_cast<half2*>(&out_i32[0]);
-    h0 = __low2half(pair);
-    h1 = __high2half(pair);
+    // Swap order to match Python: hi nibble -> h0, lo nibble -> h1
+    h0 = __high2half(pair);  // was __low2half - this is the hi nibble (>>4)
+    h1 = __low2half(pair);   // was __high2half - this is the lo nibble (&0xF)
 }
 
 __device__ __forceinline__ uint32_t cvta_to_shared_u32(const void* ptr) {
