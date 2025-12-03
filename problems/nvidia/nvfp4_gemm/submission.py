@@ -906,6 +906,248 @@ void launch_fp4_gemm_optimized(
     if (d_map_B) cudaFree(d_map_B);
     if (d_map_SFB) cudaFree(d_map_SFB);
 } 
+
+template<int TileM, int TileK, int Threads>
+__global__ void __launch_bounds__(Threads)
+fp4_scale_debug_rank2_cta(
+    const CUtensorMap* __restrict__ desc_SFA,
+    const CUtensorMap* __restrict__ desc_SFB,
+    uint8_t* __restrict__ OUT_SFA,
+    uint8_t* __restrict__ OUT_SFB,
+    const int M, const int N, const int K, const int L, const int K_scales_padded
+) {
+#if __CUDA_ARCH__ >= 900
+    constexpr int TileN = 128;
+    constexpr int SfaBoxK = 128;
+    constexpr int StageCount = 1;
+
+    const int tid = threadIdx.x;
+    const int warp_id = tid >> 5;
+    const int lane_id = tid & 31;
+
+    const int batch = blockIdx.z;
+    const int m_tile = blockIdx.x * TileM;
+    const int n_tile = blockIdx.y * TileN;
+
+    if (batch >= L || m_tile >= M || n_tile >= N) return;
+
+    extern __shared__ uint8_t smem[];
+
+    auto align_up = [] __device__(size_t x, size_t align) {
+        return (x + align - 1) & ~(align - 1);
+    };
+
+    size_t offset = 0;
+
+    auto alloc_mbar_array = [&] __device__(int count) -> uint64_t* {
+        offset = align_up(offset, 16);
+        uint8_t* base = smem + offset;
+        offset += static_cast<size_t>(count) * 2 * sizeof(uint64_t);
+        return reinterpret_cast<uint64_t*>(base);
+    };
+
+    auto align_up_smem_1024 = [&] __device__() {
+        uint32_t addr = cvta_to_shared_u32(smem + offset);
+        uint32_t aligned = (addr + 1023u) & ~1023u;
+        offset += static_cast<size_t>(aligned - addr);
+    };
+
+    uint64_t* mbar_a = alloc_mbar_array(StageCount);
+    uint64_t* mbar_b = alloc_mbar_array(StageCount);
+
+    align_up_smem_1024();
+    uint8_t* sfa_stage[StageCount];
+    int sfa_stage_stride = TileM * SfaBoxK;
+    for (int s = 0; s < StageCount; ++s) {
+        sfa_stage[s] = smem + offset;
+        offset += sfa_stage_stride;
+    }
+
+    align_up_smem_1024();
+    uint8_t* sfb_stage[StageCount];
+    int sfb_stage_stride = TileN * SfaBoxK;
+    for (int s = 0; s < StageCount; ++s) {
+        sfb_stage[s] = smem + offset;
+        offset += sfb_stage_stride;
+    }
+
+    __shared__ uint32_t stage_phase_smem[StageCount];
+    if (tid == 0) {
+        for (int s = 0; s < StageCount; ++s) {
+            stage_phase_smem[s] = 0;
+            mbarrier_init(mbar_stage(mbar_a, s));
+            mbarrier_init(mbar_stage(mbar_b, s));
+        }
+        __threadfence_block();
+    }
+    __syncthreads();
+
+    int phase = 0;
+    int stage = 0;
+
+    if (warp_id == 0 && lane_id == 0) {
+        uint32_t c_m = static_cast<uint32_t>(m_tile);
+        uint32_t c_n = static_cast<uint32_t>(n_tile);
+
+        bool valid_m = (c_m < static_cast<uint32_t>(M));
+        bool valid_n = (c_n < static_cast<uint32_t>(N));
+
+        uint32_t bytes_a = 0;
+        uint32_t bytes_b = 0;
+        if (valid_m) bytes_a += TileM * SfaBoxK;
+        if (valid_n) bytes_b += TileN * SfaBoxK;
+
+        mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), bytes_a);
+        mbarrier_arrive_expect_tx(mbar_stage(mbar_b, stage), bytes_b);
+
+        if (valid_m) {
+            uint32_t sfa_c0 = 0;
+            uint32_t sfa_c1 = c_m;
+            tma_load_2d_cta_no_arrive(
+                sfa_stage[stage], desc_SFA, sfa_c0, sfa_c1, mbar_stage(mbar_a, stage)
+            );
+        }
+
+        if (valid_n) {
+            uint32_t sfb_c0 = 0;
+            uint32_t sfb_c1 = c_n;
+            tma_load_2d_cta_no_arrive(
+                sfb_stage[stage], desc_SFB, sfb_c0, sfb_c1, mbar_stage(mbar_b, stage)
+            );
+        }
+    }
+
+    mbarrier_wait_parity(mbar_stage(mbar_a, stage), phase);
+    mbarrier_wait_parity(mbar_stage(mbar_b, stage), phase);
+    __syncthreads();
+
+    int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
+    int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
+    int K_scales = K / 16;
+    int max_scales = K_scales < SfaBoxK ? K_scales : SfaBoxK;
+
+    for (int idx = tid; idx < tile_rows * max_scales; idx += Threads) {
+        int row = idx / max_scales;
+        int j = idx - row * max_scales;
+        int m_global = m_tile + row;
+        if (m_global < M) {
+            uint8_t v = sfa_stage[stage][row * SfaBoxK + j];
+            OUT_SFA[m_global * K_scales_padded + j] = v;
+        }
+    }
+
+    for (int idx = tid; idx < tile_cols * max_scales; idx += Threads) {
+        int row = idx / max_scales;
+        int j = idx - row * max_scales;
+        int n_global = n_tile + row;
+        if (n_global < N) {
+            uint8_t v = sfb_stage[stage][row * SfaBoxK + j];
+            OUT_SFB[n_global * K_scales_padded + j] = v;
+        }
+    }
+#endif
+}
+
+void launch_fp4_scale_debug(
+    torch::Tensor SFA, torch::Tensor SFB,
+    torch::Tensor OUT_SFA, torch::Tensor OUT_SFB,
+    int64_t M, int64_t N, int64_t K, int64_t L, int64_t K_scales_padded
+) {
+    const uint8_t* SFA_ptr = SFA.data_ptr<uint8_t>();
+    const uint8_t* SFB_ptr = SFB.data_ptr<uint8_t>();
+    uint8_t* OUT_SFA_ptr = OUT_SFA.data_ptr<uint8_t>();
+    uint8_t* OUT_SFB_ptr = OUT_SFB.data_ptr<uint8_t>();
+
+    constexpr int kTileM = 128;
+    constexpr int kTileN = 128;
+    constexpr int kTileK = 256;
+    constexpr int kThreads = 256;
+    constexpr int SfaBoxK = 128;
+
+    alignas(64) CUtensorMap map_SFA;
+    alignas(64) CUtensorMap map_SFB;
+    CUtensorMap* d_map_SFA = nullptr;
+    CUtensorMap* d_map_SFB = nullptr;
+    CUtensorMap* map_SFA_ptr = &map_SFA;
+    CUtensorMap* map_SFB_ptr = &map_SFB;
+
+    cuuint64_t dims_SFA[2] = {static_cast<cuuint64_t>(K_scales_padded), static_cast<cuuint64_t>(M)};
+    cuuint32_t box_SFA[2] = {static_cast<cuuint32_t>(SfaBoxK), static_cast<cuuint32_t>(kTileM)};
+    cuuint64_t strides_SFA[1] = {static_cast<cuuint64_t>(K_scales_padded)};
+
+    CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                        2, SFA_ptr, dims_SFA, strides_SFA, box_SFA);
+    if (resSFA != CUDA_SUCCESS) {
+        throw std::runtime_error("TMA SFA descriptor failed in debug");
+    }
+
+    check_cuda(cudaMalloc(&d_map_SFA, sizeof(CUtensorMap)), "cudaMalloc d_map_SFA debug");
+    check_cuda(cudaMemcpy(d_map_SFA, map_SFA_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFA debug");
+
+    cuuint64_t dims_SFB[2] = {static_cast<cuuint64_t>(K_scales_padded), static_cast<cuuint64_t>(N)};
+    cuuint32_t box_SFB[2] = {static_cast<cuuint32_t>(SfaBoxK), static_cast<cuuint32_t>(kTileN)};
+    cuuint64_t strides_SFB[1] = {static_cast<cuuint64_t>(K_scales_padded)};
+
+    CUresult resSFB = encode_tma_matrix(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                        2, SFB_ptr, dims_SFB, strides_SFB, box_SFB);
+    if (resSFB != CUDA_SUCCESS) {
+        if (d_map_SFA) cudaFree(d_map_SFA);
+        throw std::runtime_error("TMA SFB descriptor failed in debug");
+    }
+
+    check_cuda(cudaMalloc(&d_map_SFB, sizeof(CUtensorMap)), "cudaMalloc d_map_SFB debug");
+    check_cuda(cudaMemcpy(d_map_SFB, map_SFB_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFB debug");
+
+    dim3 grid;
+    grid.x = (M + kTileM - 1) / kTileM;
+    grid.y = (N + kTileN - 1) / kTileN;
+    grid.z = L;
+
+    dim3 block(kThreads, 1, 1);
+
+    size_t offset = 0;
+    auto align = [](size_t x, size_t a) { return (x + a - 1) & ~(a - 1); };
+
+    offset = align(offset, 16);
+    offset += 1 * 16;
+    offset = align(offset, 16);
+    offset += 1 * 16;
+
+    offset = align(offset, 1024);
+    offset += 1 * kTileM * SfaBoxK;
+
+    offset = align(offset, 1024);
+    offset += 1 * kTileN * SfaBoxK;
+
+    size_t shared_bytes = offset;
+
+    auto kernel_ptr = (void*)fp4_scale_debug_rank2_cta<kTileM, kTileK, kThreads>;
+
+    check_cuda(cudaFuncSetAttribute(kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shared_bytes)), "MaxDynamicSharedMemorySize debug");
+
+    int M_int = static_cast<int>(M);
+    int N_int = static_cast<int>(N);
+    int K_int = static_cast<int>(K);
+    int L_int = static_cast<int>(L);
+    int K_scales_padded_int = static_cast<int>(K_scales_padded);
+
+    void* kernel_args[] = {
+        (void*)&d_map_SFA,
+        (void*)&d_map_SFB,
+        (void*)&OUT_SFA_ptr,
+        (void*)&OUT_SFB_ptr,
+        &M_int,
+        &N_int,
+        &K_int,
+        &L_int,
+        &K_scales_padded_int
+    };
+
+    check_cuda(cudaLaunchKernel(kernel_ptr, grid, block, kernel_args, shared_bytes, 0), "cudaLaunchKernel debug");
+
+    if (d_map_SFA) cudaFree(d_map_SFA);
+    if (d_map_SFB) cudaFree(d_map_SFB);
+} 
 """
 
 cpp_source = """
@@ -913,6 +1155,12 @@ void launch_fp4_gemm_optimized(
     torch::Tensor A, torch::Tensor B,
     torch::Tensor SFA, torch::Tensor SFB,
     torch::Tensor D,
+    int64_t M, int64_t N, int64_t K, int64_t L, int64_t K_scales_padded
+);
+
+void launch_fp4_scale_debug(
+    torch::Tensor SFA, torch::Tensor SFB,
+    torch::Tensor OUT_SFA, torch::Tensor OUT_SFB,
     int64_t M, int64_t N, int64_t K, int64_t L, int64_t K_scales_padded
 );
 """
@@ -929,6 +1177,7 @@ def get_module():
             cuda_sources=cuda_source,
             functions=[
                 "launch_fp4_gemm_optimized",
+                "launch_fp4_scale_debug",
             ],
             verbose=False,
             extra_cuda_cflags=[
@@ -1057,3 +1306,49 @@ def custom_kernel(data: input_t) -> output_t:
     )
 
     return c
+
+
+def debug_scales(data: input_t) -> None:
+    a, b, sfa_ref_cpu, sfb_ref_cpu, sfa_permuted, sfb_permuted, c = data
+
+    M, N, L = c.shape
+    K = a.shape[1] * 2
+    K_scales = K // 16
+    K_scales_padded = max(128, ((K_scales + 127) // 128) * 128)
+
+    sfa_2d = sfa_ref_cpu[..., 0].contiguous()
+    sfb_2d = sfb_ref_cpu[..., 0].contiguous()
+
+    if sfa_2d.shape[1] < K_scales_padded:
+        padding = K_scales_padded - sfa_2d.shape[1]
+        sfa_2d = torch.nn.functional.pad(sfa_2d, (0, padding), value=0)
+    if sfb_2d.shape[1] < K_scales_padded:
+        padding = K_scales_padded - sfb_2d.shape[1]
+        sfb_2d = torch.nn.functional.pad(sfb_2d, (0, padding), value=0)
+
+    sfa_bytes = sfa_2d.view(torch.uint8)
+    sfb_bytes = sfb_2d.view(torch.uint8)
+
+    debug_sfa = torch.zeros_like(sfa_bytes)
+    debug_sfb = torch.zeros_like(sfb_bytes)
+
+    mod = get_module()
+    mod.launch_fp4_scale_debug(
+        sfa_bytes, sfb_bytes, debug_sfa, debug_sfb,
+        M, N, K, 1, K_scales_padded,
+    )
+
+    ref_sfa_bytes = sfa_ref_cpu[..., 0].contiguous().view(torch.uint8)
+    ref_sfb_bytes = sfb_ref_cpu[..., 0].contiguous().view(torch.uint8)
+
+    K_scales_used = K_scales
+    debug_sfa_cpu = debug_sfa[:, :K_scales_used].cpu()
+    debug_sfb_cpu = debug_sfb[:, :K_scales_used].cpu()
+    ref_sfa_cpu = ref_sfa_bytes[:, :K_scales_used].cpu()
+    ref_sfb_cpu = ref_sfb_bytes[:, :K_scales_used].cpu()
+
+    diff_sfa = debug_sfa_cpu != ref_sfa_cpu
+    diff_sfb = debug_sfb_cpu != ref_sfb_cpu
+
+    print("Scale debug SFA mismatches:", int(diff_sfa.sum().item()))
+    print("Scale debug SFB mismatches:", int(diff_sfb.sum().item()))

@@ -80,247 +80,282 @@ KEEP ONLY:
   - Shared memory alignment helpers
   - mbarrier functions
 </CLEAN_UP>
+# NVFP4 GEMM Agent Plan (Updated)
 
 <CRITICAL_INSTRUCTIONS>
 
-  CRITICAL_CONSTRAINT
-    <CRITICAL>
-      Target: FP4 block-scaled GEMM (M × N, not M × 1) on NVIDIA B200 SM_100a
-      Goal: ~3μs geometric mean across benchmark shapes
-      Speed of light analysis targets (1.5GHz clock):
-        - Shape 1: 8.994 μs  (M=128, N=7168, K=16384)
-        - Shape 2: 2.354 μs  (M=128, N=4096, K=7168)
-        - Shape 3: 1.333 μs  (M=128, N=7168, K=2048)
-      Architecture: Pure PTX inline assembly + TMA + CTA scope (no CUTLASS/CuTe headers)
-      
-      Benchmark shapes (all L=1):
-      - M=128, N=7168, K=16384
-      - M=128, N=4096, K=7168
-      - M=128, N=7168, K=2048
+  GOAL
+    Implement an NVFP4 block‑scaled GEMM kernel on NVIDIA B200 (SM_100a) that:
+      - Computes full GEMM: C[M, N] = A[M, K] @ B[N, K]^T with FP4 inputs and FP8 block scales
+      - Exactly matches the PyTorch reference (`reference.py` / `torch._scaled_mm`) within rtol=1e‑3, atol=1e‑3
+      - Achieves near speed‑of‑light bandwidth on all benchmark shapes
 
-      Scale factor layouts:
-        - Reference provides TWO scale formats per input
-        - Simple: [M/N, K/16, L] for reference kernel
-        - Permuted: [32, 4, rest_m/n, 4, rest_k, L] for YOUR kernel
-        - Use sfa_ref_permuted and sfb_ref_permuted (indices 4,5 in input tuple)
-        - Permuted layout matches CuTe/CUTLASS atom tiling (32, 4) blocks
-        
-      Input tuple structure (7 elements):
-        0: a_ref [M, K, L] - FP4 matrix A (nvfp4, K-major)
-        1: b_ref [N, K, L] - FP4 matrix B (nvfp4, K-major)
-        2: sfa_ref_cpu [M, K/16, L] - Simple scales (for reference, DO NOT USE)
-        3: sfb_ref_cpu [N, K/16, L] - Simple scales (for reference, DO NOT USE)
-        4: sfa_ref_permuted [32,4,rest_m,4,rest_k,L] - Use THIS for A scales
-        5: sfb_ref_permuted [32,4,rest_n,4,rest_k,L] - Use THIS for B scales
-        6: c_ref [M, N, L] - Output (fp16)
+  KEY FILES
+    - task.yml       : shapes, constraints, and test list
+    - reference.py   : canonical semantics via torch._scaled_mm
+    - submission.py  : custom kernel (PTX + TMA)
+    - eval_better_bench.py : cloud correctness + benchmarking harness
 
-      CRITICAL: Must match torch._scaled_mm reference behavior:
-        - B matrix is TRANSPOSED in reference: b.transpose(0, 1)
-        - Your kernel must account for this transposition
-        - Scale factors go through to_blocked() permutation
-        - Output tolerance: rtol=1e-03, atol=1e-03
+  INPUT / OUTPUT CONTRACT
+    - Input tuple (from generate_input in reference.py):
+        (a_ref, b_ref,
+         sfa_ref_cpu, sfb_ref_cpu,
+         c_ref)
 
-    </CRITICAL>
+      Shapes:
+        a_ref           : [M, K/2, L]   (torch.float4_e2m1fn_x2, packed FP4)
+        b_ref           : [N, K/2, L]   (torch.float4_e2m1fn_x2, packed FP4)
+        sfa_ref_cpu     : [M, K_scales, L]  (torch.float8_e4m3fn)
+        sfb_ref_cpu     : [N, K_scales, L]  (torch.float8_e4m3fn)
+        c_ref           : [M, N, L] (torch.float16)
 
-  CURRENT_STATE
-    <OBSERVATION>
-      Problem: GEMM (matrix-matrix multiply), not GEMV
-      B is N × K full matrix, not 1 × K vector
-      Output C is M × N matrix, not M × 1 vector
-      Must tile over both M and N dimensions
-      All benchmark shapes have L=1 (no batching)
-    </OBSERVATION>
+      Where:
+        K_scales = ceil_div(K, 16)  // one FP8 scale per 16 FP4 values along K
 
-  IMPLEMENTATION_PLAN
-    <PLAN>
-      PRIORITY 1: TILE CONFIGURATION
-        TILE_M = 128              // Rows of A per CTA
-        TILE_N = 128              // Columns of B per CTA
-        TILE_K = 256              // Elements (128 bytes packed FP4)
-        THREADS_PER_BLOCK = 256   // 8 warps × 32 threads
-        NUM_STAGES = 3            // Triple-buffering
+    - Output:
+        custom_kernel(data) must return a tensor with same shape/dtype/layout as c_ref
+        and match ref_kernel(data) within rtol=1e‑3, atol=1e‑3.
 
-      PRIORITY 2: TMA DESCRIPTOR SETUP (Rank-2 only, L=1)
-        A matrix (M × K):
-          rank = 2
-          dims = [K_packed, M]           // [K/2, M] in bytes
-          box = [128, 128]               // [bytes_K, rows_M]
-          strides = [K_packed]           // Row stride in bytes
-          swizzle = CU_TENSOR_MAP_SWIZZLE_128B
-          
-        B matrix (N × K):
-          rank = 2
-          dims = [K_packed, N]           // [K/2, N] in bytes
-          box = [128, 128]               // [bytes_K, rows_N]
-          strides = [K_packed]           // Row stride in bytes
-          swizzle = CU_TENSOR_MAP_SWIZZLE_128B
-          
-        SFA scales (M × K/16) - use permuted format:
-          Decode permuted layout [32,4,rest_m,4,rest_k,L]
-          Access pattern matches (32, 4) atom tiling
-          
-        SFB scales (N × K/16) - use permuted format:
-          Decode permuted layout [32,4,rest_n,4,rest_k,L]
-          Access pattern matches (32, 4) atom tiling
+  REFERENCE SEMANTICS (MUST MATCH)
+    - ref_kernel in reference.py:
+        for each batch l_idx:
+          scale_a = to_blocked(sfa_ref_cpu[:, :, l_idx])
+          scale_b = to_blocked(sfb_ref_cpu[:, :, l_idx])
+          res = torch._scaled_mm(
+                  a_ref[:, :, l_idx],           // [M, K/2] FP4 x2
+                  b_ref[:, :, l_idx].transpose(0, 1), // [K/2, N]
+                  scale_a.cuda(),               // flattened block scales for A
+                  scale_b.cuda(),               // flattened block scales for B
+                  bias=None,
+                  out_dtype=torch.float16
+                )
+          c_ref[:, :, l_idx] = res
 
-      PRIORITY 3: MEMORY ALIGNMENT
-        Global memory base pointers: 128-byte aligned
-        Shared memory TMA destinations: 1024-byte aligned (required for SWIZZLE_128B)
-        Shared memory non-TMA regions: 128-byte aligned
-        Leading dimensions: multiples of 128 elements
-        K dimension: divisible by 256 (per task.yml constraint)
+    - to_blocked(sfa_ref_cpu[:, :, l_idx]) / to_blocked(sfb_ref_cpu[:, :, l_idx]) define the
+      *logical* mapping from (row, K‑block) → scale index:
+        - sfa_ref_cpu / sfb_ref_cpu are K‑major [M/N, K_scales, L]
+        - to_blocked() reshapes + permutes to the block‑layout expected by torch._scaled_mm
+        - Your kernel may use any internal layout (simple) as long as, for each
+          FP4 block of 16 elements along K, you multiply by the same scale that the reference
+          would use at that block.
 
-      PRIORITY 4: BARRIER CONFIGURATION
-        Per-stage barriers (3 stages):
-          __shared__ uint64_t mbar_a[3];     // A matrix TMA tracking
-          __shared__ uint64_t mbar_b[3];     // B matrix TMA tracking
-        
-        Transaction bytes per stage:
-          tx_a = TILE_M × (TILE_K/2) + TILE_M × (TILE_K/16)
-               = 128 × 128 + 128 × 16 = 18,432 bytes
-          tx_b = TILE_N × (TILE_K/2) + TILE_N × (TILE_K/16)
-               = 128 × 128 + 128 × 16 = 18,432 bytes
+  PRIORITY 1: GEMM, NOT GEMV
+    - Full GEMM:
+        - A: M×K
+        - B: N×K (note: B is transposed vs. usual GEMM call)
+        - C: M×N
+    - Must write ALL columns of C, not just column 0.
+    - Must account for B transpose (b_ref[:, :, l_idx].T) in reference semantics.
 
-      PRIORITY 5: SHARED MEMORY LAYOUT
-        Triple-buffered TMA destinations (1024-byte aligned):
-          __shared__ uint8_t a_packed[3][TILE_M × TILE_K/2];
-          __shared__ uint8_t b_packed[3][TILE_N × TILE_K/2];
-          __shared__ uint8_t sfa_permuted[3][...];  // Permuted scale layout
-          __shared__ uint8_t sfb_permuted[3][...];  // Permuted scale layout
-        
-        Decoded tiles (128-byte aligned):
-          __shared__ half a_fp16[TILE_M × TILE_K/8];
-          __shared__ half b_fp16[TILE_N × TILE_K/8];
+  PRIORITY 2: TMA DESCRIPTOR SETUP (Rank‑2, L=1)
+    - L is always 1 → use rank‑2 descriptors, no rank‑3 / cluster descriptors.
 
-      PRIORITY 6: KERNEL LAUNCH CONFIGURATION
-        Grid dimensions:
-          grid.x = ceil(M / TILE_M)          // e.g., ceil(128/128) = 1
-          grid.y = ceil(N / TILE_N)          // e.g., ceil(7168/128) = 56
-          grid.z = L                         // Always 1
-        
-        Block dimensions:
-          block.x = 256                      // 8 warps
-        
-        Launch: CTA scope only (cudaLaunchKernel, NO cluster)
+    - A matrix (M × K):
+        rank    = 2
+        dims    = [K_packed, M]   // [K/2, M] in bytes
+        box     = [128, 128]      // [bytes_K, rows_M]
+        strides = [K_packed]      // row stride in bytes (K/2)
+        swizzle = CU_TENSOR_MAP_SWIZZLE_128B
 
-      PRIORITY 7: MMA LOOP STRUCTURE
-        Nested loops:
-          1. M-tile: int mtile = blockIdx.x * TILE_M
-          2. N-tile: int ntile = blockIdx.y * TILE_N
-          3. K-tile loop: for (int ktile = 0; ktile < K; ktile += TILE_K)
-             - Prefetch stage (k+2) via TMA
-             - Wait on barrier for stage k
-             - Decode FP4→FP16 + apply permuted scales
-             - MMA: 16×8×16 per warp using mma.sync.aligned
-          4. Writeback: Store full M × N tile to global memory
+    - B matrix (N × K):
+        rank    = 2
+        dims    = [K_packed, N]   // [K/2, N] in bytes
+        box     = [128, 128]      // [bytes_K, rows_N]
+        strides = [K_packed]      // row stride in bytes
+        swizzle = CU_TENSOR_MAP_SWIZZLE_128B
 
-      PRIORITY 8: PTX MMA INSTRUCTION
-        Use mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
-        Each warp processes 16 rows × 8 cols
-        Accumulate across 16 N-sub-tiles per warp (cover TILE_N=128)
-        Write ALL 8 columns per thread (not just col==0)
+    - Scale factors (block‑scaled FP4):
+        Logical reference source:
+          - sfa_ref_cpu : [M, K_scales, L]
+          - sfb_ref_cpu : [N, K_scales, L]
+          - to_blocked() + torch._scaled_mm define the block mapping.
+        Kernel implementation:
+          - May store scales in simple K‑major 2D layout for TMA:
+              SFA_bytes: [K_scales_padded, M] in uint8
+              SFB_bytes: [K_scales_padded, N] in uint8
+            with:
+              dims_SFA = [K_scales_padded, M]
+              dims_SFB = [K_scales_padded, N]
+              box      = [128, 128]
+              strides  = [K_scales_padded]
+          - K_scales_padded must be at least 128 and a multiple of 128
+            (for SWIZZLE_128B and 128‑byte boxes).
+          - Indexing in the kernel must be chosen so that each FP4 K‑block
+            uses the same scale value as in the reference (via to_blocked()).
 
-      PRIORITY 9: TMA PREFETCH PATTERN
-        Stage pipeline (3 stages):
-          Stage 0: TMA load A[k+2], B[k+2]
-          Stage 1: Decode A[k+1], B[k+1] (FP4→FP16 + permuted scale)
-          Stage 2: MMA compute A[k] × B[k]
-        
-        Only warp 0 lane 0 issues TMA:
-          if (warpid == 0 && laneid == 0) {
-              mbarrier_arrive_expect_tx(mbar_a[stage], tx_a);
-              mbarrier_arrive_expect_tx(mbar_b[stage], tx_b);
-              tma_load_2d_cta(...);  // Rank-2 only
-          }
-        
-        All threads wait:
-          mbarrier_wait_parity(mbar_a[stage], phase);
-          mbarrier_wait_parity(mbar_b[stage], phase);
-          __syncthreads();
+  PRIORITY 3: MEMORY ALIGNMENT & CONSTRAINTS
+    - Global:
+        - A, B, SFA, SFB base pointers: 128‑byte aligned
+        - Leading dimensions (K_packed, K_scales_padded): multiples of 128
+        - K divisible by 256 (from task.yml)
 
-      PRIORITY 10: OUTPUT WRITEBACK
-        Each warp computes 16 rows × (16 × 8) cols of C
-        Fragment layout: 4 floats per thread cover 16×8 output
-        Write ALL columns (full GEMM output, not just col 0)
-        Account for B transposition in reference
-        Global store: C[m_global][n_global] = __float2half(cfrag[...])
-    </PLAN>
+    - Shared:
+        - TMA destinations: 1024‑byte aligned (required for SWIZZLE_128B)
+        - Non‑TMA regions: 128‑byte aligned
+        - Respect per‑block dynamic shared memory limit on B200 (~227 KiB).
+          shared_bytes <= 227 * 1024, otherwise cudaFuncSetAttribute(MaxDynamicSharedMemorySize)
+          fails.
+
+  PRIORITY 4: BARRIER CONFIGURATION (MULTI‑STAGE PIPELINE)
+    - Use per‑stage mbarriers for A and B (and logically for SFA / SFB):
+        __shared__ uint64_t mbar_a[StageCount];
+        __shared__ uint64_t mbar_b[StageCount];
+
+    - StageCount:
+        - Minimum: 2
+        - Target: 3 (for better overlap)
+        - But must respect shared memory budget — may reduce TileM/TileN instead of stages.
+
+    - Per‑stage transaction sizes (example TileM=TileN=128, TileK=256):
+        tx_a ≈ TILE_M × (TILE_K/2) + TILE_M × (TILE_K/16)
+        tx_b ≈ TILE_N × (TILE_K/2) + TILE_N × (TILE_K/16)
+
+  PRIORITY 5: SHARED MEMORY LAYOUT
+    - Triple‑buffered or double‑buffered TMA destinations (depending on StageCount):
+        __shared__ uint8_t a_packed[StageCount][TILE_M × TILE_K/2];
+        __shared__ uint8_t b_packed[StageCount][TILE_N × TILE_K/2];
+        __shared__ uint8_t sfa_stage[StageCount][TILE_M × BoxK_scales]; // e.g., 128 bytes * TILE_M
+        __shared__ uint8_t sfb_stage[StageCount][TILE_N × BoxK_scales];
+
+      All TMA stages 1024‑byte aligned.
+
+    - Decoded tiles (128‑byte aligned):
+        __shared__ half a_fp16[TILE_M × a_stride];  // a_stride = TileK + padding
+        __shared__ half b_fp16[TILE_N × b_stride];  // b_stride = TileK + padding
+
+  PRIORITY 6: KERNEL LAUNCH CONFIGURATION
+    - Grid:
+        grid.x = ceil(M / TILE_M)
+        grid.y = ceil(N / TILE_N)
+        grid.z = L (always 1)
+
+    - Block:
+        block.x = 256  // 8 warps per CTA
+
+    - Launch:
+        - CTA scope only (cudaLaunchKernel)
+        - No clusters, no rank‑3 descriptors.
+
+  PRIORITY 7: MMA LOOP STRUCTURE
+    - Per‑CTA tile:
+        int m_tile = blockIdx.x * TILE_M;
+        int n_tile = blockIdx.y * TILE_N;
+
+    - K‑tile loop:
+        for (int k_tile = 0; k_tile < K; k_tile += TILE_K) {
+          // Issue TMA for next stage (if any)
+          // Wait on barrier for current stage
+          // Decode FP4 → FP16 using FP8 scales
+          // MMA using mma.sync.aligned.m16n8k16
+        }
+
+    - Writeback:
+        - Each warp computes a 16×8 output fragment per MMA
+        - Accumulate across 16 N‑sub‑tiles per warp to cover TILE_N=128
+        - Store entire M×N tile to global memory (subject to edge checks)
+
+  PRIORITY 8: PTX MMA INSTRUCTION
+    - Use:
+        mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
+    - Fragment handling:
+        - 4 FP32 accumulators per thread for a 16×8 tile per warp
+        - Use ldmatrix.sync.aligned to load A/B fragments from shared memory.
+
+  PRIORITY 9: TMA PREFETCH PATTERN
+    - Only warp 0, lane 0 issues TMA:
+        if (warp_id == 0 && lane_id == 0) {
+          mbarrier_arrive_expect_tx(mbar_a[stage], tx_a);
+          mbarrier_arrive_expect_tx(mbar_b[stage], tx_b);
+          tma_load_2d_cta(...);  // A
+          tma_load_2d_cta(...);  // B
+          // Optionally: TMA for SFA/SFB tiles
+        }
+
+    - All warps wait on:
+        mbarrier_wait_parity(mbar_a[stage], phase);
+        mbarrier_wait_parity(mbar_b[stage], phase);
+        __syncthreads();
+
+  PRIORITY 10: SCALE APPLICATION (SEMANTICS)
+    - FP4 layout:
+        - a_ref / b_ref are torch.float4_e2m1fn_x2 → 2 FP4s per byte
+        - A K‑block of 16 FP4 values corresponds to 8 bytes.
+
+    - FP8 scales:
+        - sfa_ref_cpu / sfb_ref_cpu hold one FP8 scale per 16 FP4 values.
+        - to_blocked() and torch._scaled_mm define how those are consumed by the MMA.
+
+    - Kernel requirement:
+        - For each (row m, K‑block b) in A and (col n, K‑block b) in B,
+          the kernel must use the same FP8 scale value that the reference would apply.
+        - You may:
+            - TMA‑load K‑major scale tiles,
+            - compute indices (m, b) → scale index in that 2D tile,
+            - decode FP8 to float and apply to decoded FP4s before MMA.
+
+        - Exact layout of internal SFA/SFB tiles is flexible as long as
+          the resulting scaled FP16 fragments match the torch._scaled_mm result.
 
   PREVIOUS_MISTAKES
-    <PREVIOUS_VERSION>
-      Previous implementation: GEMV (M × 1 output)
-      Architecture: PTX inline + TMA + CTA scope + SWIZZLE_NONE + BOX_K 16 bytes
-      Issues:
-        - B was 1 × K vector (broadcast)
-        - SWIZZLE_NONE left bank conflicts
-        - BOX_K 16 bytes caused many TMA operations
-        - Only processed column 0 of MMA output
-        - Single N=1 output dimension
-        - Had RANK-3 cluster logic for L=4, L=8 (unused for this task)
-        - Used simple scale format instead of permuted
-    </PREVIOUS_VERSION>
+    - Old kernel issues:
+        - Implemented GEMV (N=1) instead of full GEMM:
+            • Only column 0 written.
+        - Used SWIZZLE_NONE and BOX_K 16 bytes:
+            • Many small TMA operations, bank conflicts.
+        - Logical scale mapping did not match reference:
+            • Scales applied using a layout that disagreed with to_blocked() semantics.
+        - Mixed rank‑3 descriptors / clusters for L>1 (not needed; all L=1 here).
 
-  NON_GOALS
-    <NON_GOALS>
-      - Do NOT use CUTLASS or CuTe headers (pure PTX only)
-      - Do NOT use WGMMA (stick with mma.sync.aligned)
-      - Do NOT use cluster scope (CTA scope only)
-      - Do NOT use Rank-3 descriptors (Rank-2 only for L=1)
-      - Do NOT add CUDA streams or caching
-      - Do NOT use cp.async (use TMA only)
-      - Do NOT use simple scale layout (use permuted)
-      - Do NOT use SWIZZLE_NONE (use SWIZZLE_128B)
-      - Do NOT use BOX_K 16 bytes (use 128 bytes)
-    </NON_GOALS>
+  NON‑GOALS
+    - Do NOT:
+        - Use CUTLASS or CuTe headers (kernel must be pure PTX + CUDA).
+        - Use WGMMA (only mma.sync.aligned.m16n8k16).
+        - Use cluster scope or rank‑3 descriptors (CTA scope, rank‑2 only).
+        - Add CUDA streams or host‑side caching beyond what submission.py already does.
+        - Use cp.async for A/B/scales (use TMA only).
+        - Change the semantic meaning of scales relative to sfa_ref_cpu/sfb_ref_cpu
+          and to_blocked() (layout is flexible, semantics are not).
+        - Use SWIZZLE_NONE or BOX_K < 128 bytes for TMA (use SWIZZLE_128B, 128‑byte boxes).
 
   TOOLS
-    <TOOLS>
-      - PTX inline assembly for MMA (mma.sync.aligned.m16n8k16...)
-      - TMA bulk copy (cp.async.bulk.tensor.2d.shared::cta.global.mbarrier...)
-      - Barriers (mbarrier.init, mbarrier.arrive.expect_tx, mbarrier.wait.parity)
-      - Shared memory pointer conversion (cvta.to.shared.u32)
-      - ldmatrix.sync.aligned for loading decoded tiles
-      - FP4 decode LUT + FP8 scale decode
-      - Manual permuted scale indexing (32, 4) atom pattern
-    </TOOLS>
+    - PTX inline:
+        - mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
+        - ldmatrix.sync.aligned.m8n8.x{2,4}.shared.b16
+    - TMA:
+        - cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes
+        - mbarrier.init / arrive.expect_tx / wait.parity
+    - Shared memory helpers:
+        - cvta.to.shared.u32 for SMEM addresses
+    - Numeric helpers:
+        - FP4 decode LUT or simple mapping for e2m1
+        - FP8 e4m3 decode (float8_e4m3fn → float)
+        - Correct mapping from (row, K‑block) to scale index consistent with
+          reference.to_blocked() and torch._scaled_mm.
 
 </CRITICAL_INSTRUCTIONS>
 
 <COMPLIANCE_CHECK>
-Your kernel implementation MUST be compliant with these files:
+  Your kernel implementation MUST be compliant with:
 
-1. reference.py:
-   - Match torch._scaled_mm behavior exactly
-   - Handle B matrix transposition: b.transpose(0, 1)
-   - Use permuted scale formats (sfa_ref_permuted, sfb_ref_permuted)
-   - Decode permuted layout: [32, 4, rest_m/n, 4, rest_k, L]
-   - Apply to_blocked() scale transformation logic
-   - Output tolerance: rtol=1e-03, atol=1e-03
+  1. reference.py
+     - Match torch._scaled_mm behavior exactly for all test cases.
+     - Handle B matrix transposition: b_ref[:, :, l_idx].transpose(0, 1).
+     - Use sfa_ref_cpu / sfb_ref_cpu as the *semantic* source of scales.
+     - Ensure that for every FP4 K‑block, the scale applied by your kernel
+       is equal to the scale that would be used by:
+         to_blocked(sfa_ref_cpu[:, :, l_idx]) and
+         to_blocked(sfb_ref_cpu[:, :, l_idx])
+       in ref_kernel.
+     - Meet output tolerance: rtol=1e‑3, atol=1e‑3.
 
-2. task.yml:
-   - Input tuple has 7 elements (not 5)
-   - M divisible by mma_tiler_mn[0]
-   - N divisible by mma_tiler_mn[1]
-   - K divisible by 256
-   - All benchmark shapes have L=1
-   - Ranking by geometric mean
-   - Speed of light targets: 8.994μs, 2.354μs, 1.333μs
+  2. task.yml
+     - Input tuple has 7 elements as described above.
+     - M divisible by mma_tiler_mn[0] (e.g., 16 or 32 factors).
+     - N divisible by mma_tiler_mn[1] (e.g., 8 or 16 factors).
+     - K divisible by 256.
+     - All benchmark shapes have L=1.
+     - Ranking by geometric mean runtime over test cases.
+     - Target SoL latencies: ~8.994 μs, 2.354 μs, 1.333 μs for the official
+       benchmark shapes (as documented in the competition materials).
 
-3. utils.py:
-   - Pass verbose_allclose validation
-   - Handle rtol=1e-03, atol=1e-03
-   - No NaN, Inf, or size mismatches
-   - Return empty list [] for success
-
-4. eval.py:
-   - No CUDA streams (default stream only)
-   - No cross-run caching
-   - Synchronous execution
-   - Pass both correctness and benchmark tests
-
-VERIFICATION:
-- Run all 10 test shapes successfully
-- Pass 3 benchmark shapes with correct output
-- Achieve geom_mean close to 3μs target
-- Zero tolerance for stream usage
 </COMPLIANCE_CHECK>
