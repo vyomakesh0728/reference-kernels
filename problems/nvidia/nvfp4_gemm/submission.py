@@ -1411,6 +1411,29 @@ def debug_scales(data: input_t) -> None:
     print(f"GEMM debug max abs diff: {max_abs_diff}")
     print(f"GEMM debug max rel diff: {max_rel_diff}")
 
+    # === No-scale GEMM comparison (decode-only semantics) ===
+    ones_sfa = torch.ones_like(sfa_ref_cpu[:, :, 0])
+    ones_sfb = torch.ones_like(sfb_ref_cpu[:, :, 0])
+    scale_a_ones = to_blocked(ones_sfa).to(device)
+    scale_b_ones = to_blocked(ones_sfb).to(device)
+
+    c_ref_noscale = torch._scaled_mm(
+        a_ref,
+        b_ref.transpose(0, 1),
+        scale_a_ones,
+        scale_b_ones,
+        bias=None,
+        out_dtype=torch.float16,
+    )
+
+    c_hw_noscale = out_a @ out_b.transpose(0, 1)
+    diff_noscale = (c_hw_noscale - c_ref_noscale).abs()
+    max_abs_noscale = diff_noscale.max().item()
+    denom_noscale = c_ref_noscale.abs().clamp_min(1e-4)
+    max_rel_noscale = (diff_noscale / denom_noscale).max().item()
+    print(f"No-scale GEMM max abs diff: {max_abs_noscale}")
+    print(f"No-scale GEMM max rel diff: {max_rel_noscale}")
+
     # === GEMM using to_blocked scale semantics (Python only) ===
     # Build index maps from (row, k_block) -> flattened scale index implied by to_blocked.
     rows_a, K_scales = sfa_ref_cpu[..., 0].shape  # [M, K_scales]
