@@ -1465,3 +1465,7 @@ def debug_scales(data: input_t) -> None:
     max_rel_blocked = (diff_c_blocked / denom).max().item()
     print(f"Blocked GEMM max abs diff: {max_abs_blocked}")
     print(f"Blocked GEMM max rel diff: {max_rel_blocked}")
+
+    # Compare kernel-based GEMM vs Python blocked GEMM directly
+    inter_diff = (c_debug - c_blocked).abs().max().item()
+    print(f"c_debug vs c_blocked max abs diff: {inter_diff}")
