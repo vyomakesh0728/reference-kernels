@@ -1619,3 +1619,35 @@ def debug_scales(data: input_t) -> None:
     pow2_products = pow2_a * pow2_b
     avg_pow2 = pow2_products.mean().item()
     print(f"Average 2^scale_a * 2^scale_b for row 0: {avg_pow2:.4f}")
+
+    # === Check RAW FP8 byte interpretation ===
+    # Maybe _scaled_mm interprets the FP8 bytes differently
+    sfa_bytes_raw = sfa_ref_cpu[..., 0].view(torch.uint8)
+    sfb_bytes_raw = sfb_ref_cpu[..., 0].view(torch.uint8)
+    print(f"\nRaw FP8 bytes for sfa[0,:16]: {sfa_bytes_raw[0,:16].tolist()}")
+    print(f"Raw FP8 bytes for sfb[0,:16]: {sfb_bytes_raw[0,:16].tolist()}")
+    
+    # FP8 e4m3fn interpretation: value = (-1)^sign * 2^(exp-7) * (1 + mantissa/8)
+    # Let's decode manually
+    def decode_fp8_e4m3fn(byte_val):
+        sign = (byte_val >> 7) & 1
+        exp = (byte_val >> 3) & 0xF
+        mantissa = byte_val & 0x7
+        if exp == 0:  # subnormal
+            return ((-1) ** sign) * (2 ** -6) * (mantissa / 8)
+        else:
+            return ((-1) ** sign) * (2 ** (exp - 7)) * (1 + mantissa / 8)
+    
+    # Decode first few bytes manually
+    print(f"\nManual FP8 decode for sfa[0,:4]:")
+    for i in range(4):
+        byte_val = sfa_bytes_raw[0, i].item()
+        decoded = decode_fp8_e4m3fn(byte_val)
+        pytorch_val = sfa_ref16[0, i].item()
+        print(f"  byte {byte_val}: manual={decoded:.4f}, pytorch={pytorch_val:.4f}")
+
+    # === Try using the ACTUAL FP8 decoded values as-is (no 2^) ===
+    # Just to be thorough - use the decoded FP8 values directly
+    print(f"\nDirect FP8 scale interpretation (no transformation):")
+    c_direct = c_hw_noscale * 1.0  # start with no-scale
+    # This should equal c_hw_noscale since we're not applying anything new
