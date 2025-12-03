@@ -371,6 +371,7 @@ __device__ __forceinline__ void process_tile(
     constexpr int TileKPacked = TileK / 2;
     constexpr int a_stride = TileK + 8;
     constexpr int b_stride = TileK + 8; 
+    constexpr int b_k_stride = (TileN * b_stride) / TileK;
 
     const int K_scales = (K + 15) >> 4; // one FP8 scale per 16 FP4 values
 
@@ -435,9 +436,19 @@ __device__ __forceinline__ void process_tile(
             half v0 = __hmul(decode_fp4_e2m1((packed >> 4) & 0x0F), scale_h);
             half v1 = __hmul(decode_fp4_e2m1(packed & 0x0F), scale_h);
 
-            half* b_dst = b_f16_smem + row * b_stride;
-            b_dst[col_packed * 2] = v0;
-            b_dst[col_packed * 2 + 1] = v1;
+            int k0 = col_packed * 2;
+            int k1 = k0 + 1;
+
+            if (row < tile_cols) {
+                if (k0 < TileK) {
+                    half* b_row0 = b_f16_smem + k0 * b_k_stride;
+                    b_row0[row] = v0;
+                }
+                if (k1 < TileK) {
+                    half* b_row1 = b_f16_smem + k1 * b_k_stride;
+                    b_row1[row] = v1;
+                }
+            }
         }
     }
     
@@ -461,7 +472,7 @@ __device__ __forceinline__ void process_tile(
                     int n_offset = n_step * 8;
                     if (n_offset >= tile_cols) break;
 
-                    uint32_t b_base = cvta_to_shared_u32(b_f16_smem + n_offset * b_stride + kk);
+                    uint32_t b_base = cvta_to_shared_u32(b_f16_smem + kk * b_k_stride + n_offset);
                     unsigned b0, b1;
                     asm volatile(
                         "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 { %0, %1 }, [%2];\n"
