@@ -1352,3 +1352,18 @@ def debug_scales(data: input_t) -> None:
 
     print("Scale debug SFA mismatches:", int(diff_sfa.sum().item()))
     print("Scale debug SFB mismatches:", int(diff_sfb.sum().item()))
+
+    # Print a few small slices to diagnose permutation/offset
+    max_rows_sfa = min(4, M)
+    max_rows_sfb = min(4, N)
+    max_cols = min(16, K_scales_used)
+
+    print("\nSFA debug vs ref (first rows, first K_scales)")
+    for r in range(max_rows_sfa):
+        print(f"row {r} debug:", debug_sfa_cpu[r, :max_cols].tolist())
+        print(f"row {r}  ref :", ref_sfa_cpu[r, :max_cols].tolist())
+
+    print("\nSFB debug vs ref (first rows, first K_scales)")
+    for r in range(max_rows_sfb):
+        print(f"row {r} debug:", debug_sfb_cpu[r, :max_cols].tolist())
+        print(f"row {r}  ref :", ref_sfb_cpu[r, :max_cols].tolist())
