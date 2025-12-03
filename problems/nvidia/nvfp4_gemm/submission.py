@@ -1549,18 +1549,44 @@ def debug_scales(data: input_t) -> None:
     print(f"c_debug[0,0] = {c_debug[0,0].item()}")
     print(f"c_hw_noscale[0,0] = {c_hw_noscale[0,0].item()}")
 
-    # === Test power-of-2 scale interpretation ===
-    # In block-scaled FP4, scale might be: decoded = fp4_value * 2^scale
-    a_scale_pow2 = torch.pow(2.0, a_scale.float()).half()  # 2^scale for each element
-    b_scale_pow2 = torch.pow(2.0, b_scale.float()).half()
+    # === Compute effective scale factor applied by _scaled_mm ===
+    # Ratio of scaled to unscaled output tells us what _scaled_mm is doing
+    effective_scale = c_ref_mm / c_hw_noscale.clamp(min=1e-6)
     
-    a_dec_pow2 = out_a * a_scale_pow2
-    b_dec_pow2 = out_b * b_scale_pow2
-    c_pow2 = a_dec_pow2 @ b_dec_pow2.T
+    print(f"\n=== Effective scale analysis ===")
+    print(f"Effective scale at [0,0]: {effective_scale[0,0].item():.4f}")
+    print(f"Effective scale at [0,1]: {effective_scale[0,1].item():.4f}")
+    print(f"Effective scale at [1,0]: {effective_scale[1,0].item():.4f}")
+    print(f"Effective scale at [1,1]: {effective_scale[1,1].item():.4f}")
     
-    diff_pow2 = (c_pow2 - c_ref_mm).abs()
-    max_abs_pow2 = diff_pow2.max().item()
-    max_rel_pow2 = (diff_pow2 / denom).max().item()
-    print(f"\nPower-of-2 scale GEMM max abs diff: {max_abs_pow2}")
-    print(f"Power-of-2 scale GEMM max rel diff: {max_rel_pow2}")
-    print(f"c_pow2[0,0] = {c_pow2[0,0].item()}")
+    # What we compute as scale_a * scale_b product across K
+    # For output [m,n], we sum over k: a[m,k] * b[n,k] * scale_a[m,k//16] * scale_b[n,k//16]
+    # The effective multiplier depends on contribution from each K-block
+    
+    # Try: maybe _scaled_mm applies scales to OUTPUT rows/cols, not per K-block
+    # Test: scale_a applied per row, scale_b per column (using first scale value)
+    row_scale_a = sfa_ref16[:, 0:1]  # [M, 1] - first K-block scale
+    col_scale_b = sfb_ref16[:, 0:1]  # [N, 1] - first K-block scale
+    c_rowcol = c_hw_noscale * row_scale_a * col_scale_b.T
+    diff_rowcol = (c_rowcol - c_ref_mm).abs()
+    print(f"\nRow/Col scale (first kb) max abs diff: {diff_rowcol.max().item()}")
+    
+    # Try: mean scale across all K-blocks applied to output
+    mean_scale_a = sfa_ref16.mean(dim=1, keepdim=True)  # [M, 1]
+    mean_scale_b = sfb_ref16.mean(dim=1, keepdim=True)  # [N, 1]
+    c_mean = c_hw_noscale * mean_scale_a * mean_scale_b.T
+    diff_mean = (c_mean - c_ref_mm).abs()
+    print(f"Mean scale max abs diff: {diff_mean.max().item()}")
+    
+    # Try: sum of scales across K-blocks
+    sum_scale_a = sfa_ref16.sum(dim=1, keepdim=True)  # [M, 1]
+    sum_scale_b = sfb_ref16.sum(dim=1, keepdim=True)  # [N, 1]
+    c_sum = c_hw_noscale * sum_scale_a * sum_scale_b.T
+    diff_sum = (c_sum - c_ref_mm).abs()
+    print(f"Sum scale max abs diff: {diff_sum.max().item()}")
+    
+    # Check: what would make c_hw_noscale[0,0] become c_ref_mm[0,0]?
+    needed_scale = c_ref_mm[0,0].item() / c_hw_noscale[0,0].item()
+    print(f"\nNeeded scale for [0,0]: {needed_scale:.4f}")
+    print(f"scale_a[0,:] = {sfa_ref16[0,:].tolist()}")
+    print(f"scale_b[0,:] = {sfb_ref16[0,:].tolist()}")
