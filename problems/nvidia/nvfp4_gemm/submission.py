@@ -1513,3 +1513,38 @@ def debug_scales(data: input_t) -> None:
     max_rel_partial = (diff_partial / denom).max().item()
     print(f"Partial-sum GEMM max abs diff: {max_abs_partial}")
     print(f"Partial-sum GEMM max rel diff: {max_rel_partial}")
+
+    # === Test scale_a only (scale_b = 1) ===
+    ones_sfb = torch.ones_like(sfb_ref_cpu[:, :, 0])
+    scale_b_ones = to_blocked(ones_sfb).to(device)
+    c_ref_scale_a_only = torch._scaled_mm(
+        a_ref, b_ref.transpose(0, 1),
+        scale_a, scale_b_ones,
+        bias=None, out_dtype=torch.float16,
+    )
+    c_ours_scale_a_only = (out_a * a_scale) @ out_b.T
+    diff_scale_a = (c_ours_scale_a_only - c_ref_scale_a_only).abs()
+    print(f"Scale-A-only GEMM max abs diff: {diff_scale_a.max().item()}")
+
+    # === Test scale_b only (scale_a = 1) ===
+    ones_sfa = torch.ones_like(sfa_ref_cpu[:, :, 0])
+    scale_a_ones = to_blocked(ones_sfa).to(device)
+    c_ref_scale_b_only = torch._scaled_mm(
+        a_ref, b_ref.transpose(0, 1),
+        scale_a_ones, scale_b,
+        bias=None, out_dtype=torch.float16,
+    )
+    c_ours_scale_b_only = out_a @ (out_b * b_scale).T
+    diff_scale_b = (c_ours_scale_b_only - c_ref_scale_b_only).abs()
+    print(f"Scale-B-only GEMM max abs diff: {diff_scale_b.max().item()}")
+
+    # === Print sample scale values to verify FP8 decode ===
+    print(f"\nSample FP8 scale values (first 4 rows, first 4 k-blocks):")
+    print(f"sfa_ref16[0:4, 0:4]:\n{sfa_ref16[0:4, 0:4]}")
+    print(f"sfb_ref16[0:4, 0:4]:\n{sfb_ref16[0:4, 0:4]}")
+    
+    # === Print sample output values ===
+    print(f"\nSample output values at [0,0]:")
+    print(f"c_ref_mm[0,0] = {c_ref_mm[0,0].item()}")
+    print(f"c_debug[0,0] = {c_debug[0,0].item()}")
+    print(f"c_hw_noscale[0,0] = {c_hw_noscale[0,0].item()}")
