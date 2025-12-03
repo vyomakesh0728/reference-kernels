@@ -80,6 +80,32 @@ __device__ __forceinline__ float decode_fp8_e4m3(uint8_t val) {
     return __half2float(__float2half_rn(fp8_val));
 }
 
+// Hardware FP4 decode helper using cvt.rn.f16x2.e2m1x2, adapted from gau.py.
+// Decodes a byte containing two FP4 values (float4_e2m1fn_x2) into a half2.
+__device__ __forceinline__ void fp4x8_to_fp16x2x4(int *out, int in) {
+    asm volatile(
+        "{\n\t"
+        ".reg .b8 tmp0, tmp1, tmp2, tmp3;\n\t"
+        "mov.b32 {tmp0, tmp1, tmp2, tmp3}, %4;\n\t" // unpack 32-bit to 4x fp4x2
+        "cvt.rn.f16x2.e2m1x2 %0, tmp0;\n\t"
+        "cvt.rn.f16x2.e2m1x2 %1, tmp1;\n\t"
+        "cvt.rn.f16x2.e2m1x2 %2, tmp2;\n\t"
+        "cvt.rn.f16x2.e2m1x2 %3, tmp3;\n\t"
+        "}"
+        : "=r"(out[0]), "=r"(out[1]), "=r"(out[2]), "=r"(out[3])
+        : "r"(in)
+    );
+}
+
+__device__ __forceinline__ void decode_fp4x2_hw(uint8_t packed, half &h0, half &h1) {
+    int out_i32[4];
+    int in32 = static_cast<int>(packed);
+    fp4x8_to_fp16x2x4(out_i32, in32);
+    half2 pair = *reinterpret_cast<half2*>(&out_i32[0]);
+    h0 = __low2half(pair);
+    h1 = __high2half(pair);
+}
+
 __device__ __forceinline__ uint32_t cvta_to_shared_u32(const void* ptr) {
     uint32_t addr32;
     asm volatile(
@@ -993,11 +1019,9 @@ fp4_scale_debug_rank2_cta(
 
             int  k_packed = k >> 1;               // K/2 index
             uint8_t packed = A_packed[m_global * K_packed + k_packed];
-            uint8_t nibble = (k & 1)
-                ? (packed & 0x0F)
-                : ((packed >> 4) & 0x0F);
-
-            half v = decode_fp4_e2m1(nibble);
+            half v0, v1;
+            decode_fp4x2_hw(packed, v0, v1);
+            half v = (k & 1) ? v1 : v0;
 
             int  j = k >> 4;                      // K_block = k/16
             half scale_h = __float2half(0.0f);
@@ -1022,11 +1046,9 @@ fp4_scale_debug_rank2_cta(
 
             int  k_packed = k >> 1;
             uint8_t packed = B_packed[n_global * K_packed + k_packed];
-            uint8_t nibble = (k & 1)
-                ? (packed & 0x0F)
-                : ((packed >> 4) & 0x0F);
-
-            half v = decode_fp4_e2m1(nibble);
+            half v0, v1;
+            decode_fp4x2_hw(packed, v0, v1);
+            half v = (k & 1) ? v1 : v0;
 
             int  j = k >> 4;
             half scale_h = __float2half(0.0f);
