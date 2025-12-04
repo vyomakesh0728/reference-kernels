@@ -431,96 +431,122 @@ __device__ __forceinline__ void process_tile(
     int curr_cols_a = (curr_k + 1) >> 1;
     int curr_cols_b = (curr_k + 1) >> 1;
     int scale_count = (curr_k + 15) >> 4;
-
-    // --- DECODE A (M x K) into row-major [TileM, TileK] ---
+ 
+     // --- DECODE A (M x K) into row-major [TileM, TileK] ---
     {
-        for (int idx = tid; idx < tile_rows * curr_cols_a; idx += Threads) {
-            int row = idx / curr_cols_a;
-            int col_packed = idx - row * curr_cols_a;
+        // Each thread processes groups of 8 packed bytes (one FP8 scale block) per row
+        int total_blocks_a = tile_rows * scale_count;
+        for (int idx = tid; idx < total_blocks_a; idx += Threads) {
+            int row       = idx / scale_count;
+            int scale_col = idx - row * scale_count;   // K-block within the tile
 
-            int m_global = m_tile + row;
-            int k_base = k_tile + col_packed * 2;      // first K index for this packed byte
-            int k_packed_global = (k_base >> 1);       // global K/2 index
+            int m_global        = m_tile + row;
+            int global_k_scale  = (k_tile >> 4) + scale_col;
 
-            uint8_t packed = 0;
-            if (m_global < M && k_packed_global < K_packed) {
-                int a_tile_idx = row * TileKPacked + col_packed;
-                packed = a_tile[a_tile_idx];
-            }
-
-            int scale_col = col_packed >> 3;           // 8 packed bytes per 16 FP4
-            int global_k_scale = (k_tile >> 4) + scale_col;
-
+            // Load FP8 scale once per 16 FP4 values (8 packed bytes)
             half scale_h = __float2half(0.0f);
-            if (row < tile_rows && scale_col < scale_count) {
-                if (m_global < M && global_k_scale < K_scales) {
-                    int sfa_col = global_k_scale - sfa_c0;
-                    if (sfa_col >= 0 && sfa_col < SfaBoxK) {
-                        int sfa_idx = row * SfaBoxK + sfa_col;
-                        uint8_t sfa_byte = sfa_tile[sfa_idx];
-                        scale_h = __float2half(decode_fp8_e4m3(sfa_byte));
-                    }
+            if (m_global < M && global_k_scale < K_scales) {
+                int sfa_col = global_k_scale - sfa_c0;
+                if (sfa_col >= 0 && sfa_col < SfaBoxK) {
+                    int sfa_idx = row * SfaBoxK + sfa_col;
+                    uint8_t sfa_byte = sfa_tile[sfa_idx];
+                    scale_h = __float2half(decode_fp8_e4m3(sfa_byte));
                 }
             }
 
-            half v0, v1;
-            decode_fp4x2_hw(packed, v0, v1);
-            v0 = __hmul(v0, scale_h);
-            v1 = __hmul(v1, scale_h);
+            // Columns of packed FP4 covered by this scale block
+            int col_packed_start = scale_col << 3;     // 8 packed bytes per 16 FP4
+            int col_packed_end   = col_packed_start + 8;
+            if (col_packed_start >= curr_cols_a) {
+                continue;
+            }
+            if (col_packed_end > curr_cols_a) {
+                col_packed_end = curr_cols_a;
+            }
 
-            half* a_dst = a_f16_smem + row * a_stride;
-            a_dst[col_packed * 2] = v0;
-            a_dst[col_packed * 2 + 1] = v1;
+            int   k_base_block = k_tile + (col_packed_start << 1);
+            half* a_dst        = a_f16_smem + row * a_stride;
+
+            for (int col_packed = col_packed_start; col_packed < col_packed_end; ++col_packed) {
+                int k_base          = k_base_block + ((col_packed - col_packed_start) << 1);
+                int k_packed_global = (k_base >> 1);
+
+                uint8_t packed = 0;
+                if (m_global < M && k_packed_global < K_packed) {
+                    int a_tile_idx = row * TileKPacked + col_packed;
+                    packed = a_tile[a_tile_idx];
+                }
+
+                half v0, v1;
+                decode_fp4x2_hw(packed, v0, v1);
+                v0 = __hmul(v0, scale_h);
+                v1 = __hmul(v1, scale_h);
+
+                a_dst[col_packed * 2]     = v0;
+                a_dst[col_packed * 2 + 1] = v1;
+            }
         }
     }
 
     // --- DECODE B (N x K) into K-major layout [TileK, TileN] ---
     {
-        for (int idx = tid; idx < tile_cols * curr_cols_b; idx += Threads) {
-            int row = idx / curr_cols_b;              // N dimension within tile
-            int col_packed = idx - row * curr_cols_b; // K/2 within tile
+        // Symmetric decode for B: reuse one FP8 scale across 8 packed bytes
+        int total_blocks_b = tile_cols * scale_count;
+        for (int idx = tid; idx < total_blocks_b; idx += Threads) {
+            int row       = idx / scale_count;          // N dimension within tile
+            int scale_col = idx - row * scale_count;    // K-block within tile
 
-            int n_global = n_tile + row;
-            int k_base = k_tile + col_packed * 2;
-            int k_packed_global = (k_base >> 1);
-
-            uint8_t packed = 0;
-            if (n_global < N && k_packed_global < K_packed) {
-                int b_tile_idx = row * TileKPacked + col_packed;
-                packed = b_tile[b_tile_idx];
-            }
-
-            int scale_col = col_packed >> 3;
+            int n_global       = n_tile + row;
             int global_k_scale = (k_tile >> 4) + scale_col;
 
             half scale_h = __float2half(0.0f);
-            if (row < tile_cols && scale_col < scale_count) {
-                if (n_global < N && global_k_scale < K_scales) {
-                    int sfb_col = global_k_scale - sfb_c0;
-                    if (sfb_col >= 0 && sfb_col < SfaBoxK) {
-                        int sfb_idx = row * SfaBoxK + sfb_col;
-                        uint8_t sfb_byte = sfb_tile[sfb_idx];
-                        scale_h = __float2half(decode_fp8_e4m3(sfb_byte));
-                    }
+            if (n_global < N && global_k_scale < K_scales) {
+                int sfb_col = global_k_scale - sfb_c0;
+                if (sfb_col >= 0 && sfb_col < SfaBoxK) {
+                    int sfb_idx = row * SfaBoxK + sfb_col;
+                    uint8_t sfb_byte = sfb_tile[sfb_idx];
+                    scale_h = __float2half(decode_fp8_e4m3(sfb_byte));
                 }
             }
 
-            half v0, v1;
-            decode_fp4x2_hw(packed, v0, v1);
-            v0 = __hmul(v0, scale_h);
-            v1 = __hmul(v1, scale_h);
+            int col_packed_start = scale_col << 3;
+            int col_packed_end   = col_packed_start + 8;
+            if (col_packed_start >= curr_cols_b) {
+                continue;
+            }
+            if (col_packed_end > curr_cols_b) {
+                col_packed_end = curr_cols_b;
+            }
 
-            int k0 = col_packed * 2;
-            int k1 = k0 + 1;
+            int k_base_block = k_tile + (col_packed_start << 1);
 
-            if (row < tile_cols) {
-                if (k0 < TileK) {
-                    half* b_row0 = b_f16_smem + k0 * b_k_stride;
-                    b_row0[row] = v0;
+            for (int col_packed = col_packed_start; col_packed < col_packed_end; ++col_packed) {
+                int k_base          = k_base_block + ((col_packed - col_packed_start) << 1);
+                int k_packed_global = (k_base >> 1);
+
+                uint8_t packed = 0;
+                if (n_global < N && k_packed_global < K_packed) {
+                    int b_tile_idx = row * TileKPacked + col_packed;
+                    packed = b_tile[b_tile_idx];
                 }
-                if (k1 < TileK) {
-                    half* b_row1 = b_f16_smem + k1 * b_k_stride;
-                    b_row1[row] = v1;
+
+                half v0, v1;
+                decode_fp4x2_hw(packed, v0, v1);
+                v0 = __hmul(v0, scale_h);
+                v1 = __hmul(v1, scale_h);
+
+                int k0 = col_packed * 2;
+                int k1 = k0 + 1;
+
+                if (row < tile_cols) {
+                    if (k0 < TileK) {
+                        half* b_row0 = b_f16_smem + k0 * b_k_stride;
+                        b_row0[row] = v0;
+                    }
+                    if (k1 < TileK) {
+                        half* b_row1 = b_f16_smem + k1 * b_k_stride;
+                        b_row1[row] = v1;
+                    }
                 }
             }
         }
@@ -798,7 +824,7 @@ fp4_gemm_rank2_cta(
             is_producer, is_consumer,
             c_accum
         );
-
+        
         __syncthreads(); // Ensure consumers done before recycling stage?
         
         if ((k_tile / TileK) % StageCount == StageCount - 1) {
