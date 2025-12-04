@@ -633,7 +633,7 @@ fp4_gemm_rank2_cta(
     constexpr int TileKPacked = TileK / 2;
     constexpr int TileN = 128; // Fixed TileN matching TileM
     constexpr int SfaBoxK = 128;  // Rank-2 GEMM: SWIZZLE_128B
-    constexpr int StageCount = 1; // Single-stage pipeline to fit within per-block shared memory limit on B200
+    constexpr int StageCount = 2; 
     constexpr int a_stride = TileK + 8;
     constexpr int b_stride = TileK + 8;
 
@@ -876,6 +876,7 @@ void launch_fp4_gemm_optimized(
     constexpr int kTileK = 256;
     constexpr int kThreads = 256; // 8 warps
     constexpr int kTileKPacked = kTileK / 2;
+    constexpr int StageCount = 2;
     
     // TMA hardware constraint
     constexpr int kTMABoxLimit = 256;
@@ -979,26 +980,26 @@ void launch_fp4_gemm_optimized(
     size_t offset = 0;
     auto align = [&](size_t x, size_t a) { return (x + a - 1) & ~(a - 1); };
     
-    // Mbarriers (StageCount = 1)
+    // Mbarriers (StageCount)
     offset = align(offset, 16);
-    offset += 1 * 16; // mbar_a
-    offset += 1 * 16; // mbar_b
+    offset += StageCount * 16; // mbar_a
+    offset += StageCount * 16; // mbar_b
     
-    // TMA A (StageCount = 1)
+    // TMA A (StageCount)
     offset = align(offset, 1024);
-    offset += 1 * kTileM * kTileKPacked;
+    offset += StageCount * kTileM * kTileKPacked;
     
-    // TMA B (StageCount = 1)
+    // TMA B (StageCount)
     offset = align(offset, 1024);
-    offset += 1 * kTileN * kTileKPacked;
+    offset += StageCount * kTileN * kTileKPacked;
     
-    // TMA SFA (StageCount = 1)
+    // TMA SFA (StageCount)
     offset = align(offset, 1024);
-    offset += 1 * kTileM * 128;
+    offset += StageCount * kTileM * 128;
     
-    // TMA SFB (StageCount = 1)
+    // TMA SFB (StageCount)
     offset = align(offset, 1024);
-    offset += 1 * kTileN * 128;
+    offset += StageCount * kTileN * 128;
     
     // Decoded A
     offset = align(offset, 128);
@@ -1562,7 +1563,7 @@ def debug_scales(data: input_t) -> None:
     c_partial = torch.zeros((M, N), dtype=torch.float32, device=device)
     for kb in range(K_scales):
         k_start = kb * 16
-        k_end = min((kb + 1) * 16, K)
+        k_end = min((kb + 1) * 16, K);
         a_block = out_a[:, k_start:k_end].float()  # [M, block_size]
         b_block = out_b[:, k_start:k_end].float()  # [N, block_size]
         partial = a_block @ b_block.T              # [M, N] partial sum
