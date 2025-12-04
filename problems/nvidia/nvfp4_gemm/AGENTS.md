@@ -1,4 +1,5 @@
 <system-reminder>
+      CRITICAL: ALWAYS USE mcp @morph tools, for code base search, file edits etc. 
       IMPORTANT: this context is relevant to your tasks. 
       You should always respond to this context unless it is highly relevant to your task.
 </system-reminder>

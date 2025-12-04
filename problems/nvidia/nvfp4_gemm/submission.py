@@ -392,6 +392,8 @@ __device__ __forceinline__ void process_tile(
     int m_tile, int n_tile,
     uint8_t** a_packed_stage, uint8_t** b_packed_stage,
     uint8_t** sfa_stage, uint8_t** sfb_stage,
+    const uint8_t* __restrict__ A_packed,
+    const uint8_t* __restrict__ B_packed,
     const uint8_t* __restrict__ SFA_packed,
     const uint8_t* __restrict__ SFB_packed,
     half* a_f16_smem, half* b_f16_smem,
@@ -403,8 +405,13 @@ __device__ __forceinline__ void process_tile(
     constexpr int TileKPacked = TileK / 2;
     constexpr int a_stride = TileK + 8;
     constexpr int b_stride = TileK + 8;
-    constexpr int b_k_stride = (TileN * b_stride) / TileK;
+    // Use a simple [TileK, TileN] K-major layout for decoded B so each K-row
+    // has TileN contiguous columns. This gives a per-row pitch of TileN * 2
+    // bytes, which is a multiple of 16 bytes (TileN=128), satisfying
+    // ldmatrix alignment requirements.
+    constexpr int b_k_stride = TileN;
 
+    const int K_packed = K >> 1;
     const int K_scales = (K + 15) >> 4; // one FP8 scale per 16 FP4 values
 
     int curr_k = (K - k_tile) < TileK ? (K - k_tile) : TileK;
@@ -414,19 +421,25 @@ __device__ __forceinline__ void process_tile(
 
     // --- DECODE A (M x K) into row-major [TileM, TileK] ---
     {
-        uint8_t* a_stage = a_packed_stage[stage];
         for (int idx = tid; idx < tile_rows * curr_cols_a; idx += Threads) {
             int row = idx / curr_cols_a;
             int col_packed = idx - row * curr_cols_a;
-            int a_smem_idx = row * TileKPacked + col_packed;
-            uint8_t packed = a_stage[a_smem_idx];
 
-            int scale_col = col_packed >> 3;
+            int m_global = m_tile + row;
+            int k_base = k_tile + col_packed * 2;      // first K index for this packed byte
+            int k_packed_global = (k_base >> 1);       // global K/2 index
+
+            uint8_t packed = 0;
+            if (m_global < M && k_packed_global < K_packed) {
+                int a_global_idx = m_global * K_packed + k_packed_global;
+                packed = A_packed[a_global_idx];
+            }
+
+            int scale_col = col_packed >> 3;           // 8 packed bytes per 16 FP4
             int global_k_scale = (k_tile >> 4) + scale_col;
 
             half scale_h = __float2half(0.0f);
             if (row < tile_rows && scale_col < scale_count) {
-                int m_global = m_tile + row;
                 if (m_global < M && global_k_scale < K_scales) {
                     int scale_idx_global = m_global * K_scales_padded + global_k_scale;
                     uint8_t sfa_byte = SFA_packed[scale_idx_global];
@@ -447,19 +460,25 @@ __device__ __forceinline__ void process_tile(
 
     // --- DECODE B (N x K) into K-major layout [TileK, TileN] ---
     {
-        uint8_t* b_stage = b_packed_stage[stage];
         for (int idx = tid; idx < tile_cols * curr_cols_b; idx += Threads) {
-            int row = idx / curr_cols_b; // N dimension
-            int col_packed = idx - row * curr_cols_b; // K dimension
-            int b_smem_idx = row * TileKPacked + col_packed;
-            uint8_t packed = b_stage[b_smem_idx];
+            int row = idx / curr_cols_b;              // N dimension within tile
+            int col_packed = idx - row * curr_cols_b; // K/2 within tile
+
+            int n_global = n_tile + row;
+            int k_base = k_tile + col_packed * 2;
+            int k_packed_global = (k_base >> 1);
+
+            uint8_t packed = 0;
+            if (n_global < N && k_packed_global < K_packed) {
+                int b_global_idx = n_global * K_packed + k_packed_global;
+                packed = B_packed[b_global_idx];
+            }
 
             int scale_col = col_packed >> 3;
             int global_k_scale = (k_tile >> 4) + scale_col;
 
             half scale_h = __float2half(0.0f);
             if (row < tile_cols && scale_col < scale_count) {
-                int n_global = n_tile + row;
                 if (n_global < N && global_k_scale < K_scales) {
                     int scale_idx_global = n_global * K_scales_padded + global_k_scale;
                     uint8_t sfb_byte = SFB_packed[scale_idx_global];
@@ -753,7 +772,7 @@ fp4_gemm_rank2_cta(
             k_tile, stage, tile_rows, tile_cols,
             m_tile, n_tile,
             a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
-            SFA_packed, SFB_packed,
+            A_packed, B_packed, SFA_packed, SFB_packed,
             a_f16_smem, b_f16_smem,
             M, N, K, K_scales_padded,
             tid, warp_id, lane_id,
