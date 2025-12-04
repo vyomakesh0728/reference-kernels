@@ -873,7 +873,7 @@ void launch_fp4_gemm_optimized(
 
     constexpr int kTileM = 128;
     constexpr int kTileN = 128; // GEMM tiling
-    constexpr int kTileK = 256;
+    constexpr int kTileK = 128;
     constexpr int kThreads = 256; // 8 warps
     constexpr int kTileKPacked = kTileK / 2;
     constexpr int StageCount = 2;
@@ -1163,7 +1163,7 @@ void launch_fp4_scale_debug(
 
     constexpr int kTileM = 128;
     constexpr int kTileN = 128;
-    constexpr int kTileK = 256;
+    constexpr int kTileK = 128;
     constexpr int kThreads = 256;
 
     dim3 grid;
@@ -1571,7 +1571,7 @@ def debug_scales(data: input_t) -> None:
         sfa_kb = sfa_ref16[:, kb:kb+1].float()     # [M, 1]
         sfb_kb = sfb_ref16[:, kb:kb+1].float()     # [N, 1]
         c_partial += partial * sfa_kb * sfb_kb.T
-    c_partial_fp16 = c_partial.half()
+    c_partial_fp16 = c_partial.half();
     
     diff_partial = (c_partial_fp16 - c_ref_mm).abs()
     max_abs_partial = diff_partial.max().item()
@@ -1616,7 +1616,7 @@ def debug_scales(data: input_t) -> None:
 
     # === Compute effective scale factor applied by _scaled_mm ===
     # Ratio of scaled to unscaled output tells us what _scaled_mm is doing
-    effective_scale = c_ref_mm / c_hw_noscale.clamp(min=1e-6)
+    effective_scale = c_ref_mm / c_hw_noscale.clamp(min=1e-6);
     
     print(f"\n=== Effective scale analysis ===")
     print(f"Effective scale at [0,0]: {effective_scale[0,0].item():.4f}")
@@ -1634,111 +1634,111 @@ def debug_scales(data: input_t) -> None:
     col_scale_b = sfb_ref16[:, 0:1]  # [N, 1] - first K-block scale
     c_rowcol = c_hw_noscale * row_scale_a * col_scale_b.T
     diff_rowcol = (c_rowcol - c_ref_mm).abs()
-    print(f"\nRow/Col scale (first kb) max abs diff: {diff_rowcol.max().item()}")
+    print(f"\nRow/Col scale (first kb) max abs diff: {diff_rowcol.max().item()}");
     
     # Try: mean scale across all K-blocks applied to output
     mean_scale_a = sfa_ref16.mean(dim=1, keepdim=True)  # [M, 1]
     mean_scale_b = sfb_ref16.mean(dim=1, keepdim=True)  # [N, 1]
     c_mean = c_hw_noscale * mean_scale_a * mean_scale_b.T
     diff_mean = (c_mean - c_ref_mm).abs()
-    print(f"Mean scale max abs diff: {diff_mean.max().item()}")
+    print(f"Mean scale max abs diff: {diff_mean.max().item()}");
     
     # Try: sum of scales across K-blocks
     sum_scale_a = sfa_ref16.sum(dim=1, keepdim=True)  # [M, 1]
     sum_scale_b = sfb_ref16.sum(dim=1, keepdim=True)  # [N, 1]
     c_sum = c_hw_noscale * sum_scale_a * sum_scale_b.T
     diff_sum = (c_sum - c_ref_mm).abs()
-    print(f"Sum scale max abs diff: {diff_sum.max().item()}")
+    print(f"Sum scale max abs diff: {diff_sum.max().item()}");
     
     # Check: what would make c_hw_noscale[0,0] become c_ref_mm[0,0]?
-    needed_scale = c_ref_mm[0,0].item() / c_hw_noscale[0,0].item()
-    print(f"\nNeeded scale for [0,0]: {needed_scale:.4f}")
-    print(f"scale_a[0,:] = {sfa_ref16[0,:].tolist()}")
-    print(f"scale_b[0,:] = {sfb_ref16[0,:].tolist()}")
-
+    needed_scale = c_ref_mm[0,0].item() / c_hw_noscale[0,0].item();
+    print(f"\nNeeded scale for [0,0]: {needed_scale:.4f}");
+    print(f"scale_a[0,:] = {sfa_ref16[0,:].tolist()}");
+    print(f"scale_b[0,:] = {sfb_ref16[0,:].tolist()}");
+    
     # === Test: Power-of-2 scales applied to partial sums ===
     # C[m,n] = sum_kb (partial[m,n,kb] * 2^scale_a[m,kb] * 2^scale_b[n,kb])
-    c_pow2_partial = torch.zeros((M, N), dtype=torch.float32, device=device)
+    c_pow2_partial = torch.zeros((M, N), dtype=torch.float32, device=device);
     for kb in range(K_scales):
-        k_start = kb * 16
-        k_end = min((kb + 1) * 16, K)
-        a_block = out_a[:, k_start:k_end].float()
-        b_block = out_b[:, k_start:k_end].float()
-        partial = a_block @ b_block.T
+        k_start = kb * 16;
+        k_end = min((kb + 1) * 16, K);
+        a_block = out_a[:, k_start:k_end].float();
+        b_block = out_b[:, k_start:k_end].float();
+        partial = a_block @ b_block.T;
         # Apply 2^scale for this K-block
-        pow2_sfa_kb = torch.pow(2.0, sfa_ref16[:, kb:kb+1].float())  # [M, 1]
-        pow2_sfb_kb = torch.pow(2.0, sfb_ref16[:, kb:kb+1].float())  # [N, 1]
-        c_pow2_partial += partial * pow2_sfa_kb * pow2_sfb_kb.T
-    c_pow2_partial_fp16 = c_pow2_partial.half()
+        pow2_sfa_kb = torch.pow(2.0, sfa_ref16[:, kb:kb+1].float());  # [M, 1]
+        pow2_sfb_kb = torch.pow(2.0, sfb_ref16[:, kb:kb+1].float());  # [N, 1]
+        c_pow2_partial += partial * pow2_sfa_kb * pow2_sfb_kb.T;
+    c_pow2_partial_fp16 = c_pow2_partial.half();
     
-    diff_pow2_partial = (c_pow2_partial_fp16 - c_ref_mm).abs()
-    max_abs_pow2_partial = diff_pow2_partial.max().item()
-    max_rel_pow2_partial = (diff_pow2_partial / denom).max().item()
-    print(f"\nPow2-partial-sum GEMM max abs diff: {max_abs_pow2_partial}")
-    print(f"Pow2-partial-sum GEMM max rel diff: {max_rel_pow2_partial}")
-    print(f"c_pow2_partial[0,0] = {c_pow2_partial_fp16[0,0].item()}")
+    diff_pow2_partial = (c_pow2_partial_fp16 - c_ref_mm).abs();
+    max_abs_pow2_partial = diff_pow2_partial.max().item();
+    max_rel_pow2_partial = (diff_pow2_partial / denom).max().item();
+    print(f"\nPow2-partial-sum GEMM max abs diff: {max_abs_pow2_partial}");
+    print(f"Pow2-partial-sum GEMM max rel diff: {max_rel_pow2_partial}");
+    print(f"c_pow2_partial[0,0] = {c_pow2_partial_fp16[0,0].item()}");
     
     # Compute what average pow2 scale product would be for [0,0]
-    pow2_a = torch.pow(2.0, sfa_ref16[0,:].float())
-    pow2_b = torch.pow(2.0, sfb_ref16[0,:].float())
-    pow2_products = pow2_a * pow2_b
-    avg_pow2 = pow2_products.mean().item()
-    print(f"Average 2^scale_a * 2^scale_b for row 0: {avg_pow2:.4f}")
-
+    pow2_a = torch.pow(2.0, sfa_ref16[0,:].float());
+    pow2_b = torch.pow(2.0, sfb_ref16[0,:].float());
+    pow2_products = pow2_a * pow2_b;
+    avg_pow2 = pow2_products.mean().item();
+    print(f"Average 2^scale_a * 2^scale_b for row 0: {avg_pow2:.4f}");
+    
     # === Check RAW FP8 byte interpretation ===
     # Maybe _scaled_mm interprets the FP8 bytes differently
-    sfa_bytes_raw = sfa_ref_cpu[..., 0].view(torch.uint8)
-    sfb_bytes_raw = sfb_ref_cpu[..., 0].view(torch.uint8)
-    print(f"\nRaw FP8 bytes for sfa[0,:16]: {sfa_bytes_raw[0,:16].tolist()}")
-    print(f"Raw FP8 bytes for sfb[0,:16]: {sfb_bytes_raw[0,:16].tolist()}")
+    sfa_bytes_raw = sfa_ref_cpu[..., 0].view(torch.uint8);
+    sfb_bytes_raw = sfb_ref_cpu[..., 0].view(torch.uint8);
+    print(f"\nRaw FP8 bytes for sfa[0,:16]: {sfa_bytes_raw[0,:16].tolist()}");
+    print(f"Raw FP8 bytes for sfb[0,:16]: {sfb_bytes_raw[0,:16].tolist()}");
     
     # FP8 e4m3fn interpretation: value = (-1)^sign * 2^(exp-7) * (1 + mantissa/8)
     # Let's decode manually
     def decode_fp8_e4m3fn(byte_val):
-        sign = (byte_val >> 7) & 1
-        exp = (byte_val >> 3) & 0xF
-        mantissa = byte_val & 0x7
+        sign = (byte_val >> 7) & 1;
+        exp = (byte_val >> 3) & 0xF;
+        mantissa = byte_val & 0x7;
         if exp == 0:  # subnormal
-            return ((-1) ** sign) * (2 ** -6) * (mantissa / 8)
+            return ((-1) ** sign) * (2 ** -6) * (mantissa / 8);
         else:
-            return ((-1) ** sign) * (2 ** (exp - 7)) * (1 + mantissa / 8)
+            return ((-1) ** sign) * (2 ** (exp - 7)) * (1 + mantissa / 8);
     
     # Decode first few bytes manually
-    print(f"\nManual FP8 decode for sfa[0,:4]:")
+    print(f"\nManual FP8 decode for sfa[0,:4]:");
     for i in range(4):
-        byte_val = sfa_bytes_raw[0, i].item()
-        decoded = decode_fp8_e4m3fn(byte_val)
-        pytorch_val = sfa_ref16[0, i].item()
-        print(f"  byte {byte_val}: manual={decoded:.4f}, pytorch={pytorch_val:.4f}")
-
+        byte_val = sfa_bytes_raw[0, i].item();
+        decoded = decode_fp8_e4m3fn(byte_val);
+        pytorch_val = sfa_ref16[0, i].item();
+        print(f"  byte {byte_val}: manual={decoded:.4f}, pytorch={pytorch_val:.4f}");
+    
     # === Try absolute value of scales ===
     # Maybe _scaled_mm uses |scale| since block scales should be positive
-    a_scale_abs = a_scale.abs()
-    b_scale_abs = b_scale.abs()
-    c_abs_scale = (out_a * a_scale_abs) @ (out_b * b_scale_abs).T
-    diff_abs = (c_abs_scale - c_ref_mm).abs()
-    print(f"\nAbs-scale GEMM max abs diff: {diff_abs.max().item()}")
-    print(f"c_abs_scale[0,0] = {c_abs_scale[0,0].item()}")
-
+    a_scale_abs = a_scale.abs();
+    b_scale_abs = b_scale.abs();
+    c_abs_scale = (out_a * a_scale_abs) @ (out_b * b_scale_abs).T;
+    diff_abs = (c_abs_scale - c_ref_mm).abs();
+    print(f"\nAbs-scale GEMM max abs diff: {diff_abs.max().item()}");
+    print(f"c_abs_scale[0,0] = {c_abs_scale[0,0].item()}");
+    
     # === Try 2^|scale| (power of 2 of absolute value) ===
-    a_scale_pow2_abs = torch.pow(2.0, a_scale.abs().float()).half()
-    b_scale_pow2_abs = torch.pow(2.0, b_scale.abs().float()).half()
-    c_pow2_abs = (out_a * a_scale_pow2_abs) @ (out_b * b_scale_pow2_abs).T
-    diff_pow2_abs = (c_pow2_abs - c_ref_mm).abs()
-    print(f"Pow2-abs-scale GEMM max abs diff: {diff_pow2_abs.max().item()}")
-    print(f"c_pow2_abs[0,0] = {c_pow2_abs[0,0].item()}")
-
+    a_scale_pow2_abs = torch.pow(2.0, a_scale.abs().float()).half();
+    b_scale_pow2_abs = torch.pow(2.0, b_scale.abs().float()).half();
+    c_pow2_abs = (out_a * a_scale_pow2_abs) @ (out_b * b_scale_pow2_abs).T;
+    diff_pow2_abs = (c_pow2_abs - c_ref_mm).abs();
+    print(f"Pow2-abs-scale GEMM max abs diff: {diff_pow2_abs.max().item()}");
+    print(f"c_pow2_abs[0,0] = {c_pow2_abs[0,0].item()}");
+    
     # === Try scale + offset (e.g., scale + 1 to make all positive) ===
-    offset = 4  # Make all scales positive: -3+4=1, 2+4=6
-    a_scale_offset = (a_scale + offset)
-    b_scale_offset = (b_scale + offset)
-    c_offset = (out_a * a_scale_offset) @ (out_b * b_scale_offset).T
-    diff_offset = (c_offset - c_ref_mm).abs()
-    print(f"Scale+{offset} GEMM max abs diff: {diff_offset.max().item()}")
-
+    offset = 4;  # Make all scales positive: -3+4=1, 2+4=6
+    a_scale_offset = (a_scale + offset);
+    b_scale_offset = (b_scale + offset);
+    c_offset = (out_a * a_scale_offset) @ (out_b * b_scale_offset).T;
+    diff_offset = (c_offset - c_ref_mm).abs();
+    print(f"Scale+{offset} GEMM max abs diff: {diff_offset.max().item()}");
+    
     # === Try 2^(scale + offset) ===
-    a_scale_pow2_off = torch.pow(2.0, (a_scale + 1).float()).half()
-    b_scale_pow2_off = torch.pow(2.0, (b_scale + 1).float()).half()
-    c_pow2_off = (out_a * a_scale_pow2_off) @ (out_b * b_scale_pow2_off).T
-    diff_pow2_off = (c_pow2_off - c_ref_mm).abs()
-    print(f"Pow2(scale+1) GEMM max abs diff: {diff_pow2_off.max().item()}")
+    a_scale_pow2_off = torch.pow(2.0, (a_scale + 1).float()).half();
+    b_scale_pow2_off = torch.pow(2.0, (b_scale + 1).float()).half();
+    c_pow2_off = (out_a * a_scale_pow2_off) @ (out_b * b_scale_pow2_off).T;
+    diff_pow2_off = (c_pow2_off - c_ref_mm).abs();
+    print(f"Pow2(scale+1) GEMM max abs diff: {diff_pow2_off.max().item()}");
