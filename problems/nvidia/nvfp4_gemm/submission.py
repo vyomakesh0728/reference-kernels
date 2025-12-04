@@ -402,7 +402,7 @@ __device__ __forceinline__ void process_tile(
 ) {
     constexpr int TileKPacked = TileK / 2;
     constexpr int a_stride = TileK + 8;
-    constexpr int b_stride = TileK + 8; 
+    constexpr int b_stride = TileK + 8;
     constexpr int b_k_stride = (TileN * b_stride) / TileK;
 
     const int K_scales = (K + 15) >> 4; // one FP8 scale per 16 FP4 values
@@ -412,7 +412,7 @@ __device__ __forceinline__ void process_tile(
     int curr_cols_b = (curr_k + 1) >> 1;
     int scale_count = (curr_k + 15) >> 4;
 
-    // --- DECODE A (M x K) ---
+    // --- DECODE A (M x K) into row-major [TileM, TileK] ---
     {
         uint8_t* a_stage = a_packed_stage[stage];
         for (int idx = tid; idx < tile_rows * curr_cols_a; idx += Threads) {
@@ -420,7 +420,7 @@ __device__ __forceinline__ void process_tile(
             int col_packed = idx - row * curr_cols_a;
             int a_smem_idx = row * TileKPacked + col_packed;
             uint8_t packed = a_stage[a_smem_idx];
-            
+
             int scale_col = col_packed >> 3;
             int global_k_scale = (k_tile >> 4) + scale_col;
 
@@ -445,7 +445,7 @@ __device__ __forceinline__ void process_tile(
         }
     }
 
-    // --- DECODE B (N x K) ---
+    // --- DECODE B (N x K) into K-major layout [TileK, TileN] ---
     {
         uint8_t* b_stage = b_packed_stage[stage];
         for (int idx = tid; idx < tile_cols * curr_cols_b; idx += Threads) {
@@ -487,46 +487,90 @@ __device__ __forceinline__ void process_tile(
             }
         }
     }
-    
+
     __syncthreads();
 
-    // --- MMA LOOP ---
-    if (is_consumer) { 
-        int warp_row_offset = warp_id * 16;
-        
-        if (warp_row_offset < tile_rows) {
-            for (int kk = 0; kk < curr_k; kk += 16) {
-                uint32_t a_base = cvta_to_shared_u32(a_f16_smem + warp_row_offset * a_stride + kk);
-                unsigned a0, a1, a2, a3;
-                asm volatile(
-                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16 { %0, %1, %2, %3 }, [%4];\n"
-                    : "=r"(a0), "=r"(a1), "=r"(a2), "=r"(a3)
-                    : "r"(a_base)
-                );
+    // --- MMA LOOP: CUTLASS-style m16n8k16 layout ---
+    if (!is_consumer) {
+        return;
+    }
 
-                for (int n_step = 0; n_step < 16; ++n_step) {
-                    int n_offset = n_step * 8;
-                    if (n_offset >= tile_cols) break;
+    constexpr int MMA_M = 16;
+    constexpr int MMA_N = 8;
+    constexpr int MMA_K = 16;
+    constexpr int WARP_TILE_M = 4;  // 4x4 warp tiles -> 128x128 per CTA
+    constexpr int WARP_TILE_N = 4;
 
-                    uint32_t b_base = cvta_to_shared_u32(b_f16_smem + kk * b_k_stride + n_offset);
-                    unsigned b0, b1;
+    const int warp_m = warp_id % 2; // 0..1
+    const int warp_n = warp_id / 2; // 0..3
+
+    for (int kk = 0; kk < curr_k; kk += MMA_K) {
+        uint32_t RA[WARP_TILE_M][4];
+        uint32_t RB[WARP_TILE_N][2];
+
+        // Load A fragments: row-major [TileM, TileK]
+        #pragma unroll
+        for (int i = 0; i < WARP_TILE_M; ++i) {
+            int warp_smem_a_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M; // 0..127
+            int lane_smem_a_m = warp_smem_a_m + (lane_id % 16);            // 0..15 within tile
+            if (lane_smem_a_m < tile_rows) {
+                int lane_smem_a_k = kk + (lane_id / 16) * 8;               // 0 or 8 within this k-block
+                if (lane_smem_a_k < curr_k) {
+                    uint32_t a_base = cvta_to_shared_u32(
+                        a_f16_smem + lane_smem_a_m * a_stride + lane_smem_a_k);
                     asm volatile(
-                        "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 { %0, %1 }, [%2];\n"
-                        : "=r"(b0), "=r"(b1)
-                        : "r"(b_base)
+                        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 { %0, %1, %2, %3 }, [%4];\n"
+                        : "=r"(RA[i][0]), "=r"(RA[i][1]), "=r"(RA[i][2]), "=r"(RA[i][3])
+                        : "r"(a_base)
                     );
-
-                    asm volatile(
-                        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                        "{ %0, %1, %2, %3 }, "
-                        "{ %4, %5, %6, %7 }, "
-                        "{ %8, %9 }, "
-                        "{ %0, %1, %2, %3 };\n"
-                        : "+f"(c_accum[n_step][0]), "+f"(c_accum[n_step][1]), 
-                          "+f"(c_accum[n_step][2]), "+f"(c_accum[n_step][3])
-                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1)
-                    );
+                } else {
+                    RA[i][0] = RA[i][1] = RA[i][2] = RA[i][3] = 0u;
                 }
+            } else {
+                RA[i][0] = RA[i][1] = RA[i][2] = RA[i][3] = 0u;
+            }
+        }
+
+        // Load B fragments: treat shared B as column-major [TileK, TileN]
+        #pragma unroll
+        for (int j = 0; j < WARP_TILE_N; ++j) {
+            int warp_smem_b_n = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N; // 0..127
+            int lane_smem_b_k = kk + (lane_id % 16);                        // 0..15 within k-block
+            if (lane_smem_b_k < curr_k && warp_smem_b_n < tile_cols) {
+                uint32_t b_base = cvta_to_shared_u32(
+                    b_f16_smem + lane_smem_b_k * b_k_stride + warp_smem_b_n);
+                asm volatile(
+                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 { %0, %1 }, [%2];\n"
+                    : "=r"(RB[j][0]), "=r"(RB[j][1])
+                    : "r"(b_base)
+                );
+            } else {
+                RB[j][0] = RB[j][1] = 0u;
+            }
+        }
+
+        // MMA compute: accumulate into c_accum flattened as [i * WARP_TILE_N + j][0..3]
+        #pragma unroll
+        for (int i = 0; i < WARP_TILE_M; ++i) {
+            int row_block = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+            if (row_block >= tile_rows) continue;
+            #pragma unroll
+            for (int j = 0; j < WARP_TILE_N; ++j) {
+                int col_block = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+                if (col_block >= tile_cols) continue;
+
+                int acc_idx = i * WARP_TILE_N + j; // 0..15
+                asm volatile(
+                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                    "{ %0, %1, %2, %3 }, "
+                    "{ %4, %5, %6, %7 }, "
+                    "{ %8, %9 }, "
+                    "{ %0, %1, %2, %3 };\n"
+                    : "+f"(c_accum[acc_idx][0]), "+f"(c_accum[acc_idx][1]),
+                      "+f"(c_accum[acc_idx][2]), "+f"(c_accum[acc_idx][3])
+                    : "r"(RA[i][0]), "r"(RA[i][1]), "r"(RA[i][2]), "r"(RA[i][3]),
+                      "r"(RB[j][0]), "r"(RB[j][1])
+                );
             }
         }
     }
@@ -724,35 +768,52 @@ fp4_gemm_rank2_cta(
         }
     }
 
-    // Epilogue: Writeback
-    int warp_row_offset = warp_id * 16;
-    if (warp_row_offset < tile_rows) {
-        for (int n_step = 0; n_step < 16; ++n_step) {
-            int n_offset = n_step * 8;
-            if (n_offset >= tile_cols) break;
+    // Epilogue: Writeback using canonical m16n8k16 lane mapping
+    {
+        constexpr int MMA_M = 16;
+        constexpr int MMA_N = 8;
+        constexpr int WARP_TILE_M = 4;
+        constexpr int WARP_TILE_N = 4;
 
-            int lane_row_group = lane_id / 4; // 0-7
-            int lane_col_group = lane_id % 4; // 0-3
-            
-            int row0 = lane_row_group;
-            int row1 = lane_row_group + 8;
-            
-            int col0 = lane_col_group * 2;
-            int col1 = lane_col_group * 2 + 1;
-            
-            // Global coordinates
-            int global_row0 = m_tile + warp_row_offset + row0;
-            int global_row1 = m_tile + warp_row_offset + row1;
-            int global_col0 = n_tile + n_offset + col0;
-            int global_col1 = n_tile + n_offset + col1;
-            
-            if (global_row0 < M) {
-                if (global_col0 < N) D[global_row0 * N + global_col0] = __float2half(c_accum[n_step][0]);
-                if (global_col1 < N) D[global_row0 * N + global_col1] = __float2half(c_accum[n_step][1]);
-            }
-            if (global_row1 < M) {
-                if (global_col0 < N) D[global_row1 * N + global_col0] = __float2half(c_accum[n_step][2]);
-                if (global_col1 < N) D[global_row1 * N + global_col1] = __float2half(c_accum[n_step][3]);
+        int warp_m = warp_id % 2;
+        int warp_n = warp_id / 2;
+
+        int lane_row_group = lane_id / 4; // 0..7
+        int lane_col_group = lane_id % 4; // 0..3
+
+        int row0 = lane_row_group;
+        int row1 = lane_row_group + 8;
+        int col0 = lane_col_group * 2;
+        int col1 = col0 + 1;
+
+        for (int i = 0; i < WARP_TILE_M; ++i) {
+            for (int j = 0; j < WARP_TILE_N; ++j) {
+                int acc_idx = i * WARP_TILE_N + j; // 0..15
+
+                int tile_row_base = m_tile + warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+                int tile_col_base = n_tile + warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+
+                int global_row0 = tile_row_base + row0;
+                int global_row1 = tile_row_base + row1;
+                int global_col0 = tile_col_base + col0;
+                int global_col1 = tile_col_base + col1;
+
+                if (global_row0 < M) {
+                    if (global_col0 < N) {
+                        D[global_row0 * N + global_col0] = __float2half(c_accum[acc_idx][0]);
+                    }
+                    if (global_col1 < N) {
+                        D[global_row0 * N + global_col1] = __float2half(c_accum[acc_idx][1]);
+                    }
+                }
+                if (global_row1 < M) {
+                    if (global_col0 < N) {
+                        D[global_row1 * N + global_col0] = __float2half(c_accum[acc_idx][2]);
+                    }
+                    if (global_col1 < N) {
+                        D[global_row1 * N + global_col1] = __float2half(c_accum[acc_idx][3]);
+                    }
+                }
             }
         }
     }

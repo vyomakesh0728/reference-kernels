@@ -309,7 +309,7 @@ KEEP ONLY:
   NON‑GOALS
     - Do NOT:
         - Use CUTLASS or CuTe headers (kernel must be pure PTX + CUDA).
-        - Use WGMMA (only mma.sync.aligned.m16n8k16).
+        - Use WGMMA (only mma.sync.aligned.m16n8k16) for now to fix correctness.
         - Use cluster scope or rank‑3 descriptors (CTA scope, rank‑2 only).
         - Add CUDA streams or host‑side caching beyond what submission.py already does.
         - Use cp.async for A/B/scales (use TMA only).
