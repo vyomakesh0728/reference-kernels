@@ -410,9 +410,22 @@ __device__ __forceinline__ void process_tile(
     // bytes, which is a multiple of 16 bytes (TileN=128), satisfying
     // ldmatrix alignment requirements.
     constexpr int b_k_stride = TileN;
+    constexpr int SfaBoxK = 128;
 
     const int K_packed = K >> 1;
     const int K_scales = (K + 15) >> 4; // one FP8 scale per 16 FP4 values
+
+    // Base K indices for this tile
+    const int k_packed_base = k_tile >> 1;
+    const int k_scales_base = k_tile >> 4;
+    const int sfa_c0 = (k_scales_base / SfaBoxK) * SfaBoxK;
+    const int sfb_c0 = sfa_c0;
+
+    // TMA stage tiles interpreted as row-major
+    uint8_t* a_tile  = a_packed_stage[stage];   // [TileM, TileKPacked]
+    uint8_t* b_tile  = b_packed_stage[stage];   // [TileN, TileKPacked]
+    uint8_t* sfa_tile = sfa_stage[stage];       // [TileM, SfaBoxK]
+    uint8_t* sfb_tile = sfb_stage[stage];       // [TileN, SfaBoxK]
 
     int curr_k = (K - k_tile) < TileK ? (K - k_tile) : TileK;
     int curr_cols_a = (curr_k + 1) >> 1;
@@ -431,8 +444,8 @@ __device__ __forceinline__ void process_tile(
 
             uint8_t packed = 0;
             if (m_global < M && k_packed_global < K_packed) {
-                int a_global_idx = m_global * K_packed + k_packed_global;
-                packed = A_packed[a_global_idx];
+                int a_tile_idx = row * TileKPacked + col_packed;
+                packed = a_tile[a_tile_idx];
             }
 
             int scale_col = col_packed >> 3;           // 8 packed bytes per 16 FP4
@@ -441,9 +454,12 @@ __device__ __forceinline__ void process_tile(
             half scale_h = __float2half(0.0f);
             if (row < tile_rows && scale_col < scale_count) {
                 if (m_global < M && global_k_scale < K_scales) {
-                    int scale_idx_global = m_global * K_scales_padded + global_k_scale;
-                    uint8_t sfa_byte = SFA_packed[scale_idx_global];
-                    scale_h = __float2half(decode_fp8_e4m3(sfa_byte));
+                    int sfa_col = global_k_scale - sfa_c0;
+                    if (sfa_col >= 0 && sfa_col < SfaBoxK) {
+                        int sfa_idx = row * SfaBoxK + sfa_col;
+                        uint8_t sfa_byte = sfa_tile[sfa_idx];
+                        scale_h = __float2half(decode_fp8_e4m3(sfa_byte));
+                    }
                 }
             }
 
@@ -470,8 +486,8 @@ __device__ __forceinline__ void process_tile(
 
             uint8_t packed = 0;
             if (n_global < N && k_packed_global < K_packed) {
-                int b_global_idx = n_global * K_packed + k_packed_global;
-                packed = B_packed[b_global_idx];
+                int b_tile_idx = row * TileKPacked + col_packed;
+                packed = b_tile[b_tile_idx];
             }
 
             int scale_col = col_packed >> 3;
@@ -480,9 +496,12 @@ __device__ __forceinline__ void process_tile(
             half scale_h = __float2half(0.0f);
             if (row < tile_cols && scale_col < scale_count) {
                 if (n_global < N && global_k_scale < K_scales) {
-                    int scale_idx_global = n_global * K_scales_padded + global_k_scale;
-                    uint8_t sfb_byte = SFB_packed[scale_idx_global];
-                    scale_h = __float2half(decode_fp8_e4m3(sfb_byte));
+                    int sfb_col = global_k_scale - sfb_c0;
+                    if (sfb_col >= 0 && sfb_col < SfaBoxK) {
+                        int sfb_idx = row * SfaBoxK + sfb_col;
+                        uint8_t sfb_byte = sfb_tile[sfb_idx];
+                        scale_h = __float2half(decode_fp8_e4m3(sfb_byte));
+                    }
                 }
             }
 
