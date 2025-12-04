@@ -40,7 +40,7 @@ CUresult encode_tma_matrix(
     const cuuint64_t* globalStrides,
     const cuuint32_t* boxDim
 ) {
-    CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+    CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE;
     CUtensorMapL2promotion l2Promotion = CU_TENSOR_MAP_L2_PROMOTION_NONE;
     CUtensorMapFloatOOBfill oobFill = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
     cuuint32_t elementStrides[5];
