@@ -14,7 +14,7 @@ using cutlass::half_t;
 
 constexpr int M = 128;
 constexpr int N = 128;
-constexpr int K = 16;
+constexpr int K = 64;
 
 __device__ __forceinline__ uint32_t cvta_to_shared_u32(const void* ptr) {
     uint32_t addr32;
