@@ -177,6 +177,11 @@ __device__ unsigned int g_debug_thread_error_counts[1024];
 
 
 
+// Enable advanced tcgen05-based mainloop when non-zero.
+#ifndef USE_tcgen05_MAINLOOP
+#define USE_tcgen05_MAINLOOP 1
+#endif
+
 #if __CUDA_ARCH__ >= 900
 __device__ __forceinline__ void cp_async_16b(void* dst, const void* src, bool pred) {
     if (pred) {
@@ -775,6 +780,7 @@ fp4_gemm_rank2_cta(
         for(int j=0; j<4; ++j) c_accum[i][j] = 0.0f;
     }
 
+    #if !USE_tcgen05_MAINLOOP
     // Main Loop
     int phase = 0;
     
@@ -881,6 +887,91 @@ fp4_gemm_rank2_cta(
             }
         }
     }
+    #else  // USE_tcgen05_MAINLOOP
+    // tcgen05-based mainloop stub body for Blackwell (SM100/SM100a).
+    // Chosen logical tile: WG_M=128, WG_N=128, WG_K=64.
+    half *smem_A_tcgen05 = a_f16_smem;  // expected layout: [WG_M, WG_K] row-major
+    half *smem_B_tcgen05 = b_f16_smem;  // expected layout: [WG_K, WG_N]
+
+    // Prologue: prefetch stages 0..StageCount-2 (same as classic path).
+    int phase = 0;
+    for (int s = 0; s < StageCount - 1; ++s) {
+        int k_tile = s * TileK;
+        if (k_tile < K) {
+            prefetch_tile<TileM, TileK>(
+                s, k_tile, use_tma_a, is_producer, warp_id, lane_id,
+                m_tile, n_tile, K_packed, K_scales_padded, M, N,
+                a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
+                mbar_a, mbar_b,
+                desc_A, desc_B, desc_SFA, desc_SFB
+            );
+        }
+    }
+
+    // Per-thread dummy accumulators for tcgen05 path (not written to D yet).
+    float wg_accum[4] = {0.f, 0.f, 0.f, 0.f};
+
+    for (int k_tile = 0; k_tile < K; k_tile += TileK) {
+        int stage = (k_tile / TileK) % StageCount;
+        int next_k = k_tile + (StageCount - 1) * TileK;
+        if (next_k < K) {
+            prefetch_tile<TileM, TileK>(
+                (stage + StageCount - 1) % StageCount, next_k, use_tma_a, is_producer, warp_id, lane_id,
+                m_tile, n_tile, K_packed, K_scales_padded, M, N,
+                a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
+                mbar_a, mbar_b,
+                desc_A, desc_B, desc_SFA, desc_SFB
+            );
+        }
+
+        mbarrier_wait_parity(mbar_stage(mbar_a, stage), phase);
+        mbarrier_wait_parity(mbar_stage(mbar_b, stage), phase);
+        __syncthreads();
+
+        // Minimal tcgen05 mainloop body: issue a single tcgen05.mma from a
+        // designated consumer warpgroup (warps 0..3). This is a placeholder
+        // and does not yet map TMEM accumulators back into wg_accum.
+        #if __CUDA_ARCH__ >= 1000
+        if (warp_id < 4) {
+            // Construct dummy SMEM descriptors from the base shared-memory addresses.
+            // See Colfax "Writing GEMM Kernels Using Tensor Memory for NVIDIA Blackwell GPUs",
+            // section "tcgen05.mma", and PTX ISA 8.7 tcgen05.mma description.
+            uint64_t a_desc = static_cast<uint64_t>(cvta_to_shared_u32(smem_B_tcgen05));
+            uint64_t b_desc = static_cast<uint64_t>(cvta_to_shared_u32(smem_B_tcgen05));
+            uint32_t idesc = 0;            // TODO: set shape / datatype fields for real kernel
+            uint32_t enable_input_d = 1;   // accumulate into existing TMEM accumulator
+            uint32_t d_tmem = 0;          // placeholder TMEM address
+            uint32_t disable_output_lane[4] = {0u, 0u, 0u, 0u};
+            uint32_t scale_input_d = 0u;   // no extra scaling on input D
+
+            asm volatile(
+                "tcgen05.mma.cta_group::1.kind::f16 "
+                "[%0], %1, %2, %3, {%4, %5, %6, %7}, %8, %9;\n"
+                :
+                : "r"(d_tmem),
+                  "l"(a_desc),
+                  "l"(b_desc),
+                  "r"(idesc),
+                  "r"(disable_output_lane[0]),
+                  "r"(disable_output_lane[1]),
+                  "r"(disable_output_lane[2]),
+                  "r"(disable_output_lane[3]),
+                  "r"(enable_input_d),
+                  "r"(scale_input_d)
+            );
+
+            // Keep wg_accum referenced so it can later be wired to TMEM readback.
+            wg_accum[0] += 0.0f;
+        }
+        #endif  // __CUDA_ARCH__ >= 1000
+
+        __syncthreads();
+        if ((k_tile / TileK) % StageCount == StageCount - 1) {
+            phase ^= 1;
+        }
+    }
+    // TODO: Map tcgen05 accumulators to c_accum / D epilogue once layout is defined.
+    #endif  // !USE_tcgen05_MAINLOOP
 #endif
 }
 
