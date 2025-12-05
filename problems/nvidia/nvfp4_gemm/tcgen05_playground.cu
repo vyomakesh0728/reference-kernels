@@ -78,7 +78,7 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
     // TMEM alloc must be issued by a *single warp* (e.g., warp 0)
     if (warpid == 0 && laneid == 0) {
         uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr);
-        int num_columns = 512;  // power-of-2, >= 32, per PTX/TMEM rules
+        int num_columns = 256;  // >0, <512, power of 2, multiple of 32
         asm volatile(
             "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
             :
@@ -155,7 +155,7 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
     //}
     // Free TMEM allocation (same warp, same column count as alloc)
     if (warpid == 0 && laneid == 0) {
-        uint32_t cols = 512;
+        uint32_t cols = 256;
         uint32_t taddr = tmem_c;
         asm volatile(
             "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n"
