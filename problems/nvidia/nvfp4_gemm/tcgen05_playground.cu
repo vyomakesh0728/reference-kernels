@@ -104,11 +104,13 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
     // Use tcgen05.ld to read back a small portion of the accumulator tile from TMEM.
     volatile uint32_t acc0 = 0, acc1 = 0;
     if (tid == 0) {
+        /*
         asm volatile(
             "tcgen05.ld.sync.aligned.16x128b.x1.b32 "
             "{%0, %1}, [%2];\n"
             : "=r"(acc0), "=r"(acc1)
             : "r"(tmem_c));
+        */
         printf("TMEM readback: acc0=%u acc1=%u\n", acc0, acc1);
     }
 #endif
