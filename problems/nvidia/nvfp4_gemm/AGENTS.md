@@ -84,86 +84,172 @@ KEEP ONLY:
 # NVFP4 GEMM Agent Plan (Updated)
 
 <TODOs>
-use @morph tools to ease search/edits. 
+This message gives everything needed to mechanically transplant the working tcgen05 playground behavior into the fp4 GEMM kernel’s tcgen05 path without touching TMA, decode, or the classic mma.sync path.
 
-Workspace context:
-- This repo is the NVFP4 GEMM competition harness.  
-- There is a **full, up-to-date CUTLASS repo** at `./cutlass`
-- I want a **standalone minimal .cu file** to experiment with `tcgen05.mma` + TMEM on SM100/SM100a, outside of the main sub kernel.
+**Goal:**  
+Transplant the working `tcgen05_playground.cu` tcgen05+TMEM mainloop into the `USE_tcgen05_MAINLOOP` path of `fp4gemm_rank2_cta` in `submission.py`, reusing the existing TMA+decode pipeline and epilogue.
 
-### Goal
-Create a single CUDA source file `tcgen05_playground.cu` that:
-- Compiles with:
-  ```bash
-  nvcc -std=c++17 -O3 -arch=sm_100a -I./cutlass/include tcgen05_playground.cu -o tcgen05_playground
-  ```
-- Launches a **tiny GEMM-like kernel** that:
-  - Allocates TMEM with `tcgen05.alloc`.[2][3]
-  - Loads small A/B tiles (e.g. 128×16 and 16×128 of `half`) from GMEM into SMEM.  
-  - Issues a **single `tcgen05.mma.cta_group::1`** instruction to compute C = A×B, accumulating into TMEM.[4][3]
-  - Uses `tcgen05.ld` (or the CUTLASS “UMMA” abstractions) to read accumulators back from TMEM into registers/SMEM.[2]
-  - Writes the final C tile to GMEM so the host can print a few values.
-- The primary objective is: **ptxas must accept the `tcgen05.mma` and `tcgen05.ld` instructions with correct operands and descriptors** on SM100/SM100a.
+**Reference playground (authoritative behavior):**
 
-### Constraints / preferences
-- Keep it **as small and explicit as possible**:
-  - One `.cu` file, one kernel, one `main()`.  
-  - Hard-code a single tile, e.g. C is 128×128, K=16.  
-  - Initialize A and B on the host to all ones so C should be a constant (e.g. 16) everywhere.
-- It is fine (and preferred) to follow the Colfax / CUTLASS Blackwell tutorials and examples, but please:
-  - Inline the minimal needed code into this `.cu` instead of wiring the full CUTLASS GEMM stack.  
-  - Use CUTLASS headers only for **type helpers or macros**, not for launching a whole GEMM.[5][2]
-- Do **not** modify any existing files in this repo (especially not @sub ); just add `tcgen05_playground.cu`.
+This kernel runs and prints `C[0,0]=C[0,1]=64` with no hangs on B200.
 
-### Implementation sketch
-Please implement roughly this flow (filling in the real PTX signatures and descriptors from the docs/examples):
+### Tasks in `submission.py` (fp4 GEMM kernel)
 
-1. **Host side (`main`)**
-  - Allocate device buffers:
-    - `A_dev`: shape, dtype `half`.[6]
-    - `B_dev`: shape, dtype `half`.[6]
-    - `C_dev`: shape, dtype `float` or `half`.[6]
-  - Initialize A and B on the host to 1.0, copy to device.
-  - Launch `tcgen05_kernel<<<1, 128` (one CTA of 128 threads).
-  - Copy `C_dev` back and print the first few elements (e.g. `C[0,0]`, `C[0,1]`) to verify they equal K.
+1. **Locate the tcgen05 stub path.**
 
-2. **Device side kernel (`tcgen05_kernel`)**
-  - Use dynamic shared memory to allocate A/B tiles:  
-    - `extern __shared__ uint8_t smem_raw[];`  
-    - Carve out `half* smem_A` and `half* smem_B` with simple contiguous layouts.
-  - Have one warp (or one thread) copy A and B from GMEM into SMEM with plain `ld.global` / `st.shared` loops (no TMA in this playground).  
-  - Synchronize the CTA.
-  - Have a **single elected thread** (e.g. `if (threadIdx.x == 0)`) perform:
-    - `tcgen05.alloc` to allocate TMEM for the accumulator.[2]
-    - Construction of A/B descriptors and the instruction descriptor (`idesc`) required by `tcgen05.mma`, using the PTX ISA 9.0 docs and/or Colfax tutorial as a guide.[7][2]
-    - A single `tcgen05.mma.cta_group::1.kind::f16 ...` call that:
-      - Reads operands from SMEM (A and B tiles).  
-      - Accumulates into TMEM.  
-    - A `tcgen05.ld` to copy the accumulator tile from TMEM into registers or SMEM.[2]
-    - A simple loop to write the resulting C tile to `C_dev`.
-  - Synchronize again if needed, then return.
+   - In `submission.py`, find the CUDA kernel template:
 
-3. **PTX details**
-  - Use **inline PTX** for `tcgen05.alloc`, `tcgen05.mma`, and `tcgen05.ld`.  
-  - The tcgen05 instructions and operand lists must be copied from **working examples**:
-    - The Colfax CUTLASS tutorial “Writing GEMM Kernels Using Tensor Memory for NVIDIA Blackwell GPUs” (UMMA / Tensor Memory).[8][2]
-    - CUTLASS example 04_mma_tma_2sm_sm100.cu or similar, already present under @cut
-    - The CUTLASS “Blackwell SM100 GEMMs” docs for supported `tcgen05.mma` kinds and operand conventions.
-  - **Important:** The current inline PTX in `submission.py` for `tcgen05.mma` causes  
-    `ptxas ... error   : Arguments mismatch for instruction 'tcgen05.mma'`.
-    In this playground, you must:
-    - Use a tcgen05 variant that ptxas actually accepts on `sm_100a`.  
-    - Ensure the number and types of operands (TMEM handle, A/B descriptors, instruction descriptor, lane disable mask, scale flags, etc.) exactly match the PTX ISA example.
+     ```cpp
+     template<int TileM, int TileK, int Threads>
+     __global__ __launch_bounds__(Threads)
+     void fp4gemm_rank2_cta(...)
+     ```
 
-4. **Sanity checks**
-  - Add a small comment block at the top of `tcgen05_playground.cu` describing:
-    - Which CUTLASS/Colfax example and PTX ISA section the tcgen05 usage is based on (file name + section heading).[3][2]
-  - After building and running:
-    - `./tcgen05_playground` should print that `C[0,0]`, `C[0,1]`, etc. are equal to K (e.g. 16.0f), proving the tcgen05 path works.
+   - Inside it, there is:
 
-### Deliverable
-- A single new file `tcgen05_playground.cu` checked into the repo root, with all the above behavior implemented and comments pointing back to the relevant CUTLASS / Colfax / PTX docs for tcgen05 and TMEM.
-- Do **not** touch any other files; I will later transplant the working inline PTX sequence into my `USE_tcgen05_MAINLOOP` branch in `submission.py` myself.
+     ```cpp
+     #if !USE_tcgen05_MAINLOOP
+       // classic mma.sync mainloop ...
+     #else
+       // tcgen05-based mainloop stub body ...
+     #endif
+     ```
+
+   - All changes go inside the `#else  // USE_tcgen05_MAINLOOP` block. Do not touch the classic path or the TMA/epilogue code.[1]
+
+2. **Wire TMEM alloc/dealloc exactly like the playground, using the existing decoded SMEM.**
+
+   - In `fp4gemm_rank2_cta`, **reuse** the decoded FP16 shared buffers:
+
+     ```cpp
+     half* af16_smem = ...;  // already allocated as decoded A tile
+     half* bf16_smem = ...;  // already allocated as decoded B tile
+     ```
+
+     These correspond to `smem_A` and `smem_B` in the playground.[2][1]
+
+   - Add a CTA‑local shared uint32 for TMEM in the tcgen05 path:
+
+     ```cpp
+     __shared__ uint32_t tmem_base_ptr_tcgen05;
+     ```
+
+     Place this in the tcgen05 section, reusing existing shared memory if needed (just a single 4‑byte symbol).[1]
+
+   - In the tcgen05 mainloop prologue (after TMA+decode has filled `af16_smem` / `bf16_smem` for the current K‑tile and after `__syncthreads()`), insert:
+
+     ```cpp
+     const int tid    = threadIdx.x;
+     const int warpid = tid >> 5;
+     const int laneid = tid & 31;  // already computed earlier; reuse if present
+
+     __syncthreads();
+     if (tid == 0) {
+         tmem_base_ptr_tcgen05 = 0;
+     }
+     __syncthreads();
+
+     // TMEM alloc by fully active warp 0
+     if (warpid == 0) {
+         uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr_tcgen05);
+         int      num_cols = 256;
+         asm volatile(
+             "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
+             :
+             : "r"(dst_smem), "r"(num_cols));
+     }
+     __syncthreads();
+
+     uint32_t tmem_c = tmem_base_ptr_tcgen05;
+     ```
+
+     Use the existing `cvta_to_shared_u32` helper already defined in this file (there is one for TMA) instead of re‑defining it.[3][1]
+
+   - In the tcgen05 epilogue for the K‑loop (before returning or moving to D writeback), free TMEM:
+
+     ```cpp
+     if (warpid == 0) {
+         uint32_t cols  = 256;
+         uint32_t taddr = tmem_c;
+         asm volatile(
+             "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n"
+             :
+             : "r"(taddr), "r"(cols));
+     }
+     ```
+
+     This dealloc should be done once per CTA after all tcgen05 MMAs for that CTA’s tile have completed.[4][3]
+
+3. **Replace the current tcgen05 inline PTX stub with the UMMA `MmaOp::fma` sequence from the playground.**
+
+   - In the `#else  // USE_tcgen05_MAINLOOP` block, delete the existing hand‑written `tcgen05.mma` asm stub and any dummy `wgaccum` logic that doesn’t feed into D.[1]
+
+   - Immediately after TMEM alloc (and after `af16_smem` / `bf16_smem` are ready for this K‑tile), insert the UMMA setup and FMA, mapping symbols exactly:
+
+     ```cpp
+     using TypeA = half;
+     using TypeB = half;
+     using TypeC = float;
+
+     using MmaOp = cute::SM100_MMA_F16BF16_SS<
+         TypeA, TypeB, TypeC,
+         /*M*/ 128, /*N*/ 128,
+         cute::UMMA::Major::K,
+         cute::UMMA::Major::K>;
+
+     using TiledMMA = decltype(cute::make_tiled_mma(MmaOp{}));
+     TiledMMA tiled_mma = cute::make_tiled_mma(MmaOp{});
+
+     auto bM = cute::tile_size<0>(tiled_mma);
+     auto bN = cute::tile_size<1>(tiled_mma);
+     auto bK = cute::tile_size<2>(tiled_mma);
+
+     auto mma_shape_A = cute::partition_shape_A(tiled_mma, cute::make_shape(bM, bK));
+     auto mma_shape_B = cute::partition_shape_B(tiled_mma, cute::make_shape(bN, bK));
+
+     auto sA_layout = cute::UMMA::tile_to_mma_shape(
+         cute::UMMA::Layout_K_SW32_Atom<TypeA>{}, mma_shape_A);
+     auto sB_layout = cute::UMMA::tile_to_mma_shape(
+         cute::UMMA::Layout_K_SW32_Atom<TypeB>{}, mma_shape_B);
+
+     auto tCsA = cute::make_tensor(cute::make_smem_ptr(af16_smem), sA_layout);
+     auto tCsB = cute::make_tensor(cute::make_smem_ptr(bf16_smem), sB_layout);
+
+     auto tCrA = cute::make_tensor<cute::UMMA::smem_desc<cute::UMMA::Major::K>>(tCsA);
+     auto tCrB = cute::make_tensor<cute::UMMA::smem_desc<cute::UMMA::Major::K>>(tCsB);
+
+     cute::UMMA::SmemDescriptor a_smem_desc = *tCrA.data();
+     cute::UMMA::SmemDescriptor b_smem_desc = *tCrB.data();
+
+     uint64_t a_desc = static_cast<uint64_t>(a_smem_desc);
+     uint64_t b_desc = static_cast<uint64_t>(b_smem_desc);
+
+     uint64_t idescE = cute::UMMA::make_runtime_instr_desc<
+         TypeA, TypeB, TypeC,
+         /*M*/ 128, /*N*/ 128,
+         cute::UMMA::Major::K,
+         cute::UMMA::Major::K>();
+
+     uint32_t scaleC = 1u;
+
+     // One tcgen05.mma FMA into TMEM for this K-tile
+     MmaOp::fma(a_desc, b_desc, tmem_c, scaleC, idescE);
+     ```
+
+     - Use `half` from this kernel instead of `half_t` if that is the local typedef.  
+     - Make sure `128x128x128` matches the actual CTA tile shape used in `fp4gemm_rank2_cta` (current code asserts `TileM=128`, `TileN=128`, `TileK=128`).[5][1]
+
+   - For now, do **not** try to read TMEM back into `caccum`. Keep the existing `caccum` / epilogue path in the classic branch; in the tcgen05 branch you can leave D unwritten or just treat this as a timing-only mainloop until you decide on a TMEM→register mapping.
+
+4. **Build & sanity check.**
+
+   - Ensure the CUDA source in `submission.py` still includes:
+
+     ```cpp
+     #include <cute/tensor.hpp>
+     #include <cute/arch/mma_sm100_umma.hpp>
+     #include <cute/arch/mma_sm100_desc.hpp>
+     ```
 
 </TODOs>
 

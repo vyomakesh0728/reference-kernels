@@ -22,6 +22,9 @@ cuda_source = r"""
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
+#include <cute/tensor.hpp>
+#include <cute/arch/mma_sm100_umma.hpp>
+#include <cute/arch/mma_sm100_desc.hpp>
 
 // ===== HELPER FUNCTIONS =====
 
@@ -888,10 +891,11 @@ fp4_gemm_rank2_cta(
         }
     }
     #else  // USE_tcgen05_MAINLOOP
-    // tcgen05-based mainloop stub body for Blackwell (SM100/SM100a).
-    // Chosen logical tile: WG_M=128, WG_N=128, WG_K=64.
-    half *smem_A_tcgen05 = a_f16_smem;  // expected layout: [WG_M, WG_K] row-major
-    half *smem_B_tcgen05 = b_f16_smem;  // expected layout: [WG_K, WG_N]
+    // tcgen05-based mainloop body for Blackwell (SM100/SM100a) using TMEM + UMMA.
+    half *smem_A_tcgen05 = a_f16_smem;  // [TileM, TileK] row-major
+    half *smem_B_tcgen05 = b_f16_smem;  // [TileK, TileN]
+
+    __shared__ uint32_t tmem_base_ptr_tcgen05;
 
     // Prologue: prefetch stages 0..StageCount-2 (same as classic path).
     int phase = 0;
@@ -908,8 +912,22 @@ fp4_gemm_rank2_cta(
         }
     }
 
-    // Per-thread dummy accumulators for tcgen05 path (not written to D yet).
-    float wg_accum[4] = {0.f, 0.f, 0.f, 0.f};
+    // Allocate TMEM once per CTA using a fully active warp 0
+    __syncthreads();
+    if (tid == 0) {
+        tmem_base_ptr_tcgen05 = 0;
+    }
+    __syncthreads();
+    if (warp_id == 0) {
+        uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr_tcgen05);
+        int num_cols = 256;  // >0, <512, power of 2, multiple of 32
+        asm volatile(
+            "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
+            :
+            : "r"(dst_smem), "r"(num_cols));
+    }
+    __syncthreads();
+    uint32_t tmem_c = tmem_base_ptr_tcgen05;
 
     for (int k_tile = 0; k_tile < K; k_tile += TileK) {
         int stage = (k_tile / TileK) % StageCount;
@@ -928,41 +946,54 @@ fp4_gemm_rank2_cta(
         mbarrier_wait_parity(mbar_stage(mbar_b, stage), phase);
         __syncthreads();
 
-        // Minimal tcgen05 mainloop body: issue a single tcgen05.mma from a
-        // designated consumer warpgroup (warps 0..3). This is a placeholder
-        // and does not yet map TMEM accumulators back into wg_accum.
         #if __CUDA_ARCH__ >= 1000
-        if (warp_id < 4) {
-            // Construct dummy SMEM descriptors from the base shared-memory addresses.
-            // See Colfax "Writing GEMM Kernels Using Tensor Memory for NVIDIA Blackwell GPUs",
-            // section "tcgen05.mma", and PTX ISA 8.7 tcgen05.mma description.
-            uint64_t a_desc = static_cast<uint64_t>(cvta_to_shared_u32(smem_B_tcgen05));
-            uint64_t b_desc = static_cast<uint64_t>(cvta_to_shared_u32(smem_B_tcgen05));
-            uint32_t idesc = 0;            // TODO: set shape / datatype fields for real kernel
-            uint32_t enable_input_d = 1;   // accumulate into existing TMEM accumulator
-            uint32_t d_tmem = 0;          // placeholder TMEM address
-            uint32_t disable_output_lane[4] = {0u, 0u, 0u, 0u};
-            uint32_t scale_input_d = 0u;   // no extra scaling on input D
+        // Use UMMA SM100_MMA_F16BF16_SS to perform a single tcgen05.mma FMA into TMEM.
+        using TypeA = half;
+        using TypeB = half;
+        using TypeC = float;
 
-            asm volatile(
-                "tcgen05.mma.cta_group::1.kind::f16 "
-                "[%0], %1, %2, %3, {%4, %5, %6, %7}, %8, %9;\n"
-                :
-                : "r"(d_tmem),
-                  "l"(a_desc),
-                  "l"(b_desc),
-                  "r"(idesc),
-                  "r"(disable_output_lane[0]),
-                  "r"(disable_output_lane[1]),
-                  "r"(disable_output_lane[2]),
-                  "r"(disable_output_lane[3]),
-                  "r"(enable_input_d),
-                  "r"(scale_input_d)
-            );
+        using MmaOp = cute::SM100_MMA_F16BF16_SS<
+            TypeA, TypeB, TypeC,
+            128, 128,
+            cute::UMMA::Major::K,
+            cute::UMMA::Major::K>;
 
-            // Keep wg_accum referenced so it can later be wired to TMEM readback.
-            wg_accum[0] += 0.0f;
-        }
+        using TiledMMA = decltype(cute::make_tiled_mma(MmaOp{}));
+        TiledMMA tiled_mma = cute::make_tiled_mma(MmaOp{});
+
+        auto bM = cute::tile_size<0>(tiled_mma);
+        auto bN = cute::tile_size<1>(tiled_mma);
+        auto bK = cute::tile_size<2>(tiled_mma);
+
+        auto mma_shape_A = cute::partition_shape_A(tiled_mma, cute::make_shape(bM, bK));
+        auto mma_shape_B = cute::partition_shape_B(tiled_mma, cute::make_shape(bN, bK));
+
+        auto sA_layout = cute::UMMA::tile_to_mma_shape(
+            cute::UMMA::Layout_K_SW32_Atom<TypeA>{}, mma_shape_A);
+        auto sB_layout = cute::UMMA::tile_to_mma_shape(
+            cute::UMMA::Layout_K_SW32_Atom<TypeB>{}, mma_shape_B);
+
+        auto tCsA = cute::make_tensor(cute::make_smem_ptr(smem_A_tcgen05), sA_layout);
+        auto tCsB = cute::make_tensor(cute::make_smem_ptr(smem_B_tcgen05), sB_layout);
+
+        auto tCrA = cute::make_tensor<cute::UMMA::smem_desc<cute::UMMA::Major::K>>(tCsA);
+        auto tCrB = cute::make_tensor<cute::UMMA::smem_desc<cute::UMMA::Major::K>>(tCsB);
+
+        cute::UMMA::SmemDescriptor a_smem_desc = *tCrA.data();
+        cute::UMMA::SmemDescriptor b_smem_desc = *tCrB.data();
+
+        uint64_t a_desc = static_cast<uint64_t>(a_smem_desc);
+        uint64_t b_desc = static_cast<uint64_t>(b_smem_desc);
+
+        uint64_t idescE = cute::UMMA::make_runtime_instr_desc<
+            TypeA, TypeB, TypeC,
+            128, 128,
+            cute::UMMA::Major::K,
+            cute::UMMA::Major::K>();
+
+        uint32_t scaleC = 1u;  // overwrite accumulator on first use
+
+        MmaOp::fma(a_desc, b_desc, tmem_c, scaleC, idescE);
         #endif  // __CUDA_ARCH__ >= 1000
 
         __syncthreads();
@@ -970,7 +1001,16 @@ fp4_gemm_rank2_cta(
             phase ^= 1;
         }
     }
-    // TODO: Map tcgen05 accumulators to c_accum / D epilogue once layout is defined.
+
+    // Free TMEM allocation once per CTA (same warp configuration as alloc)
+    if (warp_id == 0) {
+        uint32_t cols  = 256;
+        uint32_t taddr = tmem_c;
+        asm volatile(
+            "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n"
+            :
+            : "r"(taddr), "r"(cols));
+    }
     #endif  // !USE_tcgen05_MAINLOOP
 #endif
 }
@@ -1851,7 +1891,7 @@ def debug_scales(data: input_t) -> None:
     b_scale_offset = (b_scale + offset);
     c_offset = (out_a * a_scale_offset) @ (out_b * b_scale_offset).T;
     diff_offset = (c_offset - c_ref_mm).abs();
-    print(f"Scale+{offset} GEMM max abs diff: {diff_offset.max().item()}");
+    print(f"\nScale+{offset} GEMM max abs diff: {diff_offset.max().item()}");
     
     # === Try 2^(scale + offset) ===
     a_scale_pow2_off = torch.pow(2.0, (a_scale + 1).float()).half();
