@@ -166,7 +166,7 @@ int main() {
 
     cudaLaunchAttribute attrs[1];
     attrs[0].id = cudaLaunchAttributeClusterDimension;
-    attrs[0].val.clusterDim.x = 1;  // cluster size = 1 CTA
+    attrs[0].val.clusterDim.x = 2;  // cluster size = 1 CTA
     attrs[0].val.clusterDim.y = 1;
     attrs[0].val.clusterDim.z = 1;
     config.attrs = attrs;
