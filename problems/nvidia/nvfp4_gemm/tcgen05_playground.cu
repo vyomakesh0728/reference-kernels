@@ -172,12 +172,9 @@ int main() {
     config.attrs = attrs;
     config.numAttrs = 1;
 
-    void* args[] = {&dA, &dB, &dC};
-    cudaLaunchKernelEx(&config, (void*)tcgen05_kernel, args, 0, 0);
-
+    cudaError_t launch_err = cudaLaunchKernelEx(&config, tcgen05_kernel, dA, dB, dC);
 
     // CRITICAL: Check launch errors first (PTX assembly issues)
-    cudaError_t launch_err = cudaGetLastError();
     if (launch_err != cudaSuccess) {
         std::fprintf(stderr, "Kernel launch error: %s\n",
                     cudaGetErrorString(launch_err));
