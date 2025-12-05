@@ -138,41 +138,21 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
         cute::UMMA::Major::K>();
 
     uint32_t scaleC = 1u;  // overwrite accumulator on first use
-    uint32_t mask[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
-
-    // Issue a single tcgen05.mma.cta_group::1.kind::f16 using the CUTLASS UMMA signature.
-    if (tid == 0) {
-        asm volatile(
-            "{\n\t"
-            ".reg .pred p;\n\t"
-            "setp.ne.b32 p, %4, 0;\n\t"
-            "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, {%5, %6, %7, %8}, p;\n"
-            "}\n"
-            :
-            : "r"(tmem_c),
-              "l"(a_desc),
-              "l"(b_desc),
-              "r"(static_cast<uint32_t>(idescE >> 32)),
-              "r"(scaleC),
-              "r"(mask[0]),
-              "r"(mask[1]),
-              "r"(mask[2]),
-              "r"(mask[3]));
-    }
+    MmaOp::fma(a_desc, b_desc, tmem_c, scaleC, idescE);
 
     // Use tcgen05.ld to read back a small portion of the accumulator tile from TMEM.
-    volatile uint32_t acc0 = 0, acc1 = 0;
-    if (warpid == 0) {
-        asm volatile(
-            "tcgen05.ld.sync.aligned.16x128b.x1.b32 "
-            "{%0, %1}, [%2];\n"
-            : "=r"(acc0), "=r"(acc1)
-            : "r"(tmem_c));
-    }
+    // volatile uint32_t acc0 = 0, acc1 = 0;
+    // if (warpid == 0) {
+    //    asm volatile(
+    //        "tcgen05.ld.sync.aligned.16x128b.x1.b32 "
+    //        "{%0, %1}, [%2];\n"
+    //        : "=r"(acc0), "=r"(acc1)
+    //        : "r"(tmem_c));
+    //}
     // Only thread 0 prints, using its lane's acc0/acc1
-    if (tid == 0) {
-        printf("TMEM readback: acc0=%u acc1=%u\n", acc0, acc1);
-    }
+    // if (tid == 0) {
+    //    printf("TMEM readback: acc0=%u acc1=%u\n", acc0, acc1);
+    //}
     // Free TMEM allocation (same warp, same column count as alloc)
     if (warpid == 0 && laneid == 0) {
         uint32_t cols = 512;
