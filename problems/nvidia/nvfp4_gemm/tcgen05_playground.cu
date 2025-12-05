@@ -64,26 +64,8 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
 
     __syncthreads();
 
-        // Allocate TMEM - ALL threads must participate (collective operation)
-    if (tid == 0) {
-        tmem_base_ptr = 0;  // Initialize
-    }
-    __syncthreads();
-    
-    // ALL threads execute this (remove the if statement!)
-    {
-        uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr);
-        int num_columns = 512;  // full SM100 TMEM slice
-        asm volatile(
-            "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
-            :
-            : "r"(dst_smem), "r"(num_columns));
-    }
-
-    __syncthreads();
-
-
-    uint32_t tmem_c = tmem_base_ptr;
+    //uint32_t tmem_c = tmem_base_ptr;
+    uint32_t tmem_c = 0;
 
     // Construct simple SMEM descriptors from the base shared-memory addresses.
     uint64_t a_desc = static_cast<uint64_t>(cvta_to_shared_u32(smem_A));
