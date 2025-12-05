@@ -83,6 +83,7 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
 
     // Issue a single tcgen05.mma.cta_group::1.kind::f16 using the CUTLASS UMMA signature.
     if (tid == 0) {
+        /*
         asm volatile(
             "{\n\t"
             ".reg .pred p;\n\t"
@@ -99,6 +100,8 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
               "r"(mask[1]),
               "r"(mask[2]),
               "r"(mask[3]));
+        */
+        printf("Skipped tcgen05.mma - checking if kernel completes\n");
     }
 
     // Use tcgen05.ld to read back a small portion of the accumulator tile from TMEM.
