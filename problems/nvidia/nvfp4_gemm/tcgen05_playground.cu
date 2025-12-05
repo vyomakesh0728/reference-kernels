@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 #include "cutlass/numeric_types.h"
+#include <cute/tensor.hpp>
+#include <cute/arch/mma_sm100_umma.hpp>
 #include <cute/arch/mma_sm100_desc.hpp>
 
 using cutlass::half_t;
@@ -88,14 +90,46 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
 
     uint32_t tmem_c = tmem_base_ptr;
 
+    using TypeA = half_t;
+    using TypeB = half_t;
+    using TypeC = float;
 
-    // Construct simple SMEM descriptors from the base shared-memory addresses.
-    uint64_t a_desc = static_cast<uint64_t>(cvta_to_shared_u32(smem_A));
-    uint64_t b_desc = static_cast<uint64_t>(cvta_to_shared_u32(smem_B));
+    using MmaOp = cute::SM100_MMA_F16BF16_SS<
+        TypeA, TypeB, TypeC,
+        M, N,
+        cute::UMMA::Major::K,
+        cute::UMMA::Major::K>;
+
+    using TiledMMA = decltype(cute::make_tiled_mma(MmaOp{}));
+    TiledMMA tiled_mma = cute::make_tiled_mma(MmaOp{});
+
+    auto bM = cute::tile_size<0>(tiled_mma);
+    auto bN = cute::tile_size<1>(tiled_mma);
+    auto bK = cute::tile_size<2>(tiled_mma);
+
+    auto mma_shape_A = cute::partition_shape_A(tiled_mma, cute::make_shape(bM, bK));
+    auto mma_shape_B = cute::partition_shape_B(tiled_mma, cute::make_shape(bN, bK));
+
+    auto sA_layout = cute::UMMA::tile_to_mma_shape(
+        cute::UMMA::Layout_K_SW128_Atom<TypeA>{}, mma_shape_A);
+    auto sB_layout = cute::UMMA::tile_to_mma_shape(
+        cute::UMMA::Layout_K_SW128_Atom<TypeB>{}, mma_shape_B);
+
+    auto tCsA = cute::make_tensor(cute::make_smem_ptr(smem_A), sA_layout);
+    auto tCsB = cute::make_tensor(cute::make_smem_ptr(smem_B), sB_layout);
+
+    auto tCrA = cute::make_tensor<cute::UMMA::smem_desc<cute::UMMA::Major::K>>(tCsA);
+    auto tCrB = cute::make_tensor<cute::UMMA::smem_desc<cute::UMMA::Major::K>>(tCsB);
+
+    cute::UMMA::SmemDescriptor a_smem_desc = *tCrA.data();
+    cute::UMMA::SmemDescriptor b_smem_desc = *tCrB.data();
+
+    uint64_t a_desc = static_cast<uint64_t>(a_smem_desc);
+    uint64_t b_desc = static_cast<uint64_t>(b_smem_desc);
 
     // Build an instruction descriptor for F16xF16->F32, MxN = 128x128, K-major A/B.
     uint64_t idescE = cute::UMMA::make_runtime_instr_desc<
-        half_t, half_t, float,
+        TypeA, TypeB, TypeC,
         M, N,
         cute::UMMA::Major::K,
         cute::UMMA::Major::K>();
