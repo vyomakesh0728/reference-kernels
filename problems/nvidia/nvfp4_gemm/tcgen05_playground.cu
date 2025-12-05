@@ -64,8 +64,23 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
 
     __syncthreads();
 
-    //uint32_t tmem_c = tmem_base_ptr;
-    uint32_t tmem_c = 0;
+    // Allocate TMEM - ALL threads must participate (collective operation)
+    if (tid == 0) {
+        tmem_base_ptr = 0;  // Initialize
+    }
+    __syncthreads();
+    
+    // ALL threads execute this (remove the if statement!)
+    {
+        uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr);
+        int num_columns = 512;  // full SM100 TMEM slice
+        asm volatile(
+            "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
+            :
+            : "r"(dst_smem), "r"(num_columns));
+    }
+
+    __syncthreads();
 
     // Construct simple SMEM descriptors from the base shared-memory addresses.
     uint64_t a_desc = static_cast<uint64_t>(cvta_to_shared_u32(smem_A));
@@ -83,7 +98,6 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
 
     // Issue a single tcgen05.mma.cta_group::1.kind::f16 using the CUTLASS UMMA signature.
     if (tid == 0) {
-        /*
         asm volatile(
             "{\n\t"
             ".reg .pred p;\n\t"
@@ -100,20 +114,16 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
               "r"(mask[1]),
               "r"(mask[2]),
               "r"(mask[3]));
-        */
-        printf("Skipped tcgen05.mma - checking if kernel completes\n");
     }
 
     // Use tcgen05.ld to read back a small portion of the accumulator tile from TMEM.
     volatile uint32_t acc0 = 0, acc1 = 0;
     if (tid == 0) {
-        /*
         asm volatile(
             "tcgen05.ld.sync.aligned.16x128b.x1.b32 "
             "{%0, %1}, [%2];\n"
             : "=r"(acc0), "=r"(acc1)
             : "r"(tmem_c));
-        */
         printf("TMEM readback: acc0=%u acc1=%u\n", acc0, acc1);
     }
 #endif
@@ -146,7 +156,22 @@ int main() {
     dim3 block(128, 1, 1);
     std::size_t smem_bytes = (static_cast<std::size_t>(M) * K + static_cast<std::size_t>(K) * N) * sizeof(half_t);
 
-    tcgen05_kernel<<<grid, block, smem_bytes>>>(dA, dB, dC);
+    // Use cluster launch for tcgen05 instructions
+    cudaLaunchConfig_t config = {};
+    config.gridDim = grid;
+    config.blockDim = block;
+    config.dynamicSmemBytes = smem_bytes;
+
+    cudaLaunchAttribute attrs[1];
+    attrs[0].id = cudaLaunchAttributeClusterDimension;
+    attrs[0].val.clusterDim.x = 1;  // cluster size = 1 CTA
+    attrs[0].val.clusterDim.y = 1;
+    attrs[0].val.clusterDim.z = 1;
+    config.attrs = attrs;
+    config.numAttrs = 1;
+
+    cudaLaunchKernelEx(&config, (void*)tcgen05_kernel, dA, dB, dC);
+
     // CRITICAL: Check launch errors first (PTX assembly issues)
     cudaError_t launch_err = cudaGetLastError();
     if (launch_err != cudaSuccess) {
