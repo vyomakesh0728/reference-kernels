@@ -152,7 +152,7 @@ int main() {
     std::size_t smem_bytes = (static_cast<std::size_t>(M) * K + static_cast<std::size_t>(K) * N) * sizeof(half_t);
 
     tcgen05_kernel<<<grid, block, smem_bytes>>>(dA, dB, dC);
-    cudaDeviceSynchronize();
+    cudaError_t err = cudaDeviceSynchronize(); 
     if (err != cudaSuccess) {
     std::fprintf(stderr, "cudaDeviceSynchronize error: %s\n",
                  cudaGetErrorString(err));
