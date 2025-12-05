@@ -26,6 +26,8 @@ cuda_source = r"""
 #include <cute/arch/mma_sm100_umma.hpp>
 #include <cute/arch/mma_sm100_desc.hpp>
 
+using cutlass::half_t;
+
 // ===== HELPER FUNCTIONS =====
 
 inline void check_cuda(cudaError_t code, const char* msg) {
@@ -759,6 +761,10 @@ fp4_gemm_rank2_cta(
     align_up_smem_128();
     half* b_f16_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(TileN) * b_stride * sizeof(half);
+    
+    align_up_smem_128();
+    float* c_smem_from_tmem = reinterpret_cast<float*>(smem + offset);
+    offset += static_cast<size_t>(TileM) * static_cast<size_t>(TileN) * sizeof(float);
 
     (void)offset;
 
@@ -948,8 +954,8 @@ fp4_gemm_rank2_cta(
 
         #if __CUDA_ARCH__ >= 1000
         // Use UMMA SM100_MMA_F16BF16_SS to perform a single tcgen05.mma FMA into TMEM.
-        using TypeA = half;
-        using TypeB = half;
+        using TypeA = half_t;  // cutlass::half_t
+        using TypeB = half_t;
         using TypeC = float;
 
         using MmaOp = cute::SM100_MMA_F16BF16_SS<
@@ -991,14 +997,112 @@ fp4_gemm_rank2_cta(
             cute::UMMA::Major::K,
             cute::UMMA::Major::K>();
 
-        uint32_t scaleC = 1u;  // overwrite accumulator on first use
-
-        MmaOp::fma(a_desc, b_desc, tmem_c, scaleC, idescE);
+        constexpr int FmasPerSlice = 8;
+        for (int fma_i = 0; fma_i < FmasPerSlice; ++fma_i) {
+            uint32_t scaleC = (k_tile == 0 && fma_i == 0) ? 1u : 0u;
+            MmaOp::fma(a_desc, b_desc, tmem_c, scaleC, idescE);
+        }
         #endif  // __CUDA_ARCH__ >= 1000
 
         __syncthreads();
         if ((k_tile / TileK) % StageCount == StageCount - 1) {
             phase ^= 1;
+        }
+    }
+
+    // TMEM -> SMEM epilogue: load accumulator tile from TMEM into c_smem_from_tmem
+    #if __CUDA_ARCH__ >= 1000
+    if (warp_id == 0) {
+        for (int row = 0; row < TileM; ++row) {
+            for (int col_block = 0; col_block < TileN; col_block += 32) {
+                uint32_t src_addr = tmem_c + row * TileN + col_block;
+                uint32_t val;
+                asm volatile(
+                    "tcgen05.ld.sync.aligned.32x32b.x1.b32 {%0}, [%1];\n"
+                    : "=r"(val)
+                    : "r"(src_addr));
+
+                int lane_col = col_block + lane_id;
+                if (lane_col < TileN) {
+                    int idx = row * TileN + lane_col;
+                    float f = __int_as_float(static_cast<int>(val));
+                    c_smem_from_tmem[idx] = f;
+                }
+            }
+        }
+    }
+    __syncthreads();
+    #endif
+
+    // SMEM -> global D epilogue using same m16n8k16 lane mapping as classic path
+    {
+        constexpr int MMA_M = 16;
+        constexpr int MMA_N = 8;
+        constexpr int WARP_TILE_M = 4;
+        constexpr int WARP_TILE_N = 4;
+
+        int warp_m = warp_id % 2;
+        int warp_n = warp_id / 2;
+
+        int lane_row_group = lane_id / 4; // 0..7
+        int lane_col_group = lane_id % 4; // 0..3
+
+        int row0 = lane_row_group;
+        int row1 = lane_row_group + 8;
+        int col0 = lane_col_group * 2;
+        int col1 = col0 + 1;
+
+        for (int i = 0; i < WARP_TILE_M; ++i) {
+            for (int j = 0; j < WARP_TILE_N; ++j) {
+                int tile_row_base = m_tile + warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
+                int tile_col_base = n_tile + warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
+
+                int global_row0 = tile_row_base + row0;
+                int global_row1 = tile_row_base + row1;
+                int global_col0 = tile_col_base + col0;
+                int global_col1 = tile_col_base + col1;
+
+                if (global_row0 < M) {
+                    if (global_col0 < N) {
+                        int local_row0 = global_row0 - m_tile;
+                        int local_col0 = global_col0 - n_tile;
+                        if (local_row0 >= 0 && local_row0 < TileM &&
+                            local_col0 >= 0 && local_col0 < TileN) {
+                            float v = c_smem_from_tmem[local_row0 * TileN + local_col0];
+                            D[global_row0 * N + global_col0] = __float2half(v);
+                        }
+                    }
+                    if (global_col1 < N) {
+                        int local_row0 = global_row0 - m_tile;
+                        int local_col1 = global_col1 - n_tile;
+                        if (local_row0 >= 0 && local_row0 < TileM &&
+                            local_col1 >= 0 && local_col1 < TileN) {
+                            float v = c_smem_from_tmem[local_row0 * TileN + local_col1];
+                            D[global_row0 * N + global_col1] = __float2half(v);
+                        }
+                    }
+                }
+                if (global_row1 < M) {
+                    if (global_col0 < N) {
+                        int local_row1 = global_row1 - m_tile;
+                        int local_col0 = global_col0 - n_tile;
+                        if (local_row1 >= 0 && local_row1 < TileM &&
+                            local_col0 >= 0 && local_col0 < TileN) {
+                            float v = c_smem_from_tmem[local_row1 * TileN + local_col0];
+                            D[global_row1 * N + global_col0] = __float2half(v);
+                        }
+                    }
+                    if (global_col1 < N) {
+                        int local_row1 = global_row1 - m_tile;
+                        int local_col1 = global_col1 - n_tile;
+                        if (local_row1 >= 0 && local_row1 < TileM &&
+                            local_col1 >= 0 && local_col1 < TileN) {
+                            float v = c_smem_from_tmem[local_row1 * TileN + local_col1];
+                            D[global_row1 * N + global_col1] = __float2half(v);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1835,7 +1939,7 @@ def debug_scales(data: input_t) -> None:
     print(f"Pow2-partial-sum GEMM max rel diff: {max_rel_pow2_partial}");
     print(f"c_pow2_partial[0,0] = {c_pow2_partial_fp16[0,0].item()}");
     
-    # Compute what average pow2 scale product would be for [0,0]
+    # Compute what average pow2 scale product would be for row 0
     pow2_a = torch.pow(2.0, sfa_ref16[0,:].float());
     pow2_b = torch.pow(2.0, sfb_ref16[0,:].float());
     pow2_products = pow2_a * pow2_b;
