@@ -82,6 +82,8 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
 
     __syncthreads();
 
+    uint32_t tmem_c = tmem_base_ptr; 
+
     // Construct simple SMEM descriptors from the base shared-memory addresses.
     uint64_t a_desc = static_cast<uint64_t>(cvta_to_shared_u32(smem_A));
     uint64_t b_desc = static_cast<uint64_t>(cvta_to_shared_u32(smem_B));
@@ -170,7 +172,9 @@ int main() {
     config.attrs = attrs;
     config.numAttrs = 1;
 
-    cudaLaunchKernelEx(&config, (void*)tcgen05_kernel, dA, dB, dC);
+    void* args[] = {&dA, &dB, &dC};
+    cudaLaunchKernelEx(&config, (void*)tcgen05_kernel, args, 0, 0);
+
 
     // CRITICAL: Check launch errors first (PTX assembly issues)
     cudaError_t launch_err = cudaGetLastError();
