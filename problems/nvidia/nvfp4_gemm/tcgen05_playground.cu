@@ -153,6 +153,11 @@ int main() {
 
     tcgen05_kernel<<<grid, block, smem_bytes>>>(dA, dB, dC);
     cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+    std::fprintf(stderr, "cudaDeviceSynchronize error: %s\n",
+                 cudaGetErrorString(err));
+    return 1;
+}
 
     cudaMemcpy(hC, dC, size_C * sizeof(float), cudaMemcpyDeviceToHost);
 
