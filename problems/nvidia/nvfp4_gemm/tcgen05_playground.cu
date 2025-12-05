@@ -98,7 +98,7 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
             "{\n\t"
             ".reg .pred p;\n\t"
             "setp.ne.b32 p, %4, 0;\n\t"
-            "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, {%5, %6, %7, %8}, p; \\n\t"
+            "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, {%5, %6, %7, %8}, p;\n"
             "}\n"
             :
             : "r"(tmem_c),
