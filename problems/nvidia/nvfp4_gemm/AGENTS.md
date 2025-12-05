@@ -84,94 +84,86 @@ KEEP ONLY:
 # NVFP4 GEMM Agent Plan (Updated)
 
 <TODOs>
+use @morph tools to ease search/edits. 
 
-In `problems/nvidia/nvfp4_gemm/submission.py`, update the `#else  // USE_WGMMA_MAINLOOP` branch of `fp4_gemm_rank2_cta` to use **Blackwell tcgen05 tensor core instructions** instead of Hopper WGMMA, while leaving the classic `mma.sync` path (`#if !USE_WGMMA_MAINLOOP`) completely unchanged.
+Workspace context:
+- This repo is the NVFP4 GEMM competition harness.  
+- There is a **full, up-to-date CUTLASS repo** at `./cutlass`
+- I want a **standalone minimal .cu file** to experiment with `tcgen05.mma` + TMEM on SM100/SM100a, outside of the main sub kernel.
 
-**Context / constraints**
-- The current `#else` block contains a WGMMA stub:
-  ```cpp
-  // WGMMA-based mainloop stub body.
-  // Chosen WGMMA tile (logical): WG_M=128, WG_N=128, WG_K=64.
-  // Consumer warpgroup: warps 0..3 (128 threads). Other warps are idle in this branch.
-  ...
-  if (warp_id < 4) {
-      uint32_t smem_a_addr = cvta_to_shared_u32(smem_A_wgmma);
-      uint32_t smem_b_addr = cvta_to_shared_u32(smem_B_wgmma);
-      asm volatile(
-          "wgmma.fence.sync.aligned;\\n"
-          "wgmma.mma_async.sync.aligned.m64n128k16.f16.f16.f16 "
-          "{%0, %1, %2, %3}, %4, %5, %6, 1, 1, 0;\\n"
-          "wgmma.commit_group.sync.aligned;\\n"
-          "wgmma.wait_group.sync.aligned 0;\\n"
-          : "+f"(wg_accum[0]), "+f"(wg_accum[1]), "+f"(wg_accum[2]), "+f"(wg_accum[3])
-          : "r"(smem_a_addr), "r"(smem_b_addr), "r"(0)
-      );
-  }
+### Goal
+Create a single CUDA source file `tcgen05_playground.cu` that:
+- Compiles with:
+  ```bash
+  nvcc -std=c++17 -O3 -arch=sm_100a -I./cutlass/include tcgen05_playground.cu -o tcgen05_playground
   ```
-- This does not assemble for `.target sm_100a` because WGMMA is Hopper‑only; Blackwell uses **tcgen05.mma** instead.[2][4]
-- Keep `#define USE_WGMMA_MAINLOOP 0` as the default in this repo so the contest harness never tries to compile or run this path; the tcgen05 branch is for local SM100/SM100a testing only.[1]
+- Launches a **tiny GEMM-like kernel** that:
+  - Allocates TMEM with `tcgen05.alloc`.[2][3]
+  - Loads small A/B tiles (e.g. 128×16 and 16×128 of `half`) from GMEM into SMEM.  
+  - Issues a **single `tcgen05.mma.cta_group::1`** instruction to compute C = A×B, accumulating into TMEM.[4][3]
+  - Uses `tcgen05.ld` (or the CUTLASS “UMMA” abstractions) to read accumulators back from TMEM into registers/SMEM.[2]
+  - Writes the final C tile to GMEM so the host can print a few values.
+- The primary objective is: **ptxas must accept the `tcgen05.mma` and `tcgen05.ld` instructions with correct operands and descriptors** on SM100/SM100a.
 
-**Goal**
-Replace the WGMMA inline PTX inside the `#else  // USE_WGMMA_MAINLOOP` branch with a **minimal, compiling tcgen05.mma stub** that:
-- Only compiles when `__CUDA_ARCH__ = 1000` (SM100/SM100a).  
-- Issues a single **synchronous** `tcgen05.mma` op per K‑tile from a designated consumer warpgroup (warps 0..3).  
-- Accumulates into the existing `wg_accum[4]` array but does **not** write anything to `D` yet.  
-- Leaves everything else (TMA prologue, mbarriers, classic path) untouched.
+### Constraints / preferences
+- Keep it **as small and explicit as possible**:
+  - One `.cu` file, one kernel, one `main()`.  
+  - Hard-code a single tile, e.g. C is 128×128, K=16.  
+  - Initialize A and B on the host to all ones so C should be a constant (e.g. 16) everywhere.
+- It is fine (and preferred) to follow the Colfax / CUTLASS Blackwell tutorials and examples, but please:
+  - Inline the minimal needed code into this `.cu` instead of wiring the full CUTLASS GEMM stack.  
+  - Use CUTLASS headers only for **type helpers or macros**, not for launching a whole GEMM.[5][2]
+- Do **not** modify any existing files in this repo (especially not @sub ); just add `tcgen05_playground.cu`.
 
-**Step A: Clean up macro + guards**
-1. Ensure the global macro at the top reads:
-  ```cpp
-  // Enable advanced tcgen05-based mainloop when non-zero.
-  #ifndef USE_WGMMA_MAINLOOP
-  #define USE_WGMMA_MAINLOOP 0
-  #endif
-  ```
-  Do not change any `#if __CUDA_ARCH__ = 900` guards around the kernel; just add an extra `#if __CUDA_ARCH__ = 1000` around the tcgen05 inline PTX inside the `#else` branch.
-2. Inside the `#else  // USE_WGMMA_MAINLOOP` block, wrap the tcgen05 PTX with:
-  ```cpp
-  #if __CUDA_ARCH__ = 1000
-    // tcgen05.mma stub here
-  #endif
-  ```
-  so that older architectures see a no‑op mainloop (just TMA + waits + syncs, no tensor core instructions).
+### Implementation sketch
+Please implement roughly this flow (filling in the real PTX signatures and descriptors from the docs/examples):
 
-**Step B: Replace WGMMA with tcgen05.mma**
-1. In the `if (warp_id < 4)` block, delete the WGMMA inline PTX (`wgmma.fence`, `wgmma.mma_async`, `wgmma.commit_group`, `wgmma.wait_group`).[1]
-2. Replace it with a **single synchronous tcgen05.mma call** modeled after CUTLASS’s SM100 GEMM examples (e.g. `72a_blackwell_nvfp4_bf16_gemm`):[3][2]
-  - Use an instruction form that:
-    - Multiplies A and B tiles in SMEM (or TMEM) and accumulates into FP32 or FP16 C.  
-    - Has a compact M×N×K shape (e.g. 64×128×16 or 64×64×32) supported by tcgen05.  
-  - Use `smem_A_wgmma` and `smem_B_wgmma` as the base pointers for A and B operands. It is acceptable for this stub to treat the existing layout as row‑major [WG_M, WG_K] and [WG_K, WG_N] and ignore swizzle/optimal layout for now.
-  - Map the tcgen05 C fragment to `wg_accum[0..3]` as the accumulator operands (similar to how the WGMMA stub did, but adjusted to tcgen05’s operand ordering).
-  - Use a **synchronous** variant (e.g. `tcgen05.mma.sp.sync.aligned.*`) so you do **not** need explicit fence/commit/wait group calls in this stub.
-3. Add comments that reference the exact CUTLASS example and PTX ISA section you’re following, so it’s clear how to expand this later.
+1. **Host side (`main`)**
+  - Allocate device buffers:
+    - `A_dev`: shape, dtype `half`.[6]
+    - `B_dev`: shape, dtype `half`.[6]
+    - `C_dev`: shape, dtype `float` or `half`.[6]
+  - Initialize A and B on the host to 1.0, copy to device.
+  - Launch `tcgen05_kernel<<<1, 128` (one CTA of 128 threads).
+  - Copy `C_dev` back and print the first few elements (e.g. `C[0,0]`, `C[0,1]`) to verify they equal K.
 
-**Step C: Keep behavior and layout assumptions**
-1. Preserve the existing structure in the `#else` branch:
-  - TMA prefetch prologue over `s = 0..StageCount-2`.  
-  - Main `for (int k_tile = 0; k_tile < K; k_tile += TileK)` loop with prefetch of `next_k`, mbarrier waits on `mbar_a` and `mbar_b`, and `__syncthreads()` before and after the compute block.  
-  - Phase flipping at the end of each full pipeline cycle.[1]
-2. Keep the role of warps unchanged:
-  - Warps 0–3 are the tcgen05 consumer warpgroup (`if (warp_id < 4)`).  
-  - Other warps are effectively idle in this branch for now.
-3. Do **not** change or touch:
-  - The classic `mma.sync` path and its epilogue under `#if !USE_WGMMA_MAINLOOP`.  
-  - Any TMA descriptor setup or `prefetch_tile` implementation.  
-  - The FP4 decode path or shared‑memory layout used by the classic `process_tile` function.
+2. **Device side kernel (`tcgen05_kernel`)**
+  - Use dynamic shared memory to allocate A/B tiles:  
+    - `extern __shared__ uint8_t smem_raw[];`  
+    - Carve out `half* smem_A` and `half* smem_B` with simple contiguous layouts.
+  - Have one warp (or one thread) copy A and B from GMEM into SMEM with plain `ld.global` / `st.shared` loops (no TMA in this playground).  
+  - Synchronize the CTA.
+  - Have a **single elected thread** (e.g. `if (threadIdx.x == 0)`) perform:
+    - `tcgen05.alloc` to allocate TMEM for the accumulator.[2]
+    - Construction of A/B descriptors and the instruction descriptor (`idesc`) required by `tcgen05.mma`, using the PTX ISA 9.0 docs and/or Colfax tutorial as a guide.[7][2]
+    - A single `tcgen05.mma.cta_group::1.kind::f16 ...` call that:
+      - Reads operands from SMEM (A and B tiles).  
+      - Accumulates into TMEM.  
+    - A `tcgen05.ld` to copy the accumulator tile from TMEM into registers or SMEM.[2]
+    - A simple loop to write the resulting C tile to `C_dev`.
+  - Synchronize again if needed, then return.
 
-**Step D: No epilogue yet**
-1. Leave `wg_accum` unused outside the WGMMA/tcgen05 compute block; do not write it into `c_accum` or `D` yet.
-2. Keep the existing TODO:
-  ```cpp
-  // TODO: Map WGMMA/tcgen05 accumulators to c_accum / D epilogue once layout is defined.
-  ```
-  and update the comment to mention tcgen05 instead of WGMMA.
+3. **PTX details**
+  - Use **inline PTX** for `tcgen05.alloc`, `tcgen05.mma`, and `tcgen05.ld`.  
+  - The tcgen05 instructions and operand lists must be copied from **working examples**:
+    - The Colfax CUTLASS tutorial “Writing GEMM Kernels Using Tensor Memory for NVIDIA Blackwell GPUs” (UMMA / Tensor Memory).[8][2]
+    - CUTLASS example 04_mma_tma_2sm_sm100.cu or similar, already present under @cut
+    - The CUTLASS “Blackwell SM100 GEMMs” docs for supported `tcgen05.mma` kinds and operand conventions.
+  - **Important:** The current inline PTX in `submission.py` for `tcgen05.mma` causes  
+    `ptxas ... error   : Arguments mismatch for instruction 'tcgen05.mma'`.
+    In this playground, you must:
+    - Use a tcgen05 variant that ptxas actually accepts on `sm_100a`.  
+    - Ensure the number and types of operands (TMEM handle, A/B descriptors, instruction descriptor, lane disable mask, scale flags, etc.) exactly match the PTX ISA example.
 
-**Step E: Sanity checks (local, not in contest harness)**
-- Ensure the kernel **compiles for `sm_100` / `sm_100a`** with `USE_WGMMA_MAINLOOP` set to 1 using a recent CUDA toolchain that supports tcgen05 (check against the PTX ISA docs and CUTLASS Blackwell examples).[2][3]
-- With `USE_WGMMA_MAINLOOP` left at 0, confirm that:
-  - The PTX for tcgen05 is not emitted (no tcgen05 mnemonics in the generated SASS/PTX for the contest build).  
-  - All correctness tests and benchmarks behave exactly as before.
+4. **Sanity checks**
+  - Add a small comment block at the top of `tcgen05_playground.cu` describing:
+    - Which CUTLASS/Colfax example and PTX ISA section the tcgen05 usage is based on (file name + section heading).[3][2]
+  - After building and running:
+    - `./tcgen05_playground` should print that `C[0,0]`, `C[0,1]`, etc. are equal to K (e.g. 16.0f), proving the tcgen05 path works.
+
+### Deliverable
+- A single new file `tcgen05_playground.cu` checked into the repo root, with all the above behavior implemented and comments pointing back to the relevant CUTLASS / Colfax / PTX docs for tcgen05 and TMEM.
+- Do **not** touch any other files; I will later transplant the working inline PTX sequence into my `USE_tcgen05_MAINLOOP` branch in `submission.py` myself.
 
 </TODOs>
 
