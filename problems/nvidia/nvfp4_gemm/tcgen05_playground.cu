@@ -178,7 +178,7 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
         uint32_t cols = 512;
         uint32_t taddr = tmem_c;
         asm volatile(
-            "tcgen05.dealloc.cta_group::1.sync.aligned.b32 [%0], %1;\n"
+            "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n"
             :
             : "r"(taddr), "r"(cols));
     }
