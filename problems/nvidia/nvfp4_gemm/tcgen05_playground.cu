@@ -15,9 +15,17 @@ constexpr int N = 128;
 constexpr int K = 16;
 
 __device__ __forceinline__ uint32_t cvta_to_shared_u32(const void* ptr) {
-    uint32_t smem_ptr;
-    asm volatile("cvta.to.shared.u32 %0, %1;" : "=r"(smem_ptr) : "l"(ptr));
-    return smem_ptr;
+    uint32_t addr32;
+    asm volatile(
+        "{\n"
+        "  .reg .u64 addr64;\n"
+        "  cvta.to.shared.u64 addr64, %1;\n"
+        "  cvt.u32.u64 %0, addr64;\n"
+        "}\n"
+        : "=r"(addr32)
+        : "l"(ptr)
+    );
+    return addr32;
 }
 
 __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {

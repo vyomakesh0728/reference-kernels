@@ -4,6 +4,7 @@
         "unordered_map": "cpp",
         "map": "cpp",
         "__locale": "cpp",
-        "cmath": "cpp"
+        "cmath": "cpp",
+        "regex": "cpp"
     }
 }
