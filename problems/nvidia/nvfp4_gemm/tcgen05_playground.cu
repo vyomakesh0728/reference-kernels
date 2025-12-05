@@ -111,9 +111,12 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
     auto mma_shape_B = cute::partition_shape_B(tiled_mma, cute::make_shape(bN, bK));
 
     auto sA_layout = cute::UMMA::tile_to_mma_shape(
-        cute::UMMA::Layout_K_SW128_Atom<TypeA>{}, mma_shape_A);
+        cute::UMMA::Layout_K_SW32_Atom<TypeA>{},  // << change here
+        mma_shape_A);
+
     auto sB_layout = cute::UMMA::tile_to_mma_shape(
-        cute::UMMA::Layout_K_SW128_Atom<TypeB>{}, mma_shape_B);
+        cute::UMMA::Layout_K_SW32_Atom<TypeB>{},  // << and here
+        mma_shape_B);
 
     auto tCsA = cute::make_tensor(cute::make_smem_ptr(smem_A), sA_layout);
     auto tCsB = cute::make_tensor(cute::make_smem_ptr(smem_B), sB_layout);
