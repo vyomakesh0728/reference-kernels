@@ -64,8 +64,14 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
 
     __syncthreads();
 
-    // Allocate TMEM for a single accumulator tile using tcgen05.alloc.
+        // Allocate TMEM - ALL threads must participate (collective operation)
     if (tid == 0) {
+        tmem_base_ptr = 0;  // Initialize
+    }
+    __syncthreads();
+    
+    // ALL threads execute this (remove the if statement!)
+    {
         uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr);
         int num_columns = 512;  // full SM100 TMEM slice
         asm volatile(
@@ -75,6 +81,7 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
     }
 
     __syncthreads();
+
 
     uint32_t tmem_c = tmem_base_ptr;
 
@@ -89,8 +96,8 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
         cute::UMMA::Major::K,
         cute::UMMA::Major::K>();
 
-    uint32_t scaleC = 0u;  // overwrite accumulator on first use
-    uint32_t mask[4] = {0u, 0u, 0u, 0u};
+    uint32_t scaleC = 1u;  // overwrite accumulator on first use
+    uint32_t mask[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
 
     // Issue a single tcgen05.mma.cta_group::1.kind::f16 using the CUTLASS UMMA signature.
     if (tid == 0) {
@@ -120,6 +127,7 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
             "{%0, %1}, [%2];\n"
             : "=r"(acc0), "=r"(acc1)
             : "r"(tmem_c));
+        printf("TMEM readback: acc0=%u acc1=%u\n", acc0, acc1);
     }
 #endif
 }
