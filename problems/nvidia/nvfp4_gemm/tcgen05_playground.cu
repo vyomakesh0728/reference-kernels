@@ -62,27 +62,32 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
         }
     }
 
+    int warpid = tid >> 5;   // 0..3 for 128 threads
+    int laneid = tid & 31;
+
     __syncthreads();
 
-    // Allocate TMEM - ALL threads must participate (collective operation)
+    // Initialize shared location once
     if (tid == 0) {
-        tmem_base_ptr = 0;  // Initialize
+        tmem_base_ptr = 0;
     }
     __syncthreads();
-    
-    // ALL threads execute this (remove the if statement!)
-    {
+
+    // TMEM alloc must be issued by a *single warp* (e.g., warp 0)
+    if (warpid == 0) {
         uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr);
-        int num_columns = 512;  // full SM100 TMEM slice
+        int num_columns = 512;  // power-of-2, >= 32, per PTX/TMEM rules
         asm volatile(
             "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
             :
             : "r"(dst_smem), "r"(num_columns));
     }
 
+    // Make sure all threads see tmem_base_ptr
     __syncthreads();
 
-    uint32_t tmem_c = tmem_base_ptr; 
+    uint32_t tmem_c = tmem_base_ptr;
+
 
     // Construct simple SMEM descriptors from the base shared-memory addresses.
     uint64_t a_desc = static_cast<uint64_t>(cvta_to_shared_u32(smem_A));
@@ -120,12 +125,15 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
 
     // Use tcgen05.ld to read back a small portion of the accumulator tile from TMEM.
     volatile uint32_t acc0 = 0, acc1 = 0;
-    if (tid == 0) {
+    if (warpid == 0) {
         asm volatile(
             "tcgen05.ld.sync.aligned.16x128b.x1.b32 "
             "{%0, %1}, [%2];\n"
             : "=r"(acc0), "=r"(acc1)
             : "r"(tmem_c));
+    }
+    // Only thread 0 prints, using its lane's acc0/acc1
+    if (tid == 0) {
         printf("TMEM readback: acc0=%u acc1=%u\n", acc0, acc1);
     }
 #endif
@@ -166,7 +174,7 @@ int main() {
 
     cudaLaunchAttribute attrs[1];
     attrs[0].id = cudaLaunchAttributeClusterDimension;
-    attrs[0].val.clusterDim.x = 2;  // cluster size = 1 CTA
+    attrs[0].val.clusterDim.x = 1;  // cluster size = 1 CTA
     attrs[0].val.clusterDim.y = 1;
     attrs[0].val.clusterDim.z = 1;
     config.attrs = attrs;
