@@ -75,8 +75,8 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
     }
     __syncthreads();
 
-    // TMEM alloc must be issued by a *single warp* (e.g., warp 0)
-    if (warpid == 0 && laneid == 0) {
+    // TMEM alloc must be issued by a *single fully active warp* (e.g., warp 0)
+    if (warpid == 0) {
         uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr);
         int num_columns = 256;  // >0, <512, power of 2, multiple of 32
         asm volatile(
@@ -154,7 +154,7 @@ __global__ void tcgen05_kernel(const half_t* A, const half_t* B, float* C) {
     //    printf("TMEM readback: acc0=%u acc1=%u\n", acc0, acc1);
     //}
     // Free TMEM allocation (same warp, same column count as alloc)
-    if (warpid == 0 && laneid == 0) {
+    if (warpid == 0) {
         uint32_t cols = 256;
         uint32_t taddr = tmem_c;
         asm volatile(
