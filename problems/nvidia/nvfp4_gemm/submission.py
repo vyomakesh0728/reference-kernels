@@ -1010,30 +1010,6 @@ fp4_gemm_rank2_cta(
         }
     }
 
-    // TMEM -> SMEM epilogue: load accumulator tile from TMEM into c_smem_from_tmem
-    #if __CUDA_ARCH__ >= 1000
-    if (warp_id == 0) {
-        for (int row = 0; row < TileM; ++row) {
-            for (int col_block = 0; col_block < TileN; col_block += 32) {
-                uint32_t src_addr = tmem_c + row * TileN + col_block;
-                uint32_t val;
-                asm volatile(
-                    "tcgen05.ld.sync.aligned.32x32b.x1.b32 {%0}, [%1];\n"
-                    : "=r"(val)
-                    : "r"(src_addr));
-
-                int lane_col = col_block + lane_id;
-                if (lane_col < TileN) {
-                    int idx = row * TileN + lane_col;
-                    float f = __int_as_float(static_cast<int>(val));
-                    c_smem_from_tmem[idx] = f;
-                }
-            }
-        }
-    }
-    __syncthreads();
-    #endif
-
     // SMEM -> global D epilogue using same m16n8k16 lane mapping as classic path
     {
         constexpr int MMA_M = 16;
