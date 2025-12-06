@@ -25,6 +25,7 @@ cuda_source = r"""
 #include <cute/tensor.hpp>
 #include <cute/arch/mma_sm100_umma.hpp>
 #include <cute/arch/mma_sm100_desc.hpp>
+#include <cute/arch/copy_sm100.hpp>
 
 using cutlass::half_t;
 
@@ -1010,74 +1011,90 @@ fp4_gemm_rank2_cta(
         }
     }
 
-    // SMEM -> global D epilogue using same m16n8k16 lane mapping as classic path
+    // TMEM -> register -> global D epilogue using CuTe SM100_TMEM_LOAD atoms
     {
-        constexpr int MMA_M = 16;
-        constexpr int MMA_N = 8;
-        constexpr int WARP_TILE_M = 4;
-        constexpr int WARP_TILE_N = 4;
+        // Use SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy() for TMEM->register
+        // This loads 4 x 32-bit registers (128 bits = 4 floats) per call
+        // 16 data path lanes means 16 threads participate, each getting 4 floats
+        
+        // For 128x128 tile with 128 threads (4 warps), we need to cover all elements
+        // TMEM layout for MMA accumulator: 128 rows x 128 cols of float
+        // Each warp subpartition (32 threads within a warp) handles a portion
+        
+        // TMEM addressing: base + (row * 65536) + (col * sizeof(float))
+        // But SM100_TMEM_LOAD operates on warp subpartitions (groups of 16 threads)
+        
+        // Each warp has 2 subpartitions of 16 threads each
+        // Subpartition index within warp: (lane_id / 16)
+        // Lane within subpartition: (lane_id % 16)
+        
+        int subpart_in_warp = lane_id / 16;  // 0 or 1
+        int lane_in_subpart = lane_id % 16;  // 0..15
+        int global_subpart = warp_id * 2 + subpart_in_warp;  // 0..7 across CTA
+        
+        // Each of 8 subpartitions handles 16 rows (128 rows / 8 subparts)
+        int row_base = global_subpart * 16;
+        
+        // For each row, we need to load 128 columns
+        // SM100_TMEM_LOAD_16dp256b1x loads 4 floats per lane (16 lanes * 4 = 64 floats)
+        // So we need 2 loads per row to cover 128 columns
+        
+        constexpr int TMEM_COLS = 256;  // Must match alloc!
+        constexpr int TMEM_ROW_PITCH = TMEM_COLS * sizeof(float);  // 1024 bytes
 
-        int warp_m = warp_id % 2;
-        int warp_n = warp_id / 2;
+        #pragma unroll
+        for (int local_row = 0; local_row < 16; ++local_row) {
+            int global_row = m_tile + row_base + local_row;
+            if (global_row >= M) continue;
 
-        int lane_row_group = lane_id / 4; // 0..7
-        int lane_col_group = lane_id % 4; // 0..3
+            uint32_t tmem_row_base = tmem_c + (local_row * TMEM_ROW_PITCH);
+            
+            // Load first 64 columns (lanes 0-15 each get 4 floats)
+            {
+                uint32_t d0, d1, d2, d3;
+                cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
+                    tmem_row_base, d0, d1, d2, d3);
+                
+                // Each lane gets 4 consecutive floats starting at lane_in_subpart * 4
+                int col_base = lane_in_subpart * 4;
+                float f0 = __uint_as_float(d0);
+                float f1 = __uint_as_float(d1);
+                float f2 = __uint_as_float(d2);
+                float f3 = __uint_as_float(d3);
+                
+                int gc0 = n_tile + col_base;
+                int gc1 = n_tile + col_base + 1;
+                int gc2 = n_tile + col_base + 2;
+                int gc3 = n_tile + col_base + 3;
+                
+                if (gc0 < N) D[global_row * N + gc0] = __float2half(f0);
+                if (gc1 < N) D[global_row * N + gc1] = __float2half(f1);
+                if (gc2 < N) D[global_row * N + gc2] = __float2half(f2);
+                if (gc3 < N) D[global_row * N + gc3] = __float2half(f3);
+            }
+            
+            // Load second 64 columns (offset by 64 floats = 256 bytes)
+            {
 
-        int row0 = lane_row_group;
-        int row1 = lane_row_group + 8;
-        int col0 = lane_col_group * 2;
-        int col1 = col0 + 1;
-
-        for (int i = 0; i < WARP_TILE_M; ++i) {
-            for (int j = 0; j < WARP_TILE_N; ++j) {
-                int tile_row_base = m_tile + warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
-                int tile_col_base = n_tile + warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
-
-                int global_row0 = tile_row_base + row0;
-                int global_row1 = tile_row_base + row1;
-                int global_col0 = tile_col_base + col0;
-                int global_col1 = tile_col_base + col1;
-
-                if (global_row0 < M) {
-                    if (global_col0 < N) {
-                        int local_row0 = global_row0 - m_tile;
-                        int local_col0 = global_col0 - n_tile;
-                        if (local_row0 >= 0 && local_row0 < TileM &&
-                            local_col0 >= 0 && local_col0 < TileN) {
-                            float v = c_smem_from_tmem[local_row0 * TileN + local_col0];
-                            D[global_row0 * N + global_col0] = __float2half(v);
-                        }
-                    }
-                    if (global_col1 < N) {
-                        int local_row0 = global_row0 - m_tile;
-                        int local_col1 = global_col1 - n_tile;
-                        if (local_row0 >= 0 && local_row0 < TileM &&
-                            local_col1 >= 0 && local_col1 < TileN) {
-                            float v = c_smem_from_tmem[local_row0 * TileN + local_col1];
-                            D[global_row0 * N + global_col1] = __float2half(v);
-                        }
-                    }
-                }
-                if (global_row1 < M) {
-                    if (global_col0 < N) {
-                        int local_row1 = global_row1 - m_tile;
-                        int local_col0 = global_col0 - n_tile;
-                        if (local_row1 >= 0 && local_row1 < TileM &&
-                            local_col0 >= 0 && local_col0 < TileN) {
-                            float v = c_smem_from_tmem[local_row1 * TileN + local_col0];
-                            D[global_row1 * N + global_col0] = __float2half(v);
-                        }
-                    }
-                    if (global_col1 < N) {
-                        int local_row1 = global_row1 - m_tile;
-                        int local_col1 = global_col1 - n_tile;
-                        if (local_row1 >= 0 && local_row1 < TileM &&
-                            local_col1 >= 0 && local_col1 < TileN) {
-                            float v = c_smem_from_tmem[local_row1 * TileN + local_col1];
-                            D[global_row1 * N + global_col1] = __float2half(v);
-                        }
-                    }
-                }
+                uint32_t d0, d1, d2, d3;
+                cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
+                    tmem_row_base + 256, d0, d1, d2, d3);
+                
+                int col_base = 64 + lane_in_subpart * 4;
+                float f0 = __uint_as_float(d0);
+                float f1 = __uint_as_float(d1);
+                float f2 = __uint_as_float(d2);
+                float f3 = __uint_as_float(d3);
+                
+                int gc0 = n_tile + col_base;
+                int gc1 = n_tile + col_base + 1;
+                int gc2 = n_tile + col_base + 2;
+                int gc3 = n_tile + col_base + 3;
+                
+                if (gc0 < N && col_base < TileN) D[global_row * N + gc0] = __float2half(f0);
+                if (gc1 < N && col_base + 1 < TileN) D[global_row * N + gc1] = __float2half(f1);
+                if (gc2 < N && col_base + 2 < TileN) D[global_row * N + gc2] = __float2half(f2);
+                if (gc3 < N && col_base + 3 < TileN) D[global_row * N + gc3] = __float2half(f3);
             }
         }
     }
