@@ -294,6 +294,132 @@ __device__ __forceinline__ uint64_t* mbar_stage(uint64_t* base, int stage) {
     return base + stage * 2;
 }
 
+// ===== tcgen05.mma HELPER FUNCTIONS =====
+
+// SMEM Descriptor for tcgen05.mma (matches CuTe UMMA::SmemDescriptor)
+// Bitfield layout (64 bits):
+//   [0:14)   - start_address >> 4 (4 LSB not included)
+//   [16:30)  - leading_byte_offset >> 4 
+//   [32:46)  - stride_byte_offset >> 4
+//   [48:49)  - version (0)
+//   [49:52)  - base_offset
+//   [52:53)  - lbo_mode
+//   [61:64)  - layout_type (swizzle): 0=NONE, 1=128B_BASE32B, 2=128B, 4=64B, 6=32B
+__device__ __forceinline__ uint64_t make_smem_desc_tcgen05(
+    const void* smem_ptr,
+    int leading_byte_offset,   // Stride between consecutive M/N rows (in bytes)
+    int stride_byte_offset,    // Stride for K dimension (usually 0 for contiguous K)
+    int swizzle_type           // 0=NONE, 2=SWIZZLE_128B, 4=SWIZZLE_64B, 6=SWIZZLE_32B
+) {
+    // Get 32-bit shared memory address
+    uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
+    
+    // Build descriptor
+    uint64_t desc = 0;
+    // start_address: bits [0:14), value is smem_addr >> 4
+    desc |= ((uint64_t)(smem_addr >> 4) & 0x3FFF);
+    // leading_byte_offset: bits [16:30), value is leading_byte_offset >> 4
+    desc |= ((uint64_t)((leading_byte_offset >> 4) & 0x3FFF) << 16);
+    // stride_byte_offset: bits [32:46), value is stride_byte_offset >> 4
+    desc |= ((uint64_t)((stride_byte_offset >> 4) & 0x3FFF) << 32);
+    // layout_type (swizzle): bits [61:64)
+    desc |= ((uint64_t)(swizzle_type & 0x7) << 61);
+    
+    return desc;
+}
+
+// Instruction Descriptor for tcgen05.mma.kind::mxf4nvf4.block_scale
+// For NVFP4 (e2m1) with FP8 (e4m3) block scales
+// InstrDescriptorBlockScaled bitfield (32 bits in upper half of idescE):
+//   [0:4)    - a_format (MXF4Format::E2M1 = 0)
+//   [4:8)    - b_format (MXF4Format::E2M1 = 0)
+//   [8:10)   - scale_format (0=UE4M3, 1=UE8M0)
+//   [10:12)  - a_sf_id ((tmem_sfa >> 30) & 0x3)
+//   [12:14)  - b_sf_id ((tmem_sfb >> 30) & 0x3)
+//   [16:20)  - m_dim (tile_m >> 4)
+//   [20:26)  - n_dim (tile_n >> 3)
+//   [26:27)  - a_major (0=K, 1=MN)
+//   [27:28)  - b_major (0=K, 1=MN)
+//   [28:29)  - a_negate (0)
+//   [29:30)  - b_negate (0)
+//   [30:31)  - sparse_flag (0)
+__device__ __forceinline__ uint64_t make_instr_desc_mxf4(
+    int tile_m,          // Must be 128 for SM100
+    int tile_n,          // 8-256, multiple of 8
+    int a_major,         // 0=K-major, 1=MN-major
+    int b_major,         // 0=K-major, 1=MN-major
+    int sf_format,       // 0=UE4M3 (for e4m3fn), 1=UE8M0
+    uint32_t tmem_sfa,   // TMEM address for scale factors A
+    uint32_t tmem_sfb    // TMEM address for scale factors B
+) {
+    uint32_t desc_lo = 0;
+    
+    // a_format = E2M1 (0) for NVFP4
+    desc_lo |= (0 & 0xF);
+    // b_format = E2M1 (0) for NVFP4
+    desc_lo |= ((0 & 0xF) << 4);
+    // scale_format
+    desc_lo |= ((sf_format & 0x3) << 8);
+    // a_sf_id: upper 2 bits of TMEM SFA address
+    desc_lo |= (((tmem_sfa >> 30) & 0x3) << 10);
+    // b_sf_id: upper 2 bits of TMEM SFB address
+    desc_lo |= (((tmem_sfb >> 30) & 0x3) << 12);
+    // m_dim = tile_m >> 4 (128 -> 8)
+    desc_lo |= (((tile_m >> 4) & 0xF) << 16);
+    // n_dim = tile_n >> 3 (128 -> 16)
+    desc_lo |= (((tile_n >> 3) & 0x3F) << 20);
+    // a_major
+    desc_lo |= ((a_major & 0x1) << 26);
+    // b_major
+    desc_lo |= ((b_major & 0x1) << 27);
+    // a_negate = 0, b_negate = 0, sparse_flag = 0 (already zero)
+    
+    // idescE: upper 32 bits are the instruction descriptor, lower 32 bits unused (for sparse metadata)
+    return ((uint64_t)desc_lo << 32);
+}
+
+// Copy scale factors from SMEM to TMEM using tcgen05.st.sync
+// This is needed because tcgen05.mma.block_scale reads scales from TMEM, not SMEM
+__device__ __forceinline__ void copy_sf_smem_to_tmem(
+    uint32_t tmem_dst,       // TMEM destination address
+    const uint8_t* smem_src, // SMEM source pointer
+    int num_bytes            // Total bytes to copy (should be TileM * (TileK/16) or similar)
+) {
+    // tcgen05.st.sync.aligned.16x128b.x1 stores 16 rows × 16 bytes = 256 bytes
+    // For 128 rows × 16 bytes per row = 2048 bytes, need 8 calls
+    // Only one thread (first in warp) issues the stores
+    
+    uint32_t smem_addr = cvta_to_shared_u32(smem_src);
+    
+    // Issue stores in chunks of 256 bytes
+    int num_chunks = (num_bytes + 255) / 256;
+    
+    for (int chunk = 0; chunk < num_chunks; ++chunk) {
+        uint32_t tmem_offset = tmem_dst + chunk * 256;
+        uint32_t smem_offset = smem_addr + chunk * 256;
+        
+        asm volatile(
+            "tcgen05.st.sync.aligned.16x128b.x1.b32 [%0], [%1];"
+            :: "r"(tmem_offset), "r"(smem_offset)
+            : "memory"
+        );
+    }
+}
+
+// Elect one thread in warp to execute (CuTe-style elect_one_sync)
+__device__ __forceinline__ bool elect_one_sync_local() {
+    uint32_t pred = 0;
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "elect.sync _, p, 0xFFFFFFFF;\n\t"
+        "selp.b32 %0, 1, 0, p;\n\t"
+        "}\n"
+        : "=r"(pred)
+    );
+    return pred != 0;
+}
+
 // Prefetch tile using TMA - simplified for Rank-2 (L=1) GEMM
 template<int TileM, int TileK>
 __device__ __forceinline__ void prefetch_tile(
@@ -898,13 +1024,18 @@ fp4_gemm_rank2_cta(
         }
     }
     #else  // USE_tcgen05_MAINLOOP
-    // tcgen05-based mainloop body for Blackwell (SM100/SM100a) using TMEM + UMMA.
-    half *smem_A_tcgen05 = a_f16_smem;  // [TileM, TileK] row-major
-    half *smem_B_tcgen05 = b_f16_smem;  // [TileK, TileN]
+    // ========================================================================
+    // tcgen05.mma.kind::mxf4nvf4.block_scale MAINLOOP for NVFP4 GEMM
+    // ========================================================================
+    // This path uses Blackwell's native FP4 tensor cores:
+    // - Consumes packed FP4 (e2m1) data directly from SMEM
+    // - Applies FP8 (e4m3) block scales from TMEM
+    // - Fuses decode + scale + MMA in hardware
+    // - No manual FP4->FP16 decode needed!
 
     __shared__ uint32_t tmem_base_ptr_tcgen05;
 
-    // Prologue: prefetch stages 0..StageCount-2 (same as classic path).
+    // Prologue: prefetch stages 0..StageCount-2 (same as classic path)
     int phase = 0;
     for (int s = 0; s < StageCount - 1; ++s) {
         int k_tile = s * TileK;
@@ -919,15 +1050,20 @@ fp4_gemm_rank2_cta(
         }
     }
 
-    // Allocate TMEM once per CTA using a fully active warp 0
+    // Allocate TMEM once per CTA
+    // Layout: 256 columns total
+    //   - Cols 0-127: Accumulator (128x128 floats, but stored in 128 rows)
+    //   - Cols 128-143: SFA scale factors (16 bytes per row = 16 cols at 1 byte each)
+    //   - Cols 144-159: SFB scale factors
     __syncthreads();
     if (tid == 0) {
         tmem_base_ptr_tcgen05 = 0;
     }
     __syncthreads();
+    
     if (warp_id == 0) {
         uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr_tcgen05);
-        int num_cols = 256;  // >0, <512, power of 2, multiple of 32
+        int num_cols = 256;  // Power of 2, multiple of 32, < 512
         asm volatile(
             "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
             :
@@ -935,10 +1071,37 @@ fp4_gemm_rank2_cta(
     }
     __syncthreads();
     uint32_t tmem_c = tmem_base_ptr_tcgen05;
+    
+    // TMEM addresses for scale factors
+    // For block_scale.block16, each row has TileK/16 = 8 scale factor bytes
+    // We store them contiguously after the accumulator region
+    constexpr int TMEM_COLS = 256;
+    constexpr int TMEM_ROW_PITCH = TMEM_COLS * sizeof(float);  // 1024 bytes per TMEM row
+    
+    // Scale factors are placed after accumulator columns
+    // Accumulator uses cols 0-127 (128 floats = 512 bytes)
+    // SFA starts at byte offset 512 in each TMEM row
+    // SFB starts at byte offset 640 in each TMEM row
+    uint32_t tmem_sfa_base = tmem_c + 512;  // Offset for SFA in TMEM
+    uint32_t tmem_sfb_base = tmem_c + 640;  // Offset for SFB in TMEM
 
+    #if __CUDA_ARCH__ >= 1000
+    // Build instruction descriptor (constant for all K-tiles)
+    // sf_format = 0 for UE4M3 (FP8 e4m3fn compatible)
+    uint64_t idescE = make_instr_desc_mxf4(
+        TileM, TileN,
+        0, 0,       // K-major for both A and B
+        0,          // sf_format = UE4M3
+        tmem_sfa_base, tmem_sfb_base
+    );
+    #endif
+
+    // Main K-loop
     for (int k_tile = 0; k_tile < K; k_tile += TileK) {
         int stage = (k_tile / TileK) % StageCount;
         int next_k = k_tile + (StageCount - 1) * TileK;
+        
+        // Issue TMA prefetch for next tile
         if (next_k < K) {
             prefetch_tile<TileM, TileK>(
                 (stage + StageCount - 1) % StageCount, next_k, use_tma_a, is_producer, warp_id, lane_id,
@@ -949,59 +1112,58 @@ fp4_gemm_rank2_cta(
             );
         }
 
+        // Wait for current TMA to complete
         mbarrier_wait_parity(mbar_stage(mbar_a, stage), phase);
         mbarrier_wait_parity(mbar_stage(mbar_b, stage), phase);
         __syncthreads();
 
         #if __CUDA_ARCH__ >= 1000
-        // Use UMMA SM100_MMA_F16BF16_SS to perform a single tcgen05.mma FMA into TMEM.
-        using TypeA = half_t;  // cutlass::half_t
-        using TypeB = half_t;
-        using TypeC = float;
+        // Copy scale factors from SMEM to TMEM
+        // Only one elected thread does this
+        if (elect_one_sync_local()) {
+            // SFA: TileM rows × (TileK/16) = 128 × 8 = 1024 bytes
+            // SFB: TileN rows × (TileK/16) = 128 × 8 = 1024 bytes
+            constexpr int sf_bytes_per_matrix = TileM * (TileK / 16);
+            copy_sf_smem_to_tmem(tmem_sfa_base, sfa_stage[stage], sf_bytes_per_matrix);
+            copy_sf_smem_to_tmem(tmem_sfb_base, sfb_stage[stage], sf_bytes_per_matrix);
+        }
+        __syncthreads();
 
-        using MmaOp = cute::SM100_MMA_F16BF16_SS<
-            TypeA, TypeB, TypeC,
-            128, 128,
-            cute::UMMA::Major::K,
-            cute::UMMA::Major::K>;
+        // Build SMEM descriptors for packed FP4 A and B
+        // A: [TileM, TileK/2] packed FP4 in SMEM
+        // B: [TileN, TileK/2] packed FP4 in SMEM
+        // Leading byte offset = TileK/2 (bytes between consecutive rows)
+        uint64_t desc_a_smem = make_smem_desc_tcgen05(
+            a_packed_stage[stage],
+            TileKPacked,    // leading_byte_offset = K/2 bytes between M rows
+            0,              // stride_byte_offset (K is contiguous)
+            0               // SWIZZLE_NONE for packed FP4 (TMA already swizzled)
+        );
+        uint64_t desc_b_smem = make_smem_desc_tcgen05(
+            b_packed_stage[stage],
+            TileKPacked,    // leading_byte_offset = K/2 bytes between N rows
+            0,
+            0               // SWIZZLE_NONE
+        );
 
-        using TiledMMA = decltype(cute::make_tiled_mma(MmaOp{}));
-        TiledMMA tiled_mma = cute::make_tiled_mma(MmaOp{});
-
-        auto bM = cute::tile_size<0>(tiled_mma);
-        auto bN = cute::tile_size<1>(tiled_mma);
-        auto bK = cute::tile_size<2>(tiled_mma);
-
-        auto mma_shape_A = cute::partition_shape_A(tiled_mma, cute::make_shape(bM, bK));
-        auto mma_shape_B = cute::partition_shape_B(tiled_mma, cute::make_shape(bN, bK));
-
-        auto sA_layout = cute::UMMA::tile_to_mma_shape(
-            cute::UMMA::Layout_K_SW32_Atom<TypeA>{}, mma_shape_A);
-        auto sB_layout = cute::UMMA::tile_to_mma_shape(
-            cute::UMMA::Layout_K_SW32_Atom<TypeB>{}, mma_shape_B);
-
-        auto tCsA = cute::make_tensor(cute::make_smem_ptr(smem_A_tcgen05), sA_layout);
-        auto tCsB = cute::make_tensor(cute::make_smem_ptr(smem_B_tcgen05), sB_layout);
-
-        auto tCrA = cute::make_tensor<cute::UMMA::smem_desc<cute::UMMA::Major::K>>(tCsA);
-        auto tCrB = cute::make_tensor<cute::UMMA::smem_desc<cute::UMMA::Major::K>>(tCsB);
-
-        cute::UMMA::SmemDescriptor a_smem_desc = *tCrA.data();
-        cute::UMMA::SmemDescriptor b_smem_desc = *tCrB.data();
-
-        uint64_t a_desc = static_cast<uint64_t>(a_smem_desc);
-        uint64_t b_desc = static_cast<uint64_t>(b_smem_desc);
-
-        uint64_t idescE = cute::UMMA::make_runtime_instr_desc<
-            TypeA, TypeB, TypeC,
-            128, 128,
-            cute::UMMA::Major::K,
-            cute::UMMA::Major::K>();
-
-        constexpr int FmasPerSlice = 8;
-        for (int fma_i = 0; fma_i < FmasPerSlice; ++fma_i) {
-            uint32_t scaleC = (k_tile == 0 && fma_i == 0) ? 1u : 0u;
-            MmaOp::fma(a_desc, b_desc, tmem_c, scaleC, idescE);
+        // Issue tcgen05.mma.kind::mxf4nvf4.block_scale.block16
+        // scaleC = 1 for first K-tile (clear accumulator), 0 otherwise
+        uint32_t scaleC = (k_tile == 0) ? 1u : 0u;
+        
+        if (elect_one_sync_local()) {
+            asm volatile(
+                "{\n\t"
+                ".reg .pred p;\n\t"
+                "setp.ne.b32 p, %4, 0;\n\t"
+                "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
+                "[%0], %1, %2, %3, [%5], [%6], p;\n\t"
+                "}\n"
+                :
+                : "r"(tmem_c), "l"(desc_a_smem), "l"(desc_b_smem),
+                  "r"(uint32_t(idescE >> 32)), "r"(scaleC),
+                  "r"(tmem_sfa_base), "r"(tmem_sfb_base)
+                : "memory"
+            );
         }
         #endif  // __CUDA_ARCH__ >= 1000
 
@@ -1011,42 +1173,27 @@ fp4_gemm_rank2_cta(
         }
     }
 
-    // TMEM -> register -> global D epilogue using CuTe SM100_TMEM_LOAD atoms
+    // ========================================================================
+    // EPILOGUE: TMEM -> register -> global D
+    // ========================================================================
     {
-        // Use SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy() for TMEM->register
-        // This loads 4 x 32-bit registers (128 bits = 4 floats) per call
-        // 16 data path lanes means 16 threads participate, each getting 4 floats
-        
-        // For 128x128 tile with 128 threads (4 warps), we need to cover all elements
-        // TMEM layout for MMA accumulator: 128 rows x 128 cols of float
-        // Each warp subpartition (32 threads within a warp) handles a portion
-        
-        // TMEM addressing: base + (row * 65536) + (col * sizeof(float))
-        // But SM100_TMEM_LOAD operates on warp subpartitions (groups of 16 threads)
-        
-        // Each warp has 2 subpartitions of 16 threads each
-        // Subpartition index within warp: (lane_id / 16)
-        // Lane within subpartition: (lane_id % 16)
+        // TMEM layout: 128 rows × 256 cols (we use first 128 cols for accumulator)
+        // Each warp handles a portion of rows
+        // Each subpartition (16 threads) loads 4 floats per thread = 64 floats per load
         
         int subpart_in_warp = lane_id / 16;  // 0 or 1
         int lane_in_subpart = lane_id % 16;  // 0..15
-        int global_subpart = warp_id * 2 + subpart_in_warp;  // 0..7 across CTA
+        int global_subpart = warp_id * 2 + subpart_in_warp;  // 0..7 across CTA (for 4 warps)
         
         // Each of 8 subpartitions handles 16 rows (128 rows / 8 subparts)
         int row_base = global_subpart * 16;
-        
-        // For each row, we need to load 128 columns
-        // SM100_TMEM_LOAD_16dp256b1x loads 4 floats per lane (16 lanes * 4 = 64 floats)
-        // So we need 2 loads per row to cover 128 columns
-        
-        constexpr int TMEM_COLS = 256;  // Must match alloc!
-        constexpr int TMEM_ROW_PITCH = TMEM_COLS * sizeof(float);  // 1024 bytes
 
         #pragma unroll
         for (int local_row = 0; local_row < 16; ++local_row) {
             int global_row = m_tile + row_base + local_row;
             if (global_row >= M) continue;
 
+            // TMEM row address (each row is TMEM_ROW_PITCH bytes apart)
             uint32_t tmem_row_base = tmem_c + (local_row * TMEM_ROW_PITCH);
             
             // Load first 64 columns (lanes 0-15 each get 4 floats)
@@ -1055,7 +1202,6 @@ fp4_gemm_rank2_cta(
                 cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
                     tmem_row_base, d0, d1, d2, d3);
                 
-                // Each lane gets 4 consecutive floats starting at lane_in_subpart * 4
                 int col_base = lane_in_subpart * 4;
                 float f0 = __uint_as_float(d0);
                 float f1 = __uint_as_float(d1);
@@ -1075,7 +1221,6 @@ fp4_gemm_rank2_cta(
             
             // Load second 64 columns (offset by 64 floats = 256 bytes)
             {
-
                 uint32_t d0, d1, d2, d3;
                 cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
                     tmem_row_base + 256, d0, d1, d2, d3);
@@ -1099,9 +1244,9 @@ fp4_gemm_rank2_cta(
         }
     }
 
-    // Free TMEM allocation once per CTA (same warp configuration as alloc)
+    // Free TMEM allocation
     if (warp_id == 0) {
-        uint32_t cols  = 256;
+        uint32_t cols = 256;
         uint32_t taddr = tmem_c;
         asm volatile(
             "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n"
