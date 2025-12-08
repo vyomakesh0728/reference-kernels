@@ -1165,7 +1165,7 @@ fp4_gemm_rank2_cta(
                 : "memory"
             );
         }
-        #endif  // DISABLED FOR DEBUG
+
         __syncthreads();
 
         // Build SMEM descriptors for packed FP4 A and B
