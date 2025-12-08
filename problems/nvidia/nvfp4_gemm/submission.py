@@ -334,7 +334,7 @@ __device__ __forceinline__ uint64_t make_smem_desc_tcgen05(
 //   [0:2)   - sparse_id2 (0 for non-sparse)
 //   [2:3)   - sparse_flag (0=dense)
 //   [3:4)   - reserved
-//   [4:6)   - b_sf_id (TMEM SFB address >> 30)
+//   [4:6)   - b_sf_id (always 0 for cta_group::1)
 //   [6:7)   - reserved
 //   [7:10)  - a_format (5=E2M1 for NVFP4)
 //   [10:13) - b_format (5=E2M1 for NVFP4)
@@ -345,7 +345,7 @@ __device__ __forceinline__ uint64_t make_smem_desc_tcgen05(
 //   [17:23) - n_dim (N >> 3)
 //   [23:24) - scale_format (0=E4M3)
 //   [24:29) - m_dim (M >> 4)
-//   [29:31) - a_sf_id (TMEM SFA address >> 30)
+//   [29:31) - a_sf_id (always 0 for cta_group::1)
 //   [31:32) - k_size (0 for K64)
 __device__ __forceinline__ uint64_t make_instr_desc_mxf4(
     int tile_m,          // Must be 128 for SM100
@@ -353,8 +353,8 @@ __device__ __forceinline__ uint64_t make_instr_desc_mxf4(
     int a_major,         // 0=K-major, 1=MN-major
     int b_major,         // 0=K-major, 1=MN-major
     int sf_format,       // 0=E4M3, 1=E8M0
-    uint32_t tmem_sfa,   // TMEM address for scale factors A
-    uint32_t tmem_sfb    // TMEM address for scale factors B
+    uint32_t /*tmem_sfa*/,   // Unused - SF IDs are always 0 for cta_group::1
+    uint32_t /*tmem_sfb*/    // Unused - TMEM addresses passed separately to instruction
 ) {
     uint32_t desc = 0;
     
@@ -364,8 +364,7 @@ __device__ __forceinline__ uint64_t make_instr_desc_mxf4(
     // [0:2) sparse_id2 = 0
     // [2:3) sparse_flag = 0
     // [3:4) reserved
-    // [4:6) b_sf_id = (tmem_sfb >> 30) & 0x3
-    desc |= (((tmem_sfb >> 30) & 0x3) << 4);
+    // [4:6) b_sf_id = 0 (always 0 for single CTA)
     // [6:7) reserved
     // [7:10) a_format = 5 (E2M1)
     desc |= (E2M1_FORMAT << 7);
@@ -383,8 +382,7 @@ __device__ __forceinline__ uint64_t make_instr_desc_mxf4(
     desc |= ((sf_format & 0x1) << 23);
     // [24:29) m_dim = tile_m >> 4
     desc |= (((tile_m >> 4) & 0x1F) << 24);
-    // [29:31) a_sf_id = (tmem_sfa >> 30) & 0x3
-    desc |= (((tmem_sfa >> 30) & 0x3) << 29);
+    // [29:31) a_sf_id = 0 (always 0 for single CTA)
     // [31:32) k_size = 0 (K64 for MXF4 dense)
     
     // idescE: upper 32 bits are the instruction descriptor
@@ -904,7 +902,11 @@ fp4_gemm_rank2_cta(
         offset += sfb_stage_stride;
     }
 
-    // Decoded tiles (128 byte alignment)
+    #if !USE_tcgen05_MAINLOOP
+    // =========================================================================
+    // FP16 decode buffers - ONLY needed for non-tcgen05 path
+    // tcgen05.mma consumes packed FP4 directly, no decode buffers needed!
+    // =========================================================================
     align_up_smem_128();
     half* a_f16_smem = reinterpret_cast<half*>(smem + offset);
     offset += static_cast<size_t>(TileM) * a_stride * sizeof(half);
@@ -916,6 +918,7 @@ fp4_gemm_rank2_cta(
     align_up_smem_128();
     float* c_smem_from_tmem = reinterpret_cast<float*>(smem + offset);
     offset += static_cast<size_t>(TileM) * static_cast<size_t>(TileN) * sizeof(float);
+    #endif  // !USE_tcgen05_MAINLOOP
 
     (void)offset;
 
@@ -932,13 +935,15 @@ fp4_gemm_rank2_cta(
     }
     __syncthreads();
 
-    // Accumulators
+    #if !USE_tcgen05_MAINLOOP
+    // Accumulators - ONLY for non-tcgen05 path (tcgen05 uses TMEM)
     float c_accum[16][4]; // 16 steps of N=8, 4 floats each
     #pragma unroll
     for(int i=0; i<16; ++i) {
         #pragma unroll
         for(int j=0; j<4; ++j) c_accum[i][j] = 0.0f;
     }
+    #endif  // !USE_tcgen05_MAINLOOP
 
     #if !USE_tcgen05_MAINLOOP
     // Main Loop
@@ -1097,25 +1102,33 @@ fp4_gemm_rank2_cta(
     uint32_t tmem_c = tmem_base_ptr_tcgen05;
     
     // TMEM addresses for scale factors
-    // For block_scale.block16, each row has TileK/16 = 8 scale factor bytes
-    // We store them contiguously after the accumulator region
-    constexpr int TMEM_COLS = 256;
-    constexpr int TMEM_ROW_PITCH = TMEM_COLS * sizeof(float);  // 1024 bytes per TMEM row
+    // TMEM addressing format: bits [15:0] = column index, bits [31:16] = DP (data path)
+    // For block_scale.block16, each K-tile needs TileM × (TileK/16) = 128 × 16 = 2048 scale bytes
+    //
+    // TMEM Layout (256 columns allocated):
+    //   - Columns 0-127: Accumulator (128×128 floats, uses all 128 DPs × 128 columns)
+    //   - Columns 128-143: SFA scale factors (16 columns for TileK/16 = 16 scales per row)
+    //   - Columns 144-159: SFB scale factors (16 columns)
+    //
+    // Column offset (not byte offset!) is added to tmem_c
+    constexpr int ACCUM_COLS = 128;      // Accumulator uses 128 columns
+    constexpr int SF_COLS = 16;          // Each scale tensor uses 16 columns (TileK/16)
     
-    // Scale factors are placed after accumulator columns
-    // Accumulator uses cols 0-127 (128 floats = 512 bytes)
-    // SFA starts at byte offset 512 in each TMEM row
-    // SFB starts at byte offset 640 in each TMEM row
-    uint32_t tmem_sfa_base = tmem_c + 512;  // Offset for SFA in TMEM
-    uint32_t tmem_sfb_base = tmem_c + 640;  // Offset for SFB in TMEM
+    constexpr int TMEM_COLS = 256;
+    constexpr int TMEM_ROW_PITCH = TMEM_COLS * sizeof(float);  // 1024 bytes per TMEM row for epilogue
+    
+    // Scale factor TMEM addresses (column offsets)
+    uint32_t tmem_sfa_base = tmem_c + ACCUM_COLS;           // SFA at column 128
+    uint32_t tmem_sfb_base = tmem_c + ACCUM_COLS + SF_COLS; // SFB at column 144
 
     #if __CUDA_ARCH__ >= 1000
     // Build instruction descriptor (constant for all K-tiles)
-    // sf_format = 0 for UE4M3 (FP8 e4m3fn compatible)
+    // sf_format = 0 for E4M3 scale format
+    // a_sf_id and b_sf_id are set to 0 (default ID, not derived from addresses)
     uint64_t idescE = make_instr_desc_mxf4(
         TileM, TileN,
         0, 0,       // K-major for both A and B
-        0,          // sf_format = UE4M3
+        0,          // sf_format = E4M3
         tmem_sfa_base, tmem_sfb_base
     );
     #endif
