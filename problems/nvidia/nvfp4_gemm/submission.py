@@ -330,90 +330,114 @@ __device__ __forceinline__ uint64_t make_smem_desc_tcgen05(
 
 // Instruction Descriptor for tcgen05.mma.kind::mxf4nvf4.block_scale
 // For NVFP4 (e2m1) with FP8 (e4m3) block scales
-// InstrDescriptorBlockScaled bitfield (32 bits in upper half of idescE):
-//   [0:4)    - a_format (MXF4Format::E2M1 = 0)
-//   [4:8)    - b_format (MXF4Format::E2M1 = 0)
-//   [8:10)   - scale_format (0=UE4M3, 1=UE8M0)
-//   [10:12)  - a_sf_id ((tmem_sfa >> 30) & 0x3)
-//   [12:14)  - b_sf_id ((tmem_sfb >> 30) & 0x3)
-//   [16:20)  - m_dim (tile_m >> 4)
-//   [20:26)  - n_dim (tile_n >> 3)
-//   [26:27)  - a_major (0=K, 1=MN)
-//   [27:28)  - b_major (0=K, 1=MN)
-//   [28:29)  - a_negate (0)
-//   [29:30)  - b_negate (0)
-//   [30:31)  - sparse_flag (0)
+// InstrDescriptorBlockScaled bitfield (32 bits, matches CuTe exactly):
+//   [0:2)   - sparse_id2 (0 for non-sparse)
+//   [2:3)   - sparse_flag (0=dense)
+//   [3:4)   - reserved
+//   [4:6)   - b_sf_id (TMEM SFB address >> 30)
+//   [6:7)   - reserved
+//   [7:10)  - a_format (5=E2M1 for NVFP4)
+//   [10:13) - b_format (5=E2M1 for NVFP4)
+//   [13:14) - a_negate (0)
+//   [14:15) - b_negate (0)
+//   [15:16) - a_major (0=K-major)
+//   [16:17) - b_major (0=K-major)
+//   [17:23) - n_dim (N >> 3)
+//   [23:24) - scale_format (0=E4M3)
+//   [24:29) - m_dim (M >> 4)
+//   [29:31) - a_sf_id (TMEM SFA address >> 30)
+//   [31:32) - k_size (0 for K64)
 __device__ __forceinline__ uint64_t make_instr_desc_mxf4(
     int tile_m,          // Must be 128 for SM100
     int tile_n,          // 8-256, multiple of 8
     int a_major,         // 0=K-major, 1=MN-major
     int b_major,         // 0=K-major, 1=MN-major
-    int sf_format,       // 0=UE4M3 (for e4m3fn), 1=UE8M0
+    int sf_format,       // 0=E4M3, 1=E8M0
     uint32_t tmem_sfa,   // TMEM address for scale factors A
     uint32_t tmem_sfb    // TMEM address for scale factors B
 ) {
-    uint32_t desc_lo = 0;
+    uint32_t desc = 0;
     
-    // a_format = E2M1 (0) for NVFP4
-    desc_lo |= (0 & 0xF);
-    // b_format = E2M1 (0) for NVFP4
-    desc_lo |= ((0 & 0xF) << 4);
-    // scale_format
-    desc_lo |= ((sf_format & 0x3) << 8);
-    // a_sf_id: upper 2 bits of TMEM SFA address
-    desc_lo |= (((tmem_sfa >> 30) & 0x3) << 10);
-    // b_sf_id: upper 2 bits of TMEM SFB address
-    desc_lo |= (((tmem_sfb >> 30) & 0x3) << 12);
-    // m_dim = tile_m >> 4 (128 -> 8)
-    desc_lo |= (((tile_m >> 4) & 0xF) << 16);
-    // n_dim = tile_n >> 3 (128 -> 16)
-    desc_lo |= (((tile_n >> 3) & 0x3F) << 20);
-    // a_major
-    desc_lo |= ((a_major & 0x1) << 26);
-    // b_major
-    desc_lo |= ((b_major & 0x1) << 27);
-    // a_negate = 0, b_negate = 0, sparse_flag = 0 (already zero)
+    // Format value for E2M1 (NVFP4) is 5
+    constexpr uint32_t E2M1_FORMAT = 5;
     
-    // idescE: upper 32 bits are the instruction descriptor, lower 32 bits unused (for sparse metadata)
-    return ((uint64_t)desc_lo << 32);
+    // [0:2) sparse_id2 = 0
+    // [2:3) sparse_flag = 0
+    // [3:4) reserved
+    // [4:6) b_sf_id = (tmem_sfb >> 30) & 0x3
+    desc |= (((tmem_sfb >> 30) & 0x3) << 4);
+    // [6:7) reserved
+    // [7:10) a_format = 5 (E2M1)
+    desc |= (E2M1_FORMAT << 7);
+    // [10:13) b_format = 5 (E2M1)
+    desc |= (E2M1_FORMAT << 10);
+    // [13:14) a_negate = 0
+    // [14:15) b_negate = 0
+    // [15:16) a_major
+    desc |= ((a_major & 0x1) << 15);
+    // [16:17) b_major
+    desc |= ((b_major & 0x1) << 16);
+    // [17:23) n_dim = tile_n >> 3
+    desc |= (((tile_n >> 3) & 0x3F) << 17);
+    // [23:24) scale_format
+    desc |= ((sf_format & 0x1) << 23);
+    // [24:29) m_dim = tile_m >> 4
+    desc |= (((tile_m >> 4) & 0x1F) << 24);
+    // [29:31) a_sf_id = (tmem_sfa >> 30) & 0x3
+    desc |= (((tmem_sfa >> 30) & 0x3) << 29);
+    // [31:32) k_size = 0 (K64 for MXF4 dense)
+    
+    // idescE: upper 32 bits are the instruction descriptor
+    return ((uint64_t)desc << 32);
 }
 
-// Copy scale factors from SMEM to TMEM using tcgen05.st.sync
-// This is needed because tcgen05.mma.block_scale reads scales from TMEM, not SMEM
+// Build SMEM descriptor for tcgen05.cp (scale factor copy to TMEM)
+// Similar to SmemDescriptor but simpler for contiguous scale data
+__device__ __forceinline__ uint64_t make_sf_smem_desc(
+    const void* smem_ptr,
+    int leading_byte_offset,  // Stride between rows in bytes
+    int swizzle_type          // 0=NONE, 2=SWIZZLE_128B
+) {
+    uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
+    uint64_t desc = 0;
+    // start_address: bits [0:14), value is smem_addr >> 4
+    desc |= ((uint64_t)(smem_addr >> 4) & 0x3FFF);
+    // leading_byte_offset: bits [16:30), value is leading_byte_offset >> 4
+    desc |= ((uint64_t)((leading_byte_offset >> 4) & 0x3FFF) << 16);
+    // layout_type (swizzle): bits [61:64)
+    desc |= ((uint64_t)(swizzle_type & 0x7) << 61);
+    return desc;
+}
+
+// Copy scale factors from SMEM to TMEM using tcgen05.cp
+// This is the correct way - tcgen05.st expects register operands, not memory
 __device__ __forceinline__ void copy_sf_smem_to_tmem(
     uint32_t tmem_dst,       // TMEM destination address
-    const uint8_t* smem_src, // SMEM source pointer
-    int num_bytes            // Total bytes to copy (should be TileM * (TileK/16) or similar)
+    const uint8_t* smem_src, // SMEM source pointer  
+    int leading_byte_offset  // Stride between rows in SMEM
 ) {
-    // tcgen05.st.sync.aligned.16x128b.x1 stores 16 rows × 16 bytes = 256 bytes
-    // For 128 rows × 16 bytes per row = 2048 bytes, need 8 calls
-    // Only one thread (first in warp) issues the stores
+    // Build SMEM descriptor for the scale factor data
+    // Use SWIZZLE_NONE since TMA loads without swizzle
+    uint64_t smem_desc = make_sf_smem_desc(smem_src, leading_byte_offset, 0);
     
-    uint32_t smem_addr = cvta_to_shared_u32(smem_src);
-    
-    // Issue stores in chunks of 256 bytes
-    int num_chunks = (num_bytes + 255) / 256;
-    
-    for (int chunk = 0; chunk < num_chunks; ++chunk) {
-        uint32_t tmem_offset = tmem_dst + chunk * 256;
-        uint32_t smem_offset = smem_addr + chunk * 256;
-        
-        asm volatile(
-            "tcgen05.st.sync.aligned.16x128b.x1.b32 [%0], [%1];"
-            :: "r"(tmem_offset), "r"(smem_offset)
-            : "memory"
-        );
-    }
+    // tcgen05.cp.cta_group::1.32x128b.warpx4 is the correct variant for scale factors
+    // (4x32 warp broadcast, 128-bit pattern)
+    asm volatile(
+        "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
+        :: "r"(tmem_dst), "l"(smem_desc)
+        : "memory"
+    );
 }
 
 // Elect one thread in warp to execute (CuTe-style elect_one_sync)
 __device__ __forceinline__ bool elect_one_sync_local() {
     uint32_t pred = 0;
     asm volatile(
-        "{\n\t"
-        ".reg .pred p;\n\t"
-        "elect.sync _, p, 0xFFFFFFFF;\n\t"
-        "selp.b32 %0, 1, 0, p;\n\t"
+        "{\n"
+        ".reg .b32 rx;\n"
+        ".reg .pred px;\n"
+        "    elect.sync rx|px, 0xFFFFFFFF;\n"
+        "    @px mov.s32 %0, 1;\n"
         "}\n"
         : "=r"(pred)
     );
@@ -1119,14 +1143,29 @@ fp4_gemm_rank2_cta(
 
         #if __CUDA_ARCH__ >= 1000
         // Copy scale factors from SMEM to TMEM
-        // Only one elected thread does this
+        // Using tcgen05.cp.cta_group::1.128x128b which copies 128 rows × 16 bytes = 2KB at once
+        // Only one elected thread issues the copy (ThrID=1 in CuTe copy traits)
         if (elect_one_sync_local()) {
-            // SFA: TileM rows × (TileK/16) = 128 × 8 = 1024 bytes
-            // SFB: TileN rows × (TileK/16) = 128 × 8 = 1024 bytes
-            constexpr int sf_bytes_per_matrix = TileM * (TileK / 16);
-            copy_sf_smem_to_tmem(tmem_sfa_base, sfa_stage[stage], sf_bytes_per_matrix);
-            copy_sf_smem_to_tmem(tmem_sfb_base, sfb_stage[stage], sf_bytes_per_matrix);
+            // Build SMEM descriptors for scale factors
+            // Scale factors in SMEM: [TileM/N, SfaBoxK] layout
+            // Leading byte offset = SfaBoxK (128 bytes between rows)
+            uint64_t desc_sfa = make_sf_smem_desc(sfa_stage[stage], SfaBoxK, 0);
+            uint64_t desc_sfb = make_sf_smem_desc(sfb_stage[stage], SfaBoxK, 0);
+            
+            // tcgen05.cp.cta_group::1.128x128b copies 128 data paths × 128 bits = 2KB
+            // This copies all scale factors for 128 rows at once
+            asm volatile(
+                "tcgen05.cp.cta_group::1.128x128b [%0], %1;\n"
+                :: "r"(tmem_sfa_base), "l"(desc_sfa)
+                : "memory"
+            );
+            asm volatile(
+                "tcgen05.cp.cta_group::1.128x128b [%0], %1;\n"
+                :: "r"(tmem_sfb_base), "l"(desc_sfb)
+                : "memory"
+            );
         }
+        #endif  // DISABLED FOR DEBUG
         __syncthreads();
 
         // Build SMEM descriptors for packed FP4 A and B
@@ -1649,8 +1688,8 @@ def get_module():
                 "-Xcudafe",
                 "--diag_suppress=20012",
                 "-maxrregcount=128",
-                # "--ptxas-options=-v,-warn-lmem-usage",
-                # "-lineinfo",
+                "--ptxas-options=-v,-warn-lmem-usage",
+                "-lineinfo",
                 f"-I{cutlass_path}/include",
             ],
             extra_ldflags=["-lcuda"],

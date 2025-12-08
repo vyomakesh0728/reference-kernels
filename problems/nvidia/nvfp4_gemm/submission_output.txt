@@ -1,0 +1,24 @@
+For help, type "help".
+Type "apropos word" to search for commands related to "word".
+(cuda-gdb) target cudacore /tmp/cuda_coredump_little-ultra-labrador.38081.1765185745                                                         
+Opening GPU coredump: /tmp/cuda_coredump_little-ultra-labrador.38081.1765185745
+[Current focus set to CUDA kernel 0, grid 53, block (0,0,0), thread (64,0,0), device 0, sm 142, warp 0, lane 0]
+
+CUDA Exception: Warp Out-of-range Address
+The exception was triggered at PC 0x7fda8d8074c0  void fp4_gemm_rank2_cta<128, 128, 256>(unsigned char const*, unsigned char const*, unsigned char const*, unsigned char const*, CUtensorMap_st const*, CUtensorMap_st const*, CUtensorMap_st const*, CUtensorMap_st const*, __half*, int, int, int, int, int)  (cuda.cu:1164)
+#0  0x00007fda8d8074f0 in fp4_gemm_rank2_cta<128, 128, 256><<<(1,2,1),(256,1,1)>>> () at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu:1164
+1164	                    :: "r"(tmem_sfa_base + offset), "l"(desc_a)
+(cuda-gdb) where
+#0  0x00007fda8d8074f0 in fp4_gemm_rank2_cta<128, 128, 256><<<(1,2,1),(256,1,1)>>> () at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu:1164
+(cuda-gdb) list
+1159	                uint64_t desc_a = smem_desc_sfa + (offset >> 4);  // Adjust start address field
+1160	                uint64_t desc_b = smem_desc_sfb + (offset >> 4);
+1161	                
+1162	                asm volatile(
+1163	                    "tcgen05.cp.cta_group::1.4x256b [%0], %1;\n"
+1164	                    :: "r"(tmem_sfa_base + offset), "l"(desc_a)
+1165	                    : "memory"
+1166	                );
+1167	                asm volatile(
+1168	                    "tcgen05.cp.cta_group::1.4x256b [%0], %1;\n"
+(cuda-gdb) 
