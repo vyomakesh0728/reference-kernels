@@ -82,7 +82,7 @@ KEEP ONLY:
   - mbarrier functions
 </CLEAN_UP>
 
-<FLOW>
+<tcgen05_FLOW>
 (Hardware Fused):
 Global A/B (packed FP4) → TMA → SMEM (packed FP4, NO DECODE!)
 Global SF (FP8) → TMA → SMEM (FP8 scales)
@@ -93,7 +93,7 @@ Global SF (FP8) → TMA → SMEM (FP8 scales)
    └─ Hardware performs MMA
 → TMEM (FP32 accumulator, 128×128 tile)
 → TMEM.load → Registers → Global D
-</FLOW>
+</tcgen05_FLOW>
 
 
 <COMPLIANCE_CHECK>
