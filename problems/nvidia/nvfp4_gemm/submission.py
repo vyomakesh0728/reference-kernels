@@ -1115,7 +1115,6 @@ fp4_gemm_rank2_cta(
     // - No manual FP4->FP16 decode needed!
 
     __shared__ uint32_t tmem_base_ptr_tcgen05;
-    __shared__ uint64_t acc_mbar_storage[2];  // Accumulator mbarrier for tcgen05.mma sync
 
     // Prologue: prefetch stages 0..StageCount-2 (same as classic path)
     int phase = 0;
@@ -1154,13 +1153,6 @@ fp4_gemm_rank2_cta(
     __syncthreads();
     uint32_t tmem_c = tmem_base_ptr_tcgen05;
     
-    // Initialize accumulator mbarrier
-    if (tid == 0) {
-        mbarrier_init(acc_mbar_storage);
-    }
-    __syncthreads();
-    uint32_t acc_mbar_addr = cvta_to_shared_u32(acc_mbar_storage);
-    
     // TMEM addresses for scale factors
     // TMEM addressing format: bits [15:0] = column index, bits [31:16] = DP (data path)
     // For block_scale.block16, each K-tile needs TileM × (TileK/16) = 128 × 16 = 2048 scale bytes
@@ -1194,8 +1186,46 @@ fp4_gemm_rank2_cta(
     constexpr int PERMUTED_SF_SIZE = TileM * KScalesTile;  // 2048 bytes
     
     // Use static shared memory for permuted buffers (single-buffered, reused each K-tile)
-    __shared__ uint8_t sfa_permuted_smem[PERMUTED_SF_SIZE];
-    __shared__ uint8_t sfb_permuted_smem[PERMUTED_SF_SIZE];
+    __shared__ alignas(128) uint8_t sfa_permuted_smem[PERMUTED_SF_SIZE];
+    __shared__ alignas(128) uint8_t sfb_permuted_smem[PERMUTED_SF_SIZE];
+
+    // =========================================================================
+    // CLEAR TMEM ACCUMULATOR
+    // =========================================================================
+    // tcgen05.mma accumulates (C += A*B). With scaleC=1, we must ensure C (TMEM)
+    // is zeroe-initialized before the first tile. tcgen05.alloc does NOT zero.
+    
+    // 1. Clear sfa_permuted_smem to use as a source of zeros
+    for (int i = tid; i < PERMUTED_SF_SIZE; i += Threads) {
+        sfa_permuted_smem[i] = 0;
+    }
+    __syncthreads();
+
+    // 2. Copy zeros to Accumulator columns (0-127) using tcgen05.cp
+    if (elect_one_sync_local()) {
+        // Create descriptor for the zero buffer
+        // Leading byte offset = 16 (matches what we use for scales, creates 2048-byte payload)
+        uint64_t desc_zero = make_sf_smem_desc(sfa_permuted_smem, 16, 0);
+
+        // Accumulator has 128 floats per row = 512 bytes per row.
+        // tcgen05.cp with our descriptor writes 16 bytes per row (based on scale usage).
+        // To fill 512 bytes, we need 512 / 16 = 32 copies per row-set.
+        // One tcgen05.cp covers 4 TMEM columns (if 1 col = 4 bytes).
+        // Total 128 accumulator columns. 128 / 4 = 32.
+        
+        #pragma unroll
+        for (int j = 0; j < 32; ++j) {
+            uint32_t tmem_dst = tmem_c + j * 4; // Stride by 4 columns
+            asm volatile(
+                "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
+                :: "r"(tmem_dst), "l"(desc_zero)
+                : "memory"
+            );
+        }
+    }
+    __syncthreads(); // Ensure TMEM clear finishes (though cp is async-ish, wait handles it later? 
+                     // Actually cp needs to complete before mma? 
+                     // tcgen05 instructions issue in order. MMA will follow CP.)
 
     #if __CUDA_ARCH__ >= 1000
     // Build instruction descriptor (constant for all K-tiles)
@@ -1275,14 +1305,15 @@ fp4_gemm_rank2_cta(
             uint64_t desc_sfa = make_sf_smem_desc(sfa_permuted_smem, 16, 0);
             uint64_t desc_sfb = make_sf_smem_desc(sfb_permuted_smem, 16, 0);
             
-            // tcgen05.cp.cta_group::1.128x128b copies 128 data paths × 128 bits = 2KB
+            // tcgen05.cp.cta_group::1.32x128b.warpx4 - CuTe uses Cp4x32x128bOp for scale factors
+            // 32 data paths × 128 bits with warp x4 broadcast
             asm volatile(
-                "tcgen05.cp.cta_group::1.128x128b [%0], %1;\n"
+                "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
                 :: "r"(tmem_sfa_base), "l"(desc_sfa)
                 : "memory"
             );
             asm volatile(
-                "tcgen05.cp.cta_group::1.128x128b [%0], %1;\n"
+                "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
                 :: "r"(tmem_sfb_base), "l"(desc_sfb)
                 : "memory"
             );
@@ -1308,8 +1339,11 @@ fp4_gemm_rank2_cta(
         );
 
         // Issue tcgen05.mma.kind::mxf4nvf4.block_scale.block16
-        // scaleC = 0 for first K-tile (initialize/clear accumulator), 1 for subsequent tiles (accumulate)
-        uint32_t scaleC = (k_tile == 0) ? 0u : 1u;
+        // scaleC controls predicate p: setp.ne.b32 p, scaleC, 0
+        // If scaleC=0, p=0 (False) -> Instruction SKIP (NOP)
+        // If scaleC=1, p=1 (True)  -> Instruction EXECUTE (Accumulate)
+        // We must ALWAYS execute the instruction.
+        uint32_t scaleC = 1u;
         
         if (elect_one_sync_local()) {
             asm volatile(
@@ -1335,27 +1369,13 @@ fp4_gemm_rank2_cta(
     }
 
     // ========================================================================
-    // COMMIT: Signal that all tcgen05.mma operations are issued
-    // ========================================================================
-    #if __CUDA_ARCH__ >= 1000
-    if (elect_one_sync_local()) {
-        // tcgen05.commit signals that all previous tcgen05.mma operations
-        // for this CTA-group should be tracked by the mbarrier
-        asm volatile(
-            "tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];\n"
-            :: "r"(acc_mbar_addr)
-            : "memory"
-        );
-    }
-    __syncthreads();
-    #endif
-
-    // ========================================================================
     // WAIT: Ensure all async tcgen05.mma operations complete before reading TMEM
     // ========================================================================
     #if __CUDA_ARCH__ >= 1000
-    // Wait for the accumulator mbarrier (phase 0 since we only arrive once)
-    mbarrier_wait_parity(acc_mbar_storage, 0);
+    // tcgen05.wait::ld.sync.aligned waits for TMEM loads/MMA to complete
+    // This ensures accumulator in TMEM is ready for reading
+    // Syntax from CUTLASS barrier.h fence_view_async_tmem_load()
+    asm volatile("tcgen05.wait::ld.sync.aligned;\n" ::: "memory");
     __syncthreads();
     #endif
 
@@ -1441,9 +1461,9 @@ void launch_fp4_gemm_optimized(
 
     constexpr int kTileM = 128;
     constexpr int kTileN = 128; // GEMM tiling
-    constexpr int kTileK = 128;
+    constexpr int kTileK = 256;  // Must be 256 to match CuTe mma_tiler_mnk and tcgen05.mma
     constexpr int kThreads = 256; // 8 warps
-    constexpr int kTileKPacked = kTileK / 2;
+    constexpr int kTileKPacked = kTileK / 2;  // 128 bytes per tile row
     constexpr int StageCount = 2;
     
     // TMA hardware constraint
@@ -1569,13 +1589,12 @@ void launch_fp4_gemm_optimized(
     offset = align(offset, 1024);
     offset += StageCount * kTileN * 128;
     
-    // Decoded A
-    offset = align(offset, 128);
-    offset += kTileM * (kTileK + 8) * 2;
-    
-    // Decoded B
-    offset = align(offset, 128);
-    offset += kTileN * (kTileK + 8) * 2;
+    // Decoded buffers (FP16) are NOT used in tcgen05 mainloop
+    // Removing them saves ~132KB of shared memory, avoiding MaxDynamicSharedMemorySize error
+    // offset = align(offset, 128);
+    // offset += kTileM * (kTileK + 8) * 2;
+    // offset = align(offset, 128);
+    // offset += kTileN * (kTileK + 8) * 2;
     
     shared_bytes = offset;
 
