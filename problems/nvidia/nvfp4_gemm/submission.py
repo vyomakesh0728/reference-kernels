@@ -1230,39 +1230,39 @@ fp4_gemm_rank2_cta(
     // ========================================================================
     {
         // TMEM layout: 128 rows × 256 cols (we use first 128 cols for accumulator)
-        // Each warp handles a portion of rows
-        // Each subpartition (16 threads) loads 4 floats per thread = 64 floats per load
+        // SM100_TMEM_LOAD_16dp256b1x loads 16 data paths (rows) at once.
+        // All 16 threads in a subpartition call it together; each gets its own row's data.
         
         int subpart_in_warp = lane_id / 16;  // 0 or 1
         int lane_in_subpart = lane_id % 16;  // 0..15
         int global_subpart = warp_id * 2 + subpart_in_warp;  // 0..7 across CTA (for 4 warps)
         
         // Each of 8 subpartitions handles 16 rows (128 rows / 8 subparts)
+        // The 16dp instruction loads all 16 rows at once - each thread gets its own row
         int row_base = global_subpart * 16;
-
-        #pragma unroll
-        for (int local_row = 0; local_row < 16; ++local_row) {
-            int global_row = m_tile + row_base + local_row;
-            if (global_row >= M) continue;
-
-            // TMEM row address: use DP field (bits 31:16) for row, not byte offset
-            // TMEM format: [31:16] = DP (data path / row), [15:0] = column index
-            // Each subpartition handles rows [row_base, row_base+16), which maps to DP indices
-            uint32_t tmem_row_dp = row_base + local_row;  // Actual DP (row) within the 128-row tile
-            uint32_t tmem_row_base = tmem_c + (tmem_row_dp << 16);  // Encode row in DP field
+        int my_row_in_tile = row_base + lane_in_subpart;  // This thread's row within tile (0..127)
+        int global_row = m_tile + my_row_in_tile;
+        
+        // TMEM address: base column for this subpartition's 16 rows
+        // The DP (row) is implicitly handled by the 16dp instruction - all threads
+        // in subpart call with SAME address, hardware routes rows 0-15 to lanes 0-15
+        // So we need row_base in the DP field, not my_row_in_tile
+        uint32_t tmem_row_base = tmem_c + (row_base << 16);
+        
+        // Load first 64 columns (lanes 0-15 each get 4 floats for their own row)
+        {
+            uint32_t d0, d1, d2, d3;
+            cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
+                tmem_row_base, d0, d1, d2, d3);
             
-            // Load first 64 columns (lanes 0-15 each get 4 floats)
-            {
-                uint32_t d0, d1, d2, d3;
-                cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
-                    tmem_row_base, d0, d1, d2, d3);
-                
-                int col_base = lane_in_subpart * 4;
-                float f0 = __uint_as_float(d0);
-                float f1 = __uint_as_float(d1);
-                float f2 = __uint_as_float(d2);
-                float f3 = __uint_as_float(d3);
-                
+            // Each thread gets 4 consecutive floats at cols [lane*4, lane*4+3]
+            int col_base = lane_in_subpart * 4;
+            float f0 = __uint_as_float(d0);
+            float f1 = __uint_as_float(d1);
+            float f2 = __uint_as_float(d2);
+            float f3 = __uint_as_float(d3);
+            
+            if (global_row < M) {
                 int gc0 = n_tile + col_base;
                 int gc1 = n_tile + col_base + 1;
                 int gc2 = n_tile + col_base + 2;
@@ -1273,19 +1273,21 @@ fp4_gemm_rank2_cta(
                 if (gc2 < N) D[global_row * N + gc2] = __float2half(f2);
                 if (gc3 < N) D[global_row * N + gc3] = __float2half(f3);
             }
+        }
+        
+        // Load second 64 columns (offset by 64 in column field)
+        {
+            uint32_t d0, d1, d2, d3;
+            cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
+                tmem_row_base + 64, d0, d1, d2, d3);
             
-            // Load second 64 columns (offset by 64 columns in column field)
-            {
-                uint32_t d0, d1, d2, d3;
-                cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
-                    tmem_row_base + 64, d0, d1, d2, d3);
-                
-                int col_base = 64 + lane_in_subpart * 4;
-                float f0 = __uint_as_float(d0);
-                float f1 = __uint_as_float(d1);
-                float f2 = __uint_as_float(d2);
-                float f3 = __uint_as_float(d3);
-                
+            int col_base = 64 + lane_in_subpart * 4;
+            float f0 = __uint_as_float(d0);
+            float f1 = __uint_as_float(d1);
+            float f2 = __uint_as_float(d2);
+            float f3 = __uint_as_float(d3);
+            
+            if (global_row < M) {
                 int gc0 = n_tile + col_base;
                 int gc1 = n_tile + col_base + 1;
                 int gc2 = n_tile + col_base + 2;
