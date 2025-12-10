@@ -551,20 +551,22 @@ __device__ __forceinline__ void prefetch_tile(
             // bool valid_k = (c_k_packed + TileKPacked) <= static_cast<uint32_t>(K_packed);
             // bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
-            // --- TMA Load SFA (Pre-permuted 2D layout: [16, 128*rest_m*K_tiles]) ---
-            // 2D TMA with box [16, 128]: coord0 = 0, coord1 = row_offset
-            // row_offset = (m_block * K_tiles + k_tile_idx) * 128
+            // --- TMA Load SFA (to_blocked layout: 4 tiles of 32×16=512 bytes per K-tile) ---
+            // to_blocked produces (4, 32, 16) for each M-tile × K-tile
+            // TMA box is [16, 32] = 512 bytes, need 4 loads to get 2048 bytes total
+            int n_row_blocks = (M + 127) / 128;
+            int n_col_blocks = (K_scales_padded + 3) / 4;
             int m_block_sfa = c_m / TileM;
             int k_tile_idx_sfa = k_tile_base / TileK;
-            int rest_k_sfa = (K_scales_padded + 3) / 4;  // ceil_div(K_scales, 4)
-            int K_tiles_per_m_sfa = (rest_k_sfa + 3) / 4;  // ceil_div(rest_k, 4)
-            uint32_t sfa_row_offset = (m_block_sfa * K_tiles_per_m_sfa + k_tile_idx_sfa) * 128;
+            
+            // Base tile index in to_blocked output: (m_block * n_col_blocks + k_tile_idx) * 4
+            int base_tile_sfa = (m_block_sfa * n_col_blocks + k_tile_idx_sfa) * 4;
             bool valid_sfa = valid_m;
 
-            // Calculate expected bytes for mbar_a
+            // Calculate expected bytes for mbar_a (4 × 512 = 2048 bytes for scales)
             uint32_t bytes_a = 0;
             if (valid_m && valid_k) bytes_a += TileM * TileKPacked;
-            if (valid_sfa) bytes_a += 2048;  // SF_TILE_BYTES
+            if (valid_sfa) bytes_a += 2048;  // 4 × SF_TILE_BYTES
 
             mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), bytes_a);
 
@@ -574,9 +576,15 @@ __device__ __forceinline__ void prefetch_tile(
                 );
             }
             if (valid_sfa) {
-                tma_load_2d_cta_no_arrive(
-                    sfa_stage[stage], desc_SFA, 0, sfa_row_offset, mbar_stage(mbar_a, stage)
-                );
+                // Load 4 × 512-byte tiles into consecutive SMEM
+                #pragma unroll
+                for (int t = 0; t < 4; ++t) {
+                    uint32_t row_offset = (base_tile_sfa + t) * 32;  // 32 rows per tile
+                    tma_load_2d_cta_no_arrive(
+                        sfa_stage[stage] + t * 512,  // 512 bytes offset per tile
+                        desc_SFA, 0, row_offset, mbar_stage(mbar_a, stage)
+                    );
+                }
             }
 
             // --- TMA Load B (N x K) ---
@@ -586,18 +594,18 @@ __device__ __forceinline__ void prefetch_tile(
             // Relaxed guard for N
             bool valid_n = (c_n < N);
 
-            // --- TMA Load SFB (Pre-permuted 2D layout: [16, 128*rest_n*K_tiles]) ---
+            // --- TMA Load SFB (to_blocked layout: 4 tiles of 32×16=512 bytes per K-tile) ---
+            int n_row_blocks_sfb = (N + 127) / 128;
+            int n_col_blocks_sfb = (K_scales_padded + 3) / 4;
             int n_block_sfb = c_n / TileM;  // TileN = TileM = 128
             int k_tile_idx_sfb = k_tile_base / TileK;
-            int rest_k_sfb = (K_scales_padded + 3) / 4;
-            int K_tiles_per_n_sfb = (rest_k_sfb + 3) / 4;
-            uint32_t sfb_row_offset = (n_block_sfb * K_tiles_per_n_sfb + k_tile_idx_sfb) * 128;
+            int base_tile_sfb = (n_block_sfb * n_col_blocks_sfb + k_tile_idx_sfb) * 4;
             bool valid_sfb = valid_n;
 
-            // Calculate expected bytes for mbar_b
+            // Calculate expected bytes for mbar_b (4 × 512 = 2048 bytes for scales)
             uint32_t bytes_b = 0;
             if (valid_n && valid_k) bytes_b += TileM * TileKPacked; // TileN=TileM=128
-            if (valid_sfb) bytes_b += 2048;  // SF_TILE_BYTES
+            if (valid_sfb) bytes_b += 2048;  // 4 × SF_TILE_BYTES
 
             mbarrier_arrive_expect_tx(mbar_stage(mbar_b, stage), bytes_b);
 
@@ -607,9 +615,15 @@ __device__ __forceinline__ void prefetch_tile(
                 );
             }
             if (valid_sfb) {
-                tma_load_2d_cta_no_arrive(
-                    sfb_stage[stage], desc_SFB, 0, sfb_row_offset, mbar_stage(mbar_b, stage)
-                );
+                // Load 4 × 512-byte tiles into consecutive SMEM
+                #pragma unroll
+                for (int t = 0; t < 4; ++t) {
+                    uint32_t row_offset = (base_tile_sfb + t) * 32;
+                    tma_load_2d_cta_no_arrive(
+                        sfb_stage[stage] + t * 512,
+                        desc_SFB, 0, row_offset, mbar_stage(mbar_b, stage)
+                    );
+                }
             }
         }
     }
@@ -1518,18 +1532,20 @@ void launch_fp4_gemm_optimized(
         }
     }
 
-    // SFA: Pre-permuted atom-tiled layout viewed as 2D: [16 bytes per row, 128 rows per tile]
-    // This stays within TMA box limits (256 max per dimension)
+    // SFA: to_blocked output layout - tiles of (32, 16) = 512 bytes each
+    // to_blocked: reshape(-1, 32, 16).flatten() produces 512-byte tiles
+    // Total tiles = n_row_blocks * n_col_blocks * 4 (from to_blocked permute structure)
     {
-        int rest_k = (K_scales_padded + 3) / 4;  // ceil_div(K_scales, 4)
-        int rest_m = (M + 127) / 128;  // ceil_div(M, 128)
-        int K_tiles = (rest_k + 3) / 4;  // number of K-tiles per M-tile
+        int n_row_blocks = (M + 127) / 128;  // ceil_div(M, 128)
+        int n_col_blocks = (K_scales_padded + 3) / 4;  // ceil_div(K_scales, 4)
+        // to_blocked produces: n_row_blocks * n_col_blocks * 4 tiles of size (32, 16)
+        int total_tiles = n_row_blocks * n_col_blocks * 4;
         
-        // Total rows = 128 * rest_m * K_tiles (each tile is 128 rows of 16 bytes)
-        cuuint64_t total_rows = static_cast<cuuint64_t>(128) * rest_m * K_tiles;
+        // 2D layout: [16 bytes per row, 32 * total_tiles rows]
+        cuuint64_t total_rows = static_cast<cuuint64_t>(32) * total_tiles;
         cuuint64_t dims_SFA[2] = {16, total_rows};
-        cuuint32_t box_SFA[2] = {16, 128};  // 16 bytes × 128 rows = 2048 bytes
-        cuuint64_t strides_SFA[1] = {16};   // stride = 16 bytes between rows
+        cuuint32_t box_SFA[2] = {16, 32};  // 16 bytes × 32 rows = 512 bytes
+        cuuint64_t strides_SFA[1] = {16};  // stride = 16 bytes between rows
         
         CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      2, const_cast<void*>(static_cast<const void*>(SFA_ptr)),
@@ -1543,16 +1559,16 @@ void launch_fp4_gemm_optimized(
         }
     }
 
-    // SFB: Pre-permuted atom-tiled layout viewed as 2D matching SFA
+    // SFB: to_blocked output layout - tiles of (32, 16) = 512 bytes each
     {
-        int rest_k = (K_scales_padded + 3) / 4;  // ceil_div(K_scales, 4)
-        int rest_n = (N + 127) / 128;  // ceil_div(N, 128)
-        int K_tiles = (rest_k + 3) / 4;  // number of K-tiles per N-tile
+        int n_row_blocks = (N + 127) / 128;  // ceil_div(N, 128)
+        int n_col_blocks = (K_scales_padded + 3) / 4;  // ceil_div(K_scales, 4)
+        int total_tiles = n_row_blocks * n_col_blocks * 4;
         
-        cuuint64_t total_rows = static_cast<cuuint64_t>(128) * rest_n * K_tiles;
+        cuuint64_t total_rows = static_cast<cuuint64_t>(32) * total_tiles;
         cuuint64_t dims_SFB[2] = {16, total_rows};
-        cuuint32_t box_SFB[2] = {16, 128};  // 16 bytes × 128 rows = 2048 bytes
-        cuuint64_t strides_SFB[1] = {16};   // stride = 16 bytes between rows
+        cuuint32_t box_SFB[2] = {16, 32};  // 16 bytes × 32 rows = 512 bytes
+        cuuint64_t strides_SFB[1] = {16};
         
         CUresult resSFB = encode_tma_matrix(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      2, const_cast<void*>(static_cast<const void*>(SFB_ptr)),
@@ -1902,40 +1918,27 @@ def custom_kernel(data: input_t) -> output_t:
     b_bytes = b_2d.view(torch.uint8)
 
     # =========================================================================
-    # SCALE FACTORS: Pre-permuted atom-tiled layout for tcgen05.mma
+    # SCALE FACTORS: Use to_blocked() output for tcgen05.mma byte ordering
     # =========================================================================
-    # sfa_permuted shape: (32, 4, rest_m, 4, rest_k, l)
-    # This is the exact layout expected by tcgen05.mma.block_scale hardware.
+    # Debug showed sfa_permuted.flatten() has different byte order than to_blocked()
+    # (only 26% bytes match). tcgen05.mma expects to_blocked() byte order.
     #
-    # Memory layout after flatten: contiguous tiles of 2048 bytes each
-    # Each tile = 128 rows × 16 bytes (scales for one M-tile × one K-tile)
-    #
-    # The 6D layout maps to tiles as:
-    #   Tile[m_block, k_block] = sfa_permuted[:, :, m_block, :, k_block//4:k_block//4+1, :]
-    #   where each tile contains 4 k-blocks (16 scales total)
-    #
-    # For TMA: treat as 2D tensor [total_tiles, 2048] or 1D flat
+    # to_blocked transforms: view(n_row_blocks, 128, n_col_blocks, 4).permute(0,2,1,3)
+    #   -> reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16).flatten()
     
-    # Extract L=0 slice
-    sfa_perm = sfa_permuted[..., 0].contiguous()  # (32, 4, rest_m, 4, rest_k)
-    sfb_perm = sfb_permuted[..., 0].contiguous()  # (32, 4, rest_n, 4, rest_k)
+    from reference import to_blocked
     
-    # Reshape to per-tile format: [rest_m, rest_k, 32, 4, 4] -> [rest_m, rest_k, 512]
-    # Then flatten to [rest_m * rest_k * 512] = [rest_m * rest_k * 2048 / 4] 
-    # Wait - the 6D layout is (32, 4, rest_m, 4, rest_k)
-    # Total elements = 32 * 4 * rest_m * 4 * rest_k = 512 * rest_m * rest_k
+    # Apply to_blocked to get correct byte ordering for tcgen05
+    sfa_blocked = to_blocked(sfa_ref_cpu[:, :, 0])  # Returns flattened 1D tensor
+    sfb_blocked = to_blocked(sfb_ref_cpu[:, :, 0])
     
-    # For simple TMA: flatten entire tensor
-    sfa_bytes = sfa_perm.view(torch.uint8).contiguous()
-    sfb_bytes = sfb_perm.view(torch.uint8).contiguous()
+    # Convert to uint8 bytes
+    sfa_bytes = sfa_blocked.view(torch.uint8).contiguous()
+    sfb_bytes = sfb_blocked.view(torch.uint8).contiguous()
     
-    # Dimensions for TMA descriptor
-    rest_m = sfa_perm.shape[2]
-    rest_k = sfa_perm.shape[4]
-    rest_n = sfb_perm.shape[2]
-    
-    # K_scales_padded for the kernel (unused for tcgen05 path, but passed for interface)
-    K_scales_padded = rest_k * 4  # Each rest_k block has 4 K-scales
+    # Calculate K_scales_padded from actual dimensions
+    K_scales = K // 16
+    K_scales_padded = max(128, ((K_scales + 127) // 128) * 128)
 
     mod = get_module()
     mod.launch_fp4_gemm_optimized(
