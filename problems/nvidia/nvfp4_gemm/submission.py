@@ -1299,24 +1299,37 @@ fp4_gemm_rank2_cta(
         // The permuted buffers are contiguous (no row stride), so leading_byte_offset = 16
         // (16 bytes per logical row in the blocked format)
         if (elect_one_sync_local()) {
-            // Build SMEM descriptors for PERMUTED scale factors
-            // Permuted layout: contiguous 2048 bytes, interpreted as 128 rows × 16 bytes
-            // Leading byte offset = 16 (bytes between rows in permuted format)
-            uint64_t desc_sfa = make_sf_smem_desc(sfa_permuted_smem, 16, 0);
-            uint64_t desc_sfb = make_sf_smem_desc(sfb_permuted_smem, 16, 0);
+            // tcgen05.cp.cta_group::1.32x128b.warpx4 copies 4 TMEM columns per call (32 DPs × 128b)
+            // Scale factors need 16 columns each, so we need 4 iterations
+            // Each iteration:
+            //   - Reads 512 bytes from SMEM (32 rows × 16 bytes, with 16B row stride)
+            //   - Writes to 4 TMEM columns
+            //
+            // Permuted buffer layout: 2048 bytes = 4 chunks × 512 bytes
+            // Chunk j covers rows [j*32, (j+1)*32) for all 16 K-scale columns
             
-            // tcgen05.cp.cta_group::1.32x128b.warpx4 - CuTe uses Cp4x32x128bOp for scale factors
-            // 32 data paths × 128 bits with warp x4 broadcast
-            asm volatile(
-                "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
-                :: "r"(tmem_sfa_base), "l"(desc_sfa)
-                : "memory"
-            );
-            asm volatile(
-                "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
-                :: "r"(tmem_sfb_base), "l"(desc_sfb)
-                : "memory"
-            );
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                // Each chunk is 512 bytes = 32 rows × 16 bytes
+                // Descriptor start address advances by 512 bytes per chunk
+                uint64_t desc_sfa = make_sf_smem_desc(sfa_permuted_smem + j * 512, 16, 0);
+                uint64_t desc_sfb = make_sf_smem_desc(sfb_permuted_smem + j * 512, 16, 0);
+                
+                // TMEM destination advances by 4 columns per chunk
+                uint32_t sfa_dst = tmem_sfa_base + j * 4;
+                uint32_t sfb_dst = tmem_sfb_base + j * 4;
+                
+                asm volatile(
+                    "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
+                    :: "r"(sfa_dst), "l"(desc_sfa)
+                    : "memory"
+                );
+                asm volatile(
+                    "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
+                    :: "r"(sfb_dst), "l"(desc_sfb)
+                    : "memory"
+                );
+            }
         }
 
         __syncthreads();
