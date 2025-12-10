@@ -1245,8 +1245,11 @@ fp4_gemm_rank2_cta(
             int global_row = m_tile + row_base + local_row;
             if (global_row >= M) continue;
 
-            // TMEM row address (each row is TMEM_ROW_PITCH bytes apart)
-            uint32_t tmem_row_base = tmem_c + (local_row * TMEM_ROW_PITCH);
+            // TMEM row address: use DP field (bits 31:16) for row, not byte offset
+            // TMEM format: [31:16] = DP (data path / row), [15:0] = column index
+            // Each subpartition handles rows [row_base, row_base+16), which maps to DP indices
+            uint32_t tmem_row_dp = row_base + local_row;  // Actual DP (row) within the 128-row tile
+            uint32_t tmem_row_base = tmem_c + (tmem_row_dp << 16);  // Encode row in DP field
             
             // Load first 64 columns (lanes 0-15 each get 4 floats)
             {
@@ -1271,11 +1274,11 @@ fp4_gemm_rank2_cta(
                 if (gc3 < N) D[global_row * N + gc3] = __float2half(f3);
             }
             
-            // Load second 64 columns (offset by 64 floats = 256 bytes)
+            // Load second 64 columns (offset by 64 columns in column field)
             {
                 uint32_t d0, d1, d2, d3;
                 cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
-                    tmem_row_base + 256, d0, d1, d2, d3);
+                    tmem_row_base + 64, d0, d1, d2, d3);
                 
                 int col_base = 64 + lane_in_subpart * 4;
                 float f0 = __uint_as_float(d0);
