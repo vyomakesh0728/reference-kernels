@@ -577,12 +577,46 @@ __device__ __forceinline__ void prefetch_tile(
                 );
             }
             if (valid_sfa) {
-                // Load 4 × 512-byte tiles into consecutive SMEM
+                // Atom-tiled layout: (32, 4, rest_m, 4, rest_k) flattened
+                // For M-block m_block_sfa and K-tile k_tile_idx_sfa:
+                // - Byte offset = element_offset (FP8 is 1 byte)
+                // - Element offset in flattened array:
+                //   = sum over all outer dimensions
+                //   
+                // Flattened stride for dimension rest_k: 1
+                // Flattened stride for dimension (4 before rest_k): rest_k
+                // Flattened stride for dimension rest_m: 4 * rest_k
+                // Flattened stride for dimension (4 after 32): rest_m * 4 * rest_k
+                // Flattened stride for dimension 32: 4 * rest_m * 4 * rest_k
+                //
+                // For one M-tile, one K-tile, we access:
+                // - All of (32, 4): covers the atom
+                // - m_block_sfa in rest_m
+                // - All of 4 (second 4)
+                // - 4 consecutive values in rest_k: k_tile_idx_sfa*4 + [0,1,2,3]
+                //
+                // Total bytes per M-tile, K-tile = 32 * 4 * 4 = 512...wait, that's wrong
+                // Actually: 32 * 4 * 1 * 4 * 1 = 512 for ONE rest_k value
+                // We need 4 rest_k values (one K-tile = 16 scales = 4 * 4-scale blocks)
+                // So 4 loads of 512 bytes each
+                
+                int rest_k_dim = n_col_blocks;  // (K_scales + 3) / 4
+                
                 #pragma unroll
                 for (int t = 0; t < 4; ++t) {
-                    uint32_t row_offset = (base_tile_sfa + t) * 32;  // 32 rows per tile
+                    // Byte offset for t-th chunk in atom-tiled flattened layout
+                    // Each chunk: (32, 4, 1, 4, 1) = 512 bytes at specific (rest_m, rest_k) indices
+                    // rest_m index = m_block_sfa
+                    // rest_k index = k_tile_idx_sfa * 4 + t
+                    //
+                    // Byte offset = (k_tile_idx_sfa * 4 + t) * (32 * 4 * 4) + m_block_sfa * (4 * rest_k_dim) * (32 * 4 * 4)
+                    //             = (k_tile_idx_sfa * 4 + t) * 512 + m_block_sfa * rest_k_dim * 2048
+                    int rest_k_idx = k_tile_idx_sfa * 4 + t;
+                    uint32_t byte_offset = rest_k_idx * 512 + m_block_sfa * rest_k_dim * 2048;
+                    uint32_t row_offset = byte_offset / 16;  // Convert to row index (16 bytes per row)
+                    
                     tma_load_2d_cta_no_arrive(
-                        sfa_stage[stage] + t * 512,  // 512 bytes offset per tile
+                        sfa_stage[stage] + t * 512,  // 512 bytes offset per tile in SMEM
                         desc_SFA, 0, row_offset, mbar_stage(mbar_a, stage)
                     );
                 }
@@ -617,10 +651,16 @@ __device__ __forceinline__ void prefetch_tile(
                 );
             }
             if (valid_sfb) {
-                // Load 4 × 512-byte tiles into consecutive SMEM
+                // Atom-tiled layout: (32, 4, rest_n, 4, rest_k) flattened
+                // Same logic as SFA but using n_block_sfb instead of m_block_sfa
+                int rest_k_dim_sfb = n_col_blocks_sfb;  // (K_scales + 3) / 4
+                
                 #pragma unroll
                 for (int t = 0; t < 4; ++t) {
-                    uint32_t row_offset = (base_tile_sfb + t) * 32;
+                    int rest_k_idx = k_tile_idx_sfb * 4 + t;
+                    uint32_t byte_offset = rest_k_idx * 512 + n_block_sfb * rest_k_dim_sfb * 2048;
+                    uint32_t row_offset = byte_offset / 16;
+                    
                     tma_load_2d_cta_no_arrive(
                         sfb_stage[stage] + t * 512,
                         desc_SFB, 0, row_offset, mbar_stage(mbar_b, stage)
