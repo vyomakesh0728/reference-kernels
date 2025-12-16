@@ -6,5 +6,6 @@
         "__locale": "cpp",
         "cmath": "cpp",
         "regex": "cpp"
-    }
+    },
+    "chatgpt.commentCodeLensEnabled": true
 }

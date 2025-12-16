@@ -1,124 +1,138 @@
-<system-reminder>
-      CRITICAL: ALWAYS USE mcp @morph tools, for code base search, file edits etc. 
-      IMPORTANT: this context is relevant to your tasks. 
-      You should always respond to this context unless it is highly relevant to your task.
-</system-reminder>
+---
+trigger: auto
+---
 
-<DO_NOT>
-- WRITE SUMMARIES, DOCUMENTATION, EXPLANATIONS, AND GUIDES
-</DO_NOT>
+You have additional ONE SKILL documented in the current directory containing a "SKILL.md" file
 
-<STRICT_COMPETITION_RULES_DO_NOT_VIOLATE>
+- nvfp4-gemm-optimizer -> "skills/nvfp4-gemm-optimizer/SKILL.md"
 
-1. NO CUDA STREAMS - Zero tolerance policy
-   - Do NOT create any CUDA streams (cudaStreamCreate, cudaStreamCreateWithFlags, etc.)
-   - Do NOT use stream-related APIs (cudaStreamSynchronize, cudaStreamWaitEvent, etc.)
-   - Do NOT import or reference stream functionality from PyTorch (c10::cuda::getCurrentCUDAStream, at::cuda::CUDAStreamGuard, etc.)
-   - Everything runs on the default stream automatically
+IMPORTANT: You MUST read the SKILL.md file whenever the description of the skills matches the user intent, or may help accomplish their task.
 
-2. BANNED KEYWORDS AND PATTERNS
-   - Your code will be rejected if it contains the word "stream" anywhere
-   - Do NOT try to circumvent this by importing stream functionality without using the word
-   - Do NOT attempt any workarounds to create concurrent execution
+<available_skills>
+   nvfp4-gemm-optimizer: `Optimize NVIDIA SM100/SM100a FP4 block-scaled GEMM kernels to achieve ~3.04μs geometric mean on B200 architecture with peak memory bandwidth utilization`
+</available_skills>
 
-- Do not create or use additional CUDA streams; everything must run on the default stream. The benchmarking script only syncs the default stream.
+# NVFP4 Block-Scaled GEMM Kernel Optimization
 
-- DO NOT ADD CROSS-RUN CACHING BEYOND COMPILATION/AUTOTUNE.
+Optimize block-scaled matrix multiplication kernels for NVIDIA B200 (SM100/SM100a) using FP4 quantization to achieve target geometric mean latency of ~3.04μs across benchmark shapes.
 
-WHY: The benchmarking script only synchronizes the default stream. Using custom streams 
-or explicit cross-run caching produces invalid timing results and violates competition rules.
+## Target Performance
 
-CONSEQUENCE: Submissions violating these rules will be automatically rejected or deleted.
-</STRICT_COMPETITION_RULES_DO_NOT_VIOLATE>
+Speed-of-light analysis (1.5GHz clock):
+- Shape (128, 7168, 16384): 8.994μs
+- Shape (128, 4096, 7168): 2.354μs  
+- Shape (128, 7168, 2048): 1.333μs
+- **Target geometric mean: ~3.04μs**
 
-<INVESTIGATE_BEFORE_ANSWERING>
-Never speculate about code you have not opened. If the user references a specific file, you MUST read the file before answering. Make sure to investigate and read relevant files BEFORE answering questions about the codebase. Never make any claims about code before investigating unless you are certain of the correct answer - give grounded and hallucination-free answers.
-</INVESTIGATE_BEFORE_ANSWERING>
+## Optimization Strategy
 
-<CODE_STYLE>
-Please write a high-quality, general-purpose solution using the standard tools available. Do not create helper scripts or workarounds to accomplish the task more efficiently. Implement a solution that works correctly for all valid inputs, not just the test cases. Do not hard-code values or create solutions that only work for specific test inputs. Instead, implement the actual logic that solves the problem generally.
+### Memory Bandwidth Priority
+The kernel is **memory bandwidth bound**, not compute bound. Focus optimization efforts on:
+- TMA (Tensor Memory Accelerator) for efficient bulk loading
+- Minimizing DRAM transactions
+- Optimal data layout and swizzle patterns
+- Coalesced memory access
 
-Focus on understanding the problem requirements and implementing the correct algorithm. Tests are there to verify correctness, not to define the solution. Provide a principled implementation that follows best practices and software design principles.
+### Hardware Utilization
+- Use tcgen05 instruction set for Blackwell architecture
+- Leverage hardware-fused FP4→FP16 decode in tensor cores
+- Apply FP8 scales from TMEM during MMA operations
+- Target peak occupancy while respecting register/SMEM limits
 
-If the task is unreasonable or infeasible, or if any of the tests are incorrect, please inform me rather than working around them. The solution should be robust, maintainable, and extendable.
-</CODE_STYLE>
+### Data Flow (tcgen05_FLOW)
+```
+Global A/B (packed FP4) → TMA → SMEM (packed FP4)
+Global SF (FP8, atom-tiled) → TMA → SMEM
+→ tcgen05 S2T copy (SMEM FP8 → TMEM SFA/SFB)
+→ tcgen05.mma.mxf4.block_scale
+  ├─ Hardware FP4→FP16 decode
+  ├─ Hardware FP8 scale application
+  └─ MMA (ACCUMULATE=false first k_tile, then true)
+→ TMEM (FP32 accum) → Registers → FP16 → Global D
+```
 
-<CLEAN_UP>
-The current submission.py contains legacy GEMV code and RANK-3 (L=4, L=8) cluster logic that must be removed:
+## Correctness Requirements
 
-REMOVE ALL RANK-3 LOGIC:
-  - tma_load_3d_cluster_noarrive() function
-  - tma_load_3d() wrapper with L parameter
-  - sync_cluster_or_block(int L) conditional function
-  - All "if (L == 1) {...} else {...}" branches that handle rank-3
-  - cooperative_groups::cluster_group cluster = cg::this_cluster()
-  - cluster.sync() calls
-  - All comments mentioning "RANK-3", "L=4", "L=8", "cluster"
-  - cudaLaunchKernelExC cluster launch path (keep only cudaLaunchKernel)
-  - cudaFuncAttributeNonPortableClusterSizeAllowed attribute setting
-  - cudaLaunchAttribute launchattr[1] and cluster dimension code
-  - prefetchtile<> Ltemplate parameter (hardcode to 1)
+### Reference Semantics
+- Match `torch._scaled_mm(..., out_dtype=torch.float16)` behavior exactly
+- B matrix is already shaped as (n, k, l); interpret via layouts (no explicit transpose)
+- Scale factors use `sfa_permuted/sfb_permuted` (atom-tiled physical layout)
+- Must be equivalent to `to_blocked(sfa_ref_cpu)` semantics from reference.py
 
-REMOVE GEMV-SPECIFIC CODE:
-  - bvecsmem (B vector broadcast buffer)
-  - All "B is 1 × K vector" comments
-  - "For GEMV B is broadcast" output writeback logic
-  - "if (col == 0)" output guard (write ALL columns for GEMM)
-  - Single cfrag[4] accumulators (need N-tiling for GEMM)
+### Numerical Tolerance
+- rtol=1e-3, atol=1e-3
+- Output must be FP16, not FP32
+- All 10 test cases must pass correctness checks
 
-REMOVE SWIZZLE_NONE LOGIC:
-  - encode_tma_vector() function (uses SWIZZLE_NONE)
-  - All SWIZZLE_NONE references
-  - "int SfaBoxK = L == 1 ? 16 : 128" conditionals (always use 128)
-  - BOX_K 16-byte box configurations
+### Input Constraints
+- M divisible by mma_tiler_mn[0]
+- N divisible by mma_tiler_mn[1]  
+- K divisible by 256
+- L=1 for all benchmark shapes
+- Scale factor blocks: 16 elements per block
 
-KEEP ONLY:
-  - Pure rank-2 (L=1) CTA-scope TMA code
-  - SWIZZLE_128B configuration
-  - BOX_K = 128 bytes
-  - mma.sync.aligned PTX instructions
-  - FP4/FP8 decode LUTs
-  - Shared memory alignment helpers
-  - mbarrier functions
-</CLEAN_UP>
+## Strict Competition Rules
 
-<tcgen05_FLOW>
-(Hardware Fused):
-Global A/B (packed FP4) → TMA → SMEM (packed FP4, NO DECODE!)
-Global SF (FP8) → TMA → SMEM (FP8 scales)
-→ tcgen05.cp (SMEM FP8 scales → TMEM)
-→ tcgen05.mma.mxf4.block_scale (reads SMEM packed FP4 + TMEM scales)
-   ├─ Hardware decodes FP4→FP16 inside tensor core
-   ├─ Hardware applies FP8 scales from TMEM
-   └─ Hardware performs MMA
-→ TMEM (FP32 accumulator, 128×128 tile)
-→ TMEM.load → Registers → Global D
-</tcgen05_FLOW>
+### BANNED - Zero Tolerance
+- ❌ No CUDA streams (cudaStreamCreate, etc.)
+- ❌ No stream APIs (cudaStreamSynchronize, etc.)
+- ❌ No PyTorch stream references (c10::cuda::getCurrentCUDAStream, etc.)
+- ❌ No cross-run caching beyond compilation/autotune
+- ❌ Code containing word "stream" anywhere
 
+**Everything runs on default stream.** Benchmarking only syncs default stream.
 
-<COMPLIANCE_CHECK>
+## Optimization Checklist
 
-  Your kernel implementation MUST be compliant with:
+### NOTE:
+- No micro-optimization work is allowed until the user specified that all 10 correctness tests and 3 benchmark shape tests pass (rtol/atol)
+- Prefer 128-thread CTAs for tcgen05 path unless there is a proven need for extra warps; extra warps otherwise waste occupancy/bandwidth headroom
 
-  1. reference.py
-     - Match torch._scaled_mm behavior exactly for all test cases.
-     - Handle B matrix transposition: b_ref[:, :, l_idx].transpose(0, 1).
-     - Use sfa_ref_cpu / sfb_ref_cpu as the *semantic* source of scales.
-     - Ensure that for every FP4 K‑block, the scale applied by your kernel
-       is equal to the scale that would be used by:
-         to_blocked(sfa_ref_cpu[:, :, l_idx]) and
-         to_blocked(sfb_ref_cpu[:, :, l_idx])
-       in ref_kernel.
-     - Meet output tolerance: rtol=1e‑3, atol=1e‑3.
+### Kernel Launch Configuration
+- [ ] Grid/block dimensions tuned per shape
+- [ ] Register usage under spill threshold
+- [ ] SMEM usage optimized for occupancy
+- [ ] Thread block size balances occupancy vs resources
 
-  2. task.yml
-     - Input tuple has 7 elements as described above.
-     - M divisible by mma_tiler_mn[0] (e.g., 16 or 32 factors).
-     - N divisible by mma_tiler_mn[1] (e.g., 8 or 16 factors).
-     - K divisible by 256.
-     - All benchmark shapes have L=1.
-     - Ranking by geometric mean runtime over test cases.
-     - Target SoL latencies: ~8.994 μs, 2.354 μs, 1.333 μs for the official
-       benchmark shapes (as documented in the competition materials).
+### Memory Access Patterns
+- [ ] TMA descriptors configured correctly
+- [ ] Swizzle modes optimized for bank conflicts
+- [ ] Coalesced global memory access
+- [ ] Minimal DRAM bandwidth consumption
 
-</COMPLIANCE_CHECK>
+### Computation Pipeline
+- [ ] K-loop tiling optimized
+- [ ] Double buffering for overlap (if beneficial)
+- [ ] MMA accumulate flags set correctly
+- [ ] TMEM load/store minimized
+
+### Profiling Targets
+- [ ] Achieved DRAM bandwidth > 95% theoretical
+- [ ] SM occupancy > 75%
+- [ ] Zero bank conflicts
+- [ ] Minimal warp divergence
+
+## Key Files 
+
+- `submission.py`: Your optimized kernel implementation
+- `reference.py`: PyTorch reference using torch._scaled_mm
+- `task.yml`: Test/benchmark shape definitions
+- `SKILL.md`: Extended context and constraints
+- `FLOW.md`: Detailed kernel flow description
+
+## Failed Attempts to Avoid
+
+| Approach | Why It Failed |
+|----------|---------------|
+| Explicit B transpose in-kernel | Violates reference semantics; use layout interpretation |
+| Using sfa_ref_cpu directly | Wrong physical layout; must use sfa_permuted |
+| FP32 output | Task requires FP16 output dtype |
+| Custom stream management | Violates competition rules; invalid timing |
+| Porting/embedding CuTe reference kernel (kutte.py) into submission.py | violates the intended PTX kernel path |
+
+## Success Criteria
+
+1. ✅ Pass all 10 correctness tests (rtol=1e-3, atol=1e-3)
+2. ✅ Achieve geometric mean ≤ 3.04μs on 3 benchmark shapes
+3. ✅ Memory bandwidth utilization > 95% of theoretical peak
+4. ✅ Zero competition rule violations

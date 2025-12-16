@@ -5,6 +5,15 @@ from task import input_t, output_t
 from torch.utils.cpp_extension import load_inline
 # No longer need to_blocked - using sfa_permuted (atom-tiled) directly
 
+
+def _u8_flat_storage_view(t: torch.Tensor) -> torch.Tensor:
+    st = t.untyped_storage()
+    off = t.storage_offset()
+    n = t.numel()
+    out = torch.empty((0,), device=t.device, dtype=torch.uint8)
+    out.set_(st, off, (n,), (1,))
+    return out
+
 cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
 
 cuda_source = r"""
@@ -22,9 +31,6 @@ cuda_source = r"""
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
-#include <cute/tensor.hpp>
-#include <cute/arch/mma_sm100_umma.hpp>
-#include <cute/arch/mma_sm100_desc.hpp>
 #include <cute/arch/copy_sm100.hpp>
 
 using cutlass::half_t;
@@ -83,8 +89,7 @@ __device__ __forceinline__ half decode_fp4_e2m1(uint8_t nibble) {
 
 __device__ __forceinline__ float decode_fp8_e4m3(uint8_t val) {
     cutlass::float_e4m3_t fp8_val = *reinterpret_cast<cutlass::float_e4m3_t*>(&val);
-    // CRITICAL: _scaled_mm uses |scale| - block scales must be positive magnitudes
-    return fabsf(__half2float(__float2half_rn(fp8_val)));
+    return __half2float(__float2half_rn(fp8_val));
 }
 
 // Hardware FP4 decode helper using cvt.rn.f16x2.e2m1x2, adapted from gau.py.
@@ -333,7 +338,7 @@ __device__ __forceinline__ uint64_t make_smem_desc_tcgen05(
 ) {
     // Get 32-bit shared memory address
     uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
-    
+
     // Build descriptor
     uint64_t desc = 0;
     // start_address: bits [0:14), value is smem_addr >> 4
@@ -344,7 +349,21 @@ __device__ __forceinline__ uint64_t make_smem_desc_tcgen05(
     desc |= ((uint64_t)((stride_byte_offset >> 4) & 0x3FFF) << 32);
     // layout_type (swizzle): bits [61:64)
     desc |= ((uint64_t)(swizzle_type & 0x7) << 61);
-    
+
+    return desc;
+}
+
+__device__ __forceinline__ uint64_t make_smem_desc_tcgen05_addr(
+    uint32_t smem_addr,
+    int leading_byte_offset,
+    int stride_byte_offset,
+    int swizzle_type
+) {
+    uint64_t desc = 0;
+    desc |= ((uint64_t)(smem_addr >> 4) & 0x3FFF);
+    desc |= ((uint64_t)((leading_byte_offset >> 4) & 0x3FFF) << 16);
+    desc |= ((uint64_t)((stride_byte_offset >> 4) & 0x3FFF) << 32);
+    desc |= ((uint64_t)(swizzle_type & 0x7) << 61);
     return desc;
 }
 
@@ -427,6 +446,18 @@ __device__ __forceinline__ uint64_t make_sf_smem_desc(
     return desc;
 }
 
+__device__ __forceinline__ uint64_t make_sf_smem_desc_addr(
+    uint32_t smem_addr,
+    int leading_byte_offset,
+    int swizzle_type
+) {
+    uint64_t desc = 0;
+    desc |= ((uint64_t)(smem_addr >> 4) & 0x3FFF);
+    desc |= ((uint64_t)((leading_byte_offset >> 4) & 0x3FFF) << 16);
+    desc |= ((uint64_t)(swizzle_type & 0x7) << 61);
+    return desc;
+}
+
 // Copy scale factors from SMEM to TMEM using tcgen05.cp
 // This is the correct way - tcgen05.st expects register operands, not memory
 __device__ __forceinline__ void copy_sf_smem_to_tmem(
@@ -445,58 +476,6 @@ __device__ __forceinline__ void copy_sf_smem_to_tmem(
         :: "r"(tmem_dst), "l"(smem_desc)
         : "memory"
     );
-}
-
-// =========================================================================
-// TILE-LOCAL SCALE PERMUTATION FOR TCGEN05
-// =========================================================================
-// tcgen05.mma.block_scale expects scales in a specific "blocked" layout
-// that matches Python's to_blocked() function. This function applies the
-// same permutation to per-tile scale data after TMA loads simple scales.
-//
-// Python to_blocked for [128, 16] tile:
-//   view(1, 128, 4, 4).permute(0,2,1,3).reshape(-1,4,32,4).transpose(1,2).reshape(-1,32,16).flatten()
-//
-// Resulting index mapping:
-//   dst_idx = kb * 512 + (m % 32) * 16 + (m / 32) * 4 + k_in_block
-// where:
-//   kb = k / 4  (K-block index, 0..3)
-//   k_in_block = k % 4  (within K-block, 0..3)
-//   m = row index (0..127)
-//
-template<int TileM, int KScalesTile>
-__device__ __forceinline__ void permute_scales_to_blocked(
-    const uint8_t* __restrict__ src,  // Simple layout [TileM, SrcStride] with SrcStride >= KScalesTile
-    uint8_t* __restrict__ dst,        // Blocked layout [TileM * KScalesTile] contiguous
-    int SrcStride,                    // Stride between rows in src (SfaBoxK = 128)
-    int k_scale_offset,               // K-scale offset within SMEM (e.g., 0, 16, 32, ... for each K-tile)
-    int tid,                          // Thread ID
-    int num_threads                   // Total threads
-) {
-    // Total elements = TileM * KScalesTile = 128 * 16 = 2048
-    constexpr int TOTAL = TileM * KScalesTile;
-    
-    // Each thread processes multiple elements
-    #pragma unroll 4
-    for (int dst_idx = tid; dst_idx < TOTAL; dst_idx += num_threads) {
-        // Decode blocked index to source coordinates
-        // dst_idx = kb * 512 + m_in_group * 16 + m_group * 4 + k_in_block
-        int kb = dst_idx / 512;              // 0..3 (for KScalesTile=16)
-        int remaining = dst_idx % 512;
-        int m_in_group = remaining / 16;     // 0..31
-        int combined = remaining % 16;
-        int m_group = combined / 4;          // 0..3
-        int k_in_block = combined % 4;
-        
-        // Reconstruct original (m, k) coordinates
-        int m = m_in_group + m_group * 32;   // 0..127
-        // k is relative to current K-tile, add offset to get actual column in SMEM
-        int k = k_scale_offset + (kb * 4 + k_in_block);  // e.g., [0,15], [16,31], [32,47], ...
-        
-        // Read from simple layout, write to blocked layout
-        int src_idx = m * SrcStride + k;
-        dst[dst_idx] = src[src_idx];
-    }
 }
 
 // Elect one thread in warp to execute (CuTe-style elect_one_sync)
@@ -554,20 +533,15 @@ __device__ __forceinline__ void prefetch_tile(
             // --- TMA Load SFA (atom-tiled layout: 2048 bytes per K-tile) ---
             // Atom-tiled: (32, 4, rest_m, 4, rest_k) flattened → 2048 bytes
             // TMA box is [16, 32] = 512 bytes, need 4 loads to get 2048 bytes total
-            int n_row_blocks = (M + 127) / 128;
             int n_col_blocks = (K_scales + 3) / 4;
             int m_block_sfa = c_m / TileM;
             int k_tile_idx_sfa = k_tile_base / TileK;
-            
-            // Base tile index: m_block * n_col_blocks + k_tile_idx * 4
-            // k_tile_idx * 4 because each kernel K-tile spans 4 column blocks in atom-tiled layout
-            int base_tile_sfa = m_block_sfa * n_col_blocks + k_tile_idx_sfa * 4;
             bool valid_sfa = valid_m;
 
             // Calculate expected bytes for mbar_a (4 × 512 = 2048 bytes for scales)
             uint32_t bytes_a = 0;
             if (valid_m && valid_k) bytes_a += TileM * TileKPacked;
-            if (valid_sfa) bytes_a += 2048;  // 4 × SF_TILE_BYTES
+            if (valid_sfa) bytes_a += 2048;  // SF_TILE_BYTES
 
             mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), bytes_a);
 
@@ -609,10 +583,8 @@ __device__ __forceinline__ void prefetch_tile(
                     // rest_m index = m_block_sfa
                     // rest_k index = k_tile_idx_sfa * 4 + t
                     //
-                    // Byte offset = (k_tile_idx_sfa * 4 + t) * (32 * 4 * 4) + m_block_sfa * (4 * rest_k_dim) * (32 * 4 * 4)
-                    //             = (k_tile_idx_sfa * 4 + t) * 512 + m_block_sfa * rest_k_dim * 2048
                     int rest_k_idx = k_tile_idx_sfa * 4 + t;
-                    uint32_t byte_offset = rest_k_idx * 512 + m_block_sfa * rest_k_dim * 2048;
+                    uint32_t byte_offset = (uint32_t(m_block_sfa) * uint32_t(rest_k_dim) + uint32_t(rest_k_idx)) * 512u;
                     uint32_t row_offset = byte_offset / 16;  // Convert to row index (16 bytes per row)
                     
                     tma_load_2d_cta_no_arrive(
@@ -630,18 +602,15 @@ __device__ __forceinline__ void prefetch_tile(
             bool valid_n = (c_n < N);
 
             // --- TMA Load SFB (atom-tiled layout: 2048 bytes per K-tile) ---
-            int n_row_blocks_sfb = (N + 127) / 128;
             int n_col_blocks_sfb = (K_scales + 3) / 4;
             int n_block_sfb = c_n / TileM;  // TileN = TileM = 128
             int k_tile_idx_sfb = k_tile_base / TileK;
-            // Base tile index: n_block * n_col_blocks + k_tile_idx * 4
-            int base_tile_sfb = n_block_sfb * n_col_blocks_sfb + k_tile_idx_sfb * 4;
             bool valid_sfb = valid_n;
 
             // Calculate expected bytes for mbar_b (4 × 512 = 2048 bytes for scales)
             uint32_t bytes_b = 0;
             if (valid_n && valid_k) bytes_b += TileM * TileKPacked; // TileN=TileM=128
-            if (valid_sfb) bytes_b += 2048;  // 4 × SF_TILE_BYTES
+            if (valid_sfb) bytes_b += 2048;  // SF_TILE_BYTES
 
             mbarrier_arrive_expect_tx(mbar_stage(mbar_b, stage), bytes_b);
 
@@ -658,7 +627,7 @@ __device__ __forceinline__ void prefetch_tile(
                 #pragma unroll
                 for (int t = 0; t < 4; ++t) {
                     int rest_k_idx = k_tile_idx_sfb * 4 + t;
-                    uint32_t byte_offset = rest_k_idx * 512 + n_block_sfb * rest_k_dim_sfb * 2048;
+                    uint32_t byte_offset = (uint32_t(n_block_sfb) * uint32_t(rest_k_dim_sfb) + uint32_t(rest_k_idx)) * 512u;
                     uint32_t row_offset = byte_offset / 16;
                     
                     tma_load_2d_cta_no_arrive(
@@ -1055,10 +1024,8 @@ fp4_gemm_rank2_cta(
 
     const bool use_tma_a = (desc_A != nullptr);
 
-    __shared__ uint32_t stage_phase_smem[StageCount];
     if (tid == 0) {
         for (int s = 0; s < StageCount; ++s) {
-            stage_phase_smem[s] = 0;
             mbarrier_init(mbar_stage(mbar_a, s)); 
             mbarrier_init(mbar_stage(mbar_b, s));
         }
@@ -1196,7 +1163,6 @@ fp4_gemm_rank2_cta(
     __shared__ uint32_t tmem_base_ptr_tcgen05;
 
     // Prologue: prefetch stages 0..StageCount-2 (same as classic path)
-    int phase = 0;
     for (int s = 0; s < StageCount - 1; ++s) {
         int k_tile = s * TileK;
         if (k_tile < K) {
@@ -1211,19 +1177,19 @@ fp4_gemm_rank2_cta(
     }
 
     // Allocate TMEM once per CTA
-    // Layout: 256 columns total
-    //   - Cols 0-127: Accumulator (128x128 floats, but stored in 128 rows)
-    //   - Cols 128-143: SFA scale factors (16 bytes per row = 16 cols at 1 byte each)
-    //   - Cols 144-159: SFB scale factors
+    // Layout: 512 columns total
+    //   - Accumulator: [0, 128)
+    //   - SFA:         [128, 144)
+    //   - SFB:         [144, 160)
     __syncthreads();
     if (tid == 0) {
         tmem_base_ptr_tcgen05 = 0;
     }
     __syncthreads();
     
-    if (warp_id == 0) {
+    if (tid == 0) {
         uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr_tcgen05);
-        int num_cols = 256;  // Power of 2, multiple of 32, < 512
+        int num_cols = 512;
         asm volatile(
             "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
             :
@@ -1232,39 +1198,18 @@ fp4_gemm_rank2_cta(
     __syncthreads();
     uint32_t tmem_c = tmem_base_ptr_tcgen05;
     
-    // TMEM addresses for scale factors
-    // CRITICAL: TMEM addresses are BYTE-ADDRESSED, not column indices!
-    // Format: bits [15:0] = byte offset, bits [31:16] = DP (data path/row)
-    //
-    // Memory layout:
-    //   - Bytes 0-511: Accumulator C (128 columns × 4 bytes/col = 512 bytes)
-    //   - Bytes 512-575: SFA scale factors (16 columns × 4 bytes = 64 bytes)
-    //   - Bytes 576-639: SFB scale factors (16 columns × 4 bytes = 64 bytes)
-    //
-    // TMEM base addresses (byte offsets from tmem_c)
-    constexpr int ACCUM_BYTE_SIZE = 128 * sizeof(float);  // 512 bytes
-    constexpr int SF_BYTE_SIZE = 16 * sizeof(float);       // 64 bytes
-    
-    // Scale factor TMEM addresses (BYTE offsets, not column offsets!)
-    uint32_t tmem_sfa_base = tmem_c + ACCUM_BYTE_SIZE;           // tmem_c + 512
-    uint32_t tmem_sfb_base = tmem_c + ACCUM_BYTE_SIZE + SF_BYTE_SIZE;  // tmem_c + 576
+    // TMEM addresses for scale factors (32b columns)
+    constexpr uint32_t ACC_COLS        = TileN;                          // 128 columns for FP32 values
+    constexpr uint32_t KScalesTile     = TileK / 16;                     // 16 FP8 scales per K-tile
+    constexpr uint32_t SF_KBLOCK_COUNT = KScalesTile / 4;                // 4 K-block panels per K-tile
+    // Cp4x32x128b copies 32 rows × 128b (16B) per row. Each row is 16B = 4 TMEM b32 columns.
+    constexpr uint32_t SF_COLS_PER_KB  = 16u / 4u;                       // 4 columns per K-block panel
+    constexpr uint32_t SFA_COLS_TOTAL  = SF_KBLOCK_COUNT * SF_COLS_PER_KB;
+    constexpr uint32_t TMEM_COL_SFA_BASE = ACC_COLS;
+    constexpr uint32_t TMEM_COL_SFB_BASE = ACC_COLS + SFA_COLS_TOTAL;
 
-    // =========================================================================
-    // PERMUTED SCALE BUFFERS FOR TCGEN05
-    // =========================================================================
-    // TMA loads simple scales into sfa_stage/sfb_stage (128-byte row stride).
-    // tcgen05.mma expects "blocked" layout scales in TMEM.
-    // We allocate separate contiguous buffers for permuted scales, then
-    // Scales are pre-loaded in atom-tiled layout via TMA.
-    // Use tcgen05.cp to copy from SMEM to TMEM.
-    //
-    // Size: TileM * (TileK/16) = 128 * 16 = 2048 bytes each
-    constexpr int KScalesTile = TileK / 16;  // 16 for TileK=256
-    constexpr int PERMUTED_SF_SIZE = TileM * KScalesTile;  // 2048 bytes
-    
-    // Use static shared memory for permuted buffers (single-buffered, reused each K-tile)
-    __shared__ alignas(128) uint8_t sfa_permuted_smem[PERMUTED_SF_SIZE];
-    __shared__ alignas(128) uint8_t sfb_permuted_smem[PERMUTED_SF_SIZE];
+    uint32_t tmem_sfa_base = tmem_c + TMEM_COL_SFA_BASE;
+    uint32_t tmem_sfb_base = tmem_c + TMEM_COL_SFB_BASE;
 
     // NOTE: TMEM accumulator initialization is handled by scaleC=0 on the first MMA.
     // tcgen05.mma with scaleC=0 (predicate p=false) does D = A*B, ignoring existing C.
@@ -1279,11 +1224,14 @@ fp4_gemm_rank2_cta(
         0,          // sf_format = E4M3
         tmem_sfa_base, tmem_sfb_base
     );
+    uint32_t idescE_hi = uint32_t(idescE >> 32);
     #endif
 
     // Main K-loop
     for (int k_tile = 0; k_tile < K; k_tile += TileK) {
-        int stage = (k_tile / TileK) % StageCount;
+        int tile_iter = (k_tile / TileK);
+        int stage = tile_iter % StageCount;
+        uint32_t phase = uint32_t((tile_iter / StageCount) & 1);
         int next_k = k_tile + (StageCount - 1) * TileK;
         
         // Issue TMA prefetch for next tile
@@ -1297,88 +1245,112 @@ fp4_gemm_rank2_cta(
             );
         }
 
-        // Wait for current TMA to complete
-        mbarrier_wait_parity(mbar_stage(mbar_a, stage), phase);
-        mbarrier_wait_parity(mbar_stage(mbar_b, stage), phase);
+        // Wait for current TMA to complete (reduce spin to a single warp)
+        if (warp_id == 0) {
+            mbarrier_wait_parity(mbar_stage(mbar_a, stage), phase);
+            mbarrier_wait_parity(mbar_stage(mbar_b, stage), phase);
+        }
         __syncthreads();
 
         #if __CUDA_ARCH__ >= 1000
         // =========================================================================
-        // Copy scales from SMEM to TMEM for tcgen05.mma
+        // Scale SMEM -> TMEM (Cp4x32x128b): one copy per K-block (K=64)
         // =========================================================================
-        
-        if (elect_one_sync_local()) {
-            // tcgen05.cp copies scale factors to TMEM
-            // tcgen05.mma reads scales from TMEM addresses
-            
-            #pragma unroll
-            for (int j = 0; j < 4; ++j) {
-                uint64_t desc_sfa = make_sf_smem_desc(sfa_stage[stage] + j * 512, 16, 0);
-                uint64_t desc_sfb = make_sf_smem_desc(sfb_stage[stage] + j * 512, 16, 0);
-                
-                // TMEM addressing: row in DP field (upper 16 bits)
-                uint32_t sfa_dst = tmem_sfa_base + (j * 32 << 16);
-                uint32_t sfb_dst = tmem_sfb_base + (j * 32 << 16);
-                
-                asm volatile(
-                    "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
-                    :: "r"(sfa_dst), "l"(desc_sfa)
-                    : "memory"
-                );
-                asm volatile(
-                    "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
-                    :: "r"(sfb_dst), "l"(desc_sfb)
-                    : "memory"
-                );
-            }
+        // Each K-block holds 32 rows × 16B/row = 512B of FP8 scale data in SMEM.
+        // sfa_stage/sfb_stage are laid out as 4 contiguous 512B chunks (one per K-block).
+        uint32_t sfa_stage_smem = cvta_to_shared_u32(sfa_stage[stage]);
+        uint32_t sfb_stage_smem = cvta_to_shared_u32(sfb_stage[stage]);
+        #pragma unroll
+        for (int kb = 0; kb < int(SF_KBLOCK_COUNT); ++kb) {
+            uint32_t sfa_dst = tmem_sfa_base + kb * SF_COLS_PER_KB;
+            uint64_t desc_sfa = make_sf_smem_desc_addr(
+                sfa_stage_smem + uint32_t(kb) * 512u, 16, 0
+            );
+            asm volatile(
+                "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
+                :: "r"(sfa_dst), "l"(desc_sfa)
+                : "memory"
+            );
+
+            uint32_t sfb_dst = tmem_sfb_base + kb * SF_COLS_PER_KB;
+            uint64_t desc_sfb = make_sf_smem_desc_addr(
+                sfb_stage_smem + uint32_t(kb) * 512u, 16, 0
+            );
+            asm volatile(
+                "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
+                :: "r"(sfb_dst), "l"(desc_sfb)
+                : "memory"
+            );
         }
 
         __syncthreads();
-        // Build SMEM descriptors for packed FP4 A and B
-        // A: [TileM, TileK/2] packed FP4 in SMEM
-        // B: [TileN, TileK/2] packed FP4 in SMEM
-        // Leading byte offset = TileK/2 (bytes between consecutive rows)
-        uint64_t desc_a_smem = make_smem_desc_tcgen05(
-            a_packed_stage[stage],
-            TileKPacked,    // leading_byte_offset = K/2 bytes between M rows
-            0,              // stride_byte_offset (K is contiguous)
-            0               // SWIZZLE_NONE for packed FP4 (TMA already swizzled)
-        );
-        uint64_t desc_b_smem = make_smem_desc_tcgen05(
-            b_packed_stage[stage],
-            TileKPacked,    // leading_byte_offset = K/2 bytes between N rows
-            0,
-            0               // SWIZZLE_NONE
-        );
-        
-        // Issue tcgen05.mma.kind::mxf4nvf4.block_scale.block16
-        // scaleC controls accumulate mode via predicate p:
-        //   scaleC=0 -> p=false -> D = A*B       (ZERO mode, first iteration)
-        //   scaleC=1 -> p=true  -> D = A*B + C   (ACCUMULATE mode, subsequent)
-        // CRITICAL: First K-tile MUST use scaleC=0 to zero uninitialized TMEM!
-        uint32_t scaleC = (k_tile == 0) ? 0u : 1u;
-        
-        if (elect_one_sync_local()) {
-            asm volatile(
-                "{\n\t"
-                ".reg .pred p;\n\t"
-                "setp.ne.b32 p, %4, 0;\n\t"
-                "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
-                "[%0], %1, %2, %3, [%5], [%6], p;\n\t"
-                "}\n"
-                :
-                : "r"(tmem_c), "l"(desc_a_smem), "l"(desc_b_smem),
-                  "r"(uint32_t(idescE >> 32)), "r"(scaleC),
-                  "r"(tmem_sfa_base), "r"(tmem_sfb_base)
-                : "memory"
-            );
+
+        // =========================================================================
+        // MMA: one tcgen05.mma per K-block (K=64), with ACCUMULATE disabled only
+        // for the first K-block of the full GEMM.
+        // =========================================================================
+        constexpr int kKBlock = 64;
+        constexpr int kKBlockPackedBytes = kKBlock / 2;  // FP4 packed: 2 values / byte
+        static_assert(TileK % kKBlock == 0, "TileK must be divisible by kKBlock");
+        constexpr int kNumKBlocks = TileK / kKBlock;
+
+        uint32_t a_stage_smem = cvta_to_shared_u32(a_packed_stage[stage]);
+        uint32_t b_stage_smem = cvta_to_shared_u32(b_packed_stage[stage]);
+
+        auto mma_kb = [&](int kb, bool accum) {
+            uint32_t a_kb_smem = a_stage_smem + uint32_t(kb) * uint32_t(kKBlockPackedBytes);
+            uint32_t b_kb_smem = b_stage_smem + uint32_t(kb) * uint32_t(kKBlockPackedBytes);
+
+            uint64_t desc_a_smem = make_smem_desc_tcgen05_addr(a_kb_smem, TileKPacked, 0, 0);
+            uint64_t desc_b_smem = make_smem_desc_tcgen05_addr(b_kb_smem, TileKPacked, 0, 0);
+
+            uint32_t tmem_sfa_kb = tmem_sfa_base + uint32_t(kb) * SF_COLS_PER_KB;
+            uint32_t tmem_sfb_kb = tmem_sfb_base + uint32_t(kb) * SF_COLS_PER_KB;
+
+            if (accum) {
+                asm volatile(
+                    "{\n\t"
+                    ".reg .pred p;\n\t"
+                    "setp.ne.b32 p, 1, 0;\n\t"
+                    "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
+                    "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
+                    "}\n"
+                    :
+                    : "r"(tmem_c), "l"(desc_a_smem), "l"(desc_b_smem),
+                      "r"(idescE_hi), "r"(tmem_sfa_kb), "r"(tmem_sfb_kb)
+                    : "memory"
+                );
+            } else {
+                asm volatile(
+                    "{\n\t"
+                    ".reg .pred p;\n\t"
+                    "setp.ne.b32 p, 0, 0;\n\t"
+                    "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
+                    "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
+                    "}\n"
+                    :
+                    : "r"(tmem_c), "l"(desc_a_smem), "l"(desc_b_smem),
+                      "r"(idescE_hi), "r"(tmem_sfa_kb), "r"(tmem_sfb_kb)
+                    : "memory"
+                );
+            }
+        };
+
+        if (k_tile == 0) {
+            mma_kb(0, false);
+            #pragma unroll
+            for (int kb = 1; kb < kNumKBlocks; ++kb) {
+                mma_kb(kb, true);
+            }
+        } else {
+            #pragma unroll
+            for (int kb = 0; kb < kNumKBlocks; ++kb) {
+                mma_kb(kb, true);
+            }
         }
         #endif  // __CUDA_ARCH__ >= 1000
 
         __syncthreads();
-        if ((k_tile / TileK) % StageCount == StageCount - 1) {
-            phase ^= 1;
-        }
     }
 
     // ========================================================================
@@ -1404,39 +1376,54 @@ fp4_gemm_rank2_cta(
         // To cover 128 columns, we need 128/4 = 32 separate loads per row set.
         // With 8 subpartitions handling 16 rows each, each subpart does 32 loads.
         
-        if (warp_id < 4) {
-            int subpart_in_warp = lane_id / 16;  // 0 or 1
-            int lane_in_subpart = lane_id % 16;  // 0..15
-            int global_subpart = warp_id * 2 + subpart_in_warp;  // 0..7 for first 4 warps
+        bool full_tile = (m_tile + TileM <= M) && (n_tile + TileN <= N);
+        int subpart_in_warp = lane_id / 16;  // 0 or 1
+        int lane_in_subpart = lane_id % 16;  // 0..15
+        int global_subpart = warp_id * 2 + subpart_in_warp;  // 0..7
             
-            // Each of 8 subpartitions handles 16 rows (128 rows / 8 subparts)
-            int row_base = global_subpart * 16;
-            int my_row_in_tile = row_base + lane_in_subpart;
-            int global_row = m_tile + my_row_in_tile;
+        // Each of 8 subpartitions handles 16 rows (128 rows / 8 subparts)
+        int row_base = global_subpart * 16;
+        int my_row_in_tile = row_base + lane_in_subpart;
+        int global_row = m_tile + my_row_in_tile;
             
-            // TMEM address: row_base in DP field (bits 31:16), column in low bits
-            uint32_t tmem_row_base = tmem_c + (row_base << 16);
+        // TMEM address: row_base in DP field (bits 31:16), column in low bits
+        uint32_t tmem_row_base = tmem_c + (row_base << 16);
             
-            // Loop over all 32 column groups (128 columns / 4 cols per load)
-            #pragma unroll
-            for (int col_group = 0; col_group < 32; ++col_group) {
-                int col_base = col_group * 4;  // 0, 4, 8, ..., 124
-                
-                uint32_t d0, d1, d2, d3;
-                cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
-                    tmem_row_base + col_base, d0, d1, d2, d3);
-                
-                float f0 = __uint_as_float(d0);
-                float f1 = __uint_as_float(d1);
-                float f2 = __uint_as_float(d2);
-                float f3 = __uint_as_float(d3);
-                
+        // Loop over all 32 column groups (128 columns / 4 cols per load)
+        #pragma unroll
+        for (int col_group = 0; col_group < 32; ++col_group) {
+            int col_base = col_group * 4;  // 0, 4, 8, ..., 124
+            
+            uint32_t d0, d1, d2, d3;
+            cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
+                tmem_row_base + col_base, d0, d1, d2, d3);
+            
+            float f0 = __uint_as_float(d0);
+            float f1 = __uint_as_float(d1);
+            float f2 = __uint_as_float(d2);
+            float f3 = __uint_as_float(d3);
+
+            if (full_tile) {
+                half* out = D + global_row * N + (n_tile + col_base);
+                unsigned long long out_addr = reinterpret_cast<unsigned long long>(out);
+                if ((out_addr & 0x3ull) == 0ull) {
+                    __half2 h01 = __floats2half2_rn(f0, f1);
+                    __half2 h23 = __floats2half2_rn(f2, f3);
+                    *reinterpret_cast<__half2*>(out) = h01;
+                    *reinterpret_cast<__half2*>(out + 2) = h23;
+                } else {
+                    out[0] = __float2half(f0);
+                    out[1] = __float2half(f1);
+                    out[2] = __float2half(f2);
+                    out[3] = __float2half(f3);
+                }
+            } else {
                 if (global_row < M) {
                     int gc0 = n_tile + col_base;
                     int gc1 = n_tile + col_base + 1;
                     int gc2 = n_tile + col_base + 2;
                     int gc3 = n_tile + col_base + 3;
-                    
+
                     if (gc0 < N) D[global_row * N + gc0] = __float2half(f0);
                     if (gc1 < N) D[global_row * N + gc1] = __float2half(f1);
                     if (gc2 < N) D[global_row * N + gc2] = __float2half(f2);
@@ -1447,8 +1434,8 @@ fp4_gemm_rank2_cta(
     }
 
     // Free TMEM allocation
-    if (warp_id == 0) {
-        uint32_t cols = 256;
+    if (tid == 0) {
+        uint32_t cols = 512;
         uint32_t taddr = tmem_c;
         asm volatile(
             "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n"
@@ -1475,7 +1462,11 @@ void launch_fp4_gemm_optimized(
     constexpr int kTileM = 128;
     constexpr int kTileN = 128; // GEMM tiling
     constexpr int kTileK = 256;  // Must be 256 to match CuTe mma_tiler_mnk and tcgen05.mma
+    #if USE_tcgen05_MAINLOOP
+    constexpr int kThreads = 128; // 4 warps
+    #else
     constexpr int kThreads = 256; // 8 warps
+    #endif
     constexpr int kTileKPacked = kTileK / 2;  // 128 bytes per tile row
     constexpr int StageCount = 2;
     
@@ -1917,10 +1908,9 @@ def custom_kernel(data: input_t) -> output_t:
     # This is BlockScaledBasicChunk atom layout from blockscaled_layout.py
     # atom_shape = ((32, 4), (sf_vec_size=16, 4))
     
-    # Extract L=0 slice and flatten to 1D for TMA
-    # Shape: (32, 4, rest_m, 4, rest_k) -> flattened 1D
-    sfa_bytes = sfa_permuted[..., 0].flatten().contiguous().view(torch.uint8)
-    sfb_bytes = sfb_permuted[..., 0].flatten().contiguous().view(torch.uint8)
+    # Use the underlying storage order directly (matches kutte.py pointer semantics).
+    sfa_bytes = _u8_flat_storage_view(sfa_permuted[..., 0])
+    sfb_bytes = _u8_flat_storage_view(sfb_permuted[..., 0])
     
     # IMPORTANT: Pass actual K_scales (not padded) for TMA descriptor
     # atom-tiled layout uses actual K_scales, so TMA must match
