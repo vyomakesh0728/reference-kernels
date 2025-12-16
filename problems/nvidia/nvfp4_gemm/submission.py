@@ -1160,7 +1160,7 @@ fp4_gemm_rank2_cta(
     // - Fuses decode + scale + MMA in hardware
     // - No manual FP4->FP16 decode needed!
 
-    __shared__ uint32_t tmem_base_ptr_tcgen05;
+    __shared__ __align__(16) uint32_t tmem_base_ptr_tcgen05;
 
     // Prologue: prefetch stages 0..StageCount-2 (same as classic path)
     for (int s = 0; s < StageCount - 1; ++s) {
@@ -1176,38 +1176,31 @@ fp4_gemm_rank2_cta(
         }
     }
 
-    // Allocate TMEM once per CTA
-    // Layout: 512 columns total
-    //   - Accumulator: [0, 128)
-    //   - SFA:         [128, 144)
-    //   - SFB:         [144, 160)
+    // Allocate TMEM once per CTA (b32 columns)
+    constexpr uint32_t ACC_COLS        = TileN;                           // 128 columns for FP32 values
+    constexpr uint32_t KScalesTile     = TileK / 16;                      // 16 FP8 scales per K-tile
+    constexpr uint32_t SF_KBLOCK_COUNT = KScalesTile / 4;                 // 4 K-block panels per K-tile
+    // Cp4x32x128b copies 32 rows × 128b (16B) per row. Each row is 16B = 4 TMEM b32 columns.
+    constexpr uint32_t SF_COLS_PER_KB  = 16u / 4u;                        // 4 columns per K-block panel
+    constexpr uint32_t SFA_COLS_TOTAL  = SF_KBLOCK_COUNT * SF_COLS_PER_KB;
+    constexpr uint32_t TMEM_COL_SFA_BASE = ACC_COLS;
+    constexpr uint32_t TMEM_COL_SFB_BASE = ACC_COLS + SFA_COLS_TOTAL;
+    constexpr uint32_t TMEM_COLS_TOTAL = ACC_COLS + 2u * SFA_COLS_TOTAL;
     __syncthreads();
     if (tid == 0) {
         tmem_base_ptr_tcgen05 = 0;
     }
     __syncthreads();
     
-    if (tid == 0) {
-        uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr_tcgen05);
-        int num_cols = 512;
-        asm volatile(
-            "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
-            :
-            : "r"(dst_smem), "r"(num_cols));
-    }
+    uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr_tcgen05);
+    uint32_t num_cols = TMEM_COLS_TOTAL;
+    asm volatile(
+        "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
+        :
+        : "r"(dst_smem), "r"(num_cols));
     __syncthreads();
     uint32_t tmem_c = tmem_base_ptr_tcgen05;
     
-    // TMEM addresses for scale factors (32b columns)
-    constexpr uint32_t ACC_COLS        = TileN;                          // 128 columns for FP32 values
-    constexpr uint32_t KScalesTile     = TileK / 16;                     // 16 FP8 scales per K-tile
-    constexpr uint32_t SF_KBLOCK_COUNT = KScalesTile / 4;                // 4 K-block panels per K-tile
-    // Cp4x32x128b copies 32 rows × 128b (16B) per row. Each row is 16B = 4 TMEM b32 columns.
-    constexpr uint32_t SF_COLS_PER_KB  = 16u / 4u;                       // 4 columns per K-block panel
-    constexpr uint32_t SFA_COLS_TOTAL  = SF_KBLOCK_COUNT * SF_COLS_PER_KB;
-    constexpr uint32_t TMEM_COL_SFA_BASE = ACC_COLS;
-    constexpr uint32_t TMEM_COL_SFB_BASE = ACC_COLS + SFA_COLS_TOTAL;
-
     uint32_t tmem_sfa_base = tmem_c + TMEM_COL_SFA_BASE;
     uint32_t tmem_sfb_base = tmem_c + TMEM_COL_SFB_BASE;
 
@@ -1434,13 +1427,12 @@ fp4_gemm_rank2_cta(
     }
 
     // Free TMEM allocation
-    if (tid == 0) {
-        uint32_t cols = 512;
-        uint32_t taddr = tmem_c;
+    {
+        uint32_t cols = TMEM_COLS_TOTAL;
         asm volatile(
             "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n"
             :
-            : "r"(taddr), "r"(cols));
+            : "r"(tmem_c), "r"(cols));
     }
     #endif  // !USE_tcgen05_MAINLOOP
 #endif
