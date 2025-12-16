@@ -1,21 +1,59 @@
-For help, type "help".
-Type "apropos word" to search for commands related to "word".
-(cuda-gdb) target cudacore /tmp/cuda_coredump_imaginary-amaranth-oriole.5717.1765893865
-Opening GPU coredump: /tmp/cuda_coredump_imaginary-amaranth-oriole.5717.1765893865
-[Current focus set to CUDA kernel 0, grid 49, block (0,0,0), thread (64,0,0), device 0, sm 142, warp 0, lane 0]
-#0  0x00007fef8da015c0 in fp4_gemm_rank2_cta<128, 256, 128><<<(1,2,1),(128,1,1)>>> () at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu:1184
-1184	    uint32_t tmem_c = tmem_base_ptr_tcgen05;
-(cuda-gdb) where
-#0  0x00007fef8da015c0 in fp4_gemm_rank2_cta<128, 256, 128><<<(1,2,1),(128,1,1)>>> () at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu:1184
-(cuda-gdb) list
-1179	            "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
-1180	            :
-1181	            : "r"(dst_smem), "r"(num_cols));
-1182	    }
-1183	    __syncthreads();
-1184	    uint32_t tmem_c = tmem_base_ptr_tcgen05;
-1185	    
-1186	    // TMEM addresses for scale factors (32b columns)
-1187	    constexpr uint32_t ACC_COLS        = TileN;                          // 128 columns for FP32 values
-1188	    constexpr uint32_t KScalesTile     = TileK / 16;                     // 16 FP8 scales per K-tile
-(cuda-gdb) 
+Running on:
+GPU: NVIDIA B200
+CPU: INTEL(R) XEON(R) PLATINUM 8570
+Device count: 1
+Runtime: CUDA
+Platform: Linux-6.8.0-51-generic-x86_64-with-glibc2.35
+Torch: 2.9.1+cu130
+Hostname: fb4dd1fb4f91
+Running failed
+Command 
+python3 eval.py benchmark /tmp/tmpng7xydt3
+
+exited with error code 1 after 33.44 seconds.
+Cluster Bot
+APP
+ — 8:37 PM
+Program stderr (1/2):
+multiprocessing.pool.RemoteTraceback: 
+"""
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 125, in worker
+    result = (True, func(*args, **kwds))
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 228, in _run_single_benchmark
+    output = custom_kernel(_clone_data(data))
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 136, in _clone_data
+    return tuple(_clone_data(x) for x in data)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 136, in <genexpr>
+    return tuple(_clone_data(x) for x in data)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 142, in _clone_data
+    return data.clone()
+torch.AcceleratorError: CUDA error: an illegal instruction was encountered
+Search for `cudaErrorIllegalInstruction' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 498, in <module>
+    sys.exit(main())
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 466, in main
+    return run_benchmarking(logger, pool, tests)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 319, in run_benchmarking
+    run_single_benchmark(pool, tests[0], False, 200, 10e7)
+Program stderr (2/2):
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 304, in run_single_benchmark
+    return pool.apply(_run_single_benchmark, (test, recheck, max_repeats, max_time_ns))
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 360, in apply
+    return self.apply_async(func, args, kwds).get()
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 774, in get
+    raise self._value
+torch.AcceleratorError: CUDA error: an illegal instruction was encountered
+Search for `cudaErrorIllegalInstruction' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.

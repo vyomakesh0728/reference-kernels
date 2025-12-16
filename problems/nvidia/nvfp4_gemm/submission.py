@@ -78,15 +78,6 @@ CUresult encode_tma_matrix(
 
 // ===== END HELPER FUNCTIONS =====
 
-__constant__ float fp4_e2m1_lut_float[16] = {
-    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
-    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
-};
-
-__device__ __forceinline__ half decode_fp4_e2m1(uint8_t nibble) {
-    return __float2half(fp4_e2m1_lut_float[nibble & 0x0F]);
-}
-
 __device__ __forceinline__ float decode_fp8_e4m3(uint8_t val) {
     cutlass::float_e4m3_t fp8_val = *reinterpret_cast<cutlass::float_e4m3_t*>(&val);
     return __half2float(__float2half_rn(fp8_val));
@@ -191,29 +182,6 @@ __device__ unsigned int g_debug_thread_error_counts[1024];
 // Enable advanced tcgen05-based mainloop when non-zero.
 #ifndef USE_tcgen05_MAINLOOP
 #define USE_tcgen05_MAINLOOP 1
-#endif
-
-#if __CUDA_ARCH__ >= 900
-__device__ __forceinline__ void cp_async_16b(void* dst, const void* src, bool pred) {
-    if (pred) {
-        uint32_t smem_addr = cvta_to_shared_u32(dst);
-        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(smem_addr), "l"(src));
-    }
-}
-__device__ __forceinline__ void cp_async_commit() {
-    asm volatile("cp.async.commit_group;\n");
-}
-__device__ __forceinline__ void cp_async_wait() {
-    asm volatile("cp.async.wait_group 0;\n");
-}
-#else
-__device__ __forceinline__ void cp_async_16b(void* dst, const void* src, bool pred) {
-    if (pred) {
-        *reinterpret_cast<uint4*>(dst) = *reinterpret_cast<const uint4*>(src);
-    }
-}
-__device__ __forceinline__ void cp_async_commit() {}
-__device__ __forceinline__ void cp_async_wait() {}
 #endif
 
 #if __CUDA_ARCH__ >= 900
@@ -456,41 +424,6 @@ __device__ __forceinline__ uint64_t make_sf_smem_desc_addr(
     desc |= ((uint64_t)((leading_byte_offset >> 4) & 0x3FFF) << 16);
     desc |= ((uint64_t)(swizzle_type & 0x7) << 61);
     return desc;
-}
-
-// Copy scale factors from SMEM to TMEM using tcgen05.cp
-// This is the correct way - tcgen05.st expects register operands, not memory
-__device__ __forceinline__ void copy_sf_smem_to_tmem(
-    uint32_t tmem_dst,       // TMEM destination address
-    const uint8_t* smem_src, // SMEM source pointer  
-    int leading_byte_offset  // Stride between rows in SMEM
-) {
-    // Build SMEM descriptor for the scale factor data
-    // Use SWIZZLE_NONE since TMA loads without swizzle
-    uint64_t smem_desc = make_sf_smem_desc(smem_src, leading_byte_offset, 0);
-    
-    // tcgen05.cp.cta_group::1.32x128b.warpx4 is the correct variant for scale factors
-    // (4x32 warp broadcast, 128-bit pattern)
-    asm volatile(
-        "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
-        :: "r"(tmem_dst), "l"(smem_desc)
-        : "memory"
-    );
-}
-
-// Elect one thread in warp to execute (CuTe-style elect_one_sync)
-__device__ __forceinline__ bool elect_one_sync_local() {
-    uint32_t pred = 0;
-    asm volatile(
-        "{\n"
-        ".reg .b32 rx;\n"
-        ".reg .pred px;\n"
-        "    elect.sync rx|px, 0xFFFFFFFF;\n"
-        "    @px mov.s32 %0, 1;\n"
-        "}\n"
-        : "=r"(pred)
-    );
-    return pred != 0;
 }
 
 // Prefetch tile using TMA - simplified for Rank-2 (L=1) GEMM
@@ -1160,7 +1093,9 @@ fp4_gemm_rank2_cta(
     // - Fuses decode + scale + MMA in hardware
     // - No manual FP4->FP16 decode needed!
 
-    __shared__ __align__(16) uint32_t tmem_base_ptr_tcgen05;
+    // tcgen05.alloc writes one b32 result per warp in the warpgroup; provide
+    // 16B-aligned storage for 4 warps (Threads=128 in tcgen05 path).
+    __shared__ __align__(16) uint32_t tmem_base_ptr_tcgen05[4];
 
     // Prologue: prefetch stages 0..StageCount-2 (same as classic path)
     for (int s = 0; s < StageCount - 1; ++s) {
@@ -1185,21 +1120,24 @@ fp4_gemm_rank2_cta(
     constexpr uint32_t SFA_COLS_TOTAL  = SF_KBLOCK_COUNT * SF_COLS_PER_KB;
     constexpr uint32_t TMEM_COL_SFA_BASE = ACC_COLS;
     constexpr uint32_t TMEM_COL_SFB_BASE = ACC_COLS + SFA_COLS_TOTAL;
-    constexpr uint32_t TMEM_COLS_TOTAL = ACC_COLS + 2u * SFA_COLS_TOTAL;
+    // Keep allocation size conservative: tcgen05.alloc has strict granularity/size requirements.
+    // We reserve a full 512-column tile and sub-allocate within it.
+    constexpr uint32_t TMEM_COLS_TOTAL = 512u;
     __syncthreads();
-    if (tid == 0) {
-        tmem_base_ptr_tcgen05 = 0;
+    if (tid < 4) {
+        tmem_base_ptr_tcgen05[tid] = 0;
     }
     __syncthreads();
     
-    uint32_t dst_smem = cvta_to_shared_u32(&tmem_base_ptr_tcgen05);
+    uint32_t dst_smem = cvta_to_shared_u32(tmem_base_ptr_tcgen05);
     uint32_t num_cols = TMEM_COLS_TOTAL;
     asm volatile(
         "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
         :
         : "r"(dst_smem), "r"(num_cols));
     __syncthreads();
-    uint32_t tmem_c = tmem_base_ptr_tcgen05;
+    // Use a CTA-uniform base pointer; alloc writes the same base for each warp.
+    uint32_t tmem_c = tmem_base_ptr_tcgen05[0];
     
     uint32_t tmem_sfa_base = tmem_c + TMEM_COL_SFA_BASE;
     uint32_t tmem_sfb_base = tmem_c + TMEM_COL_SFB_BASE;
@@ -1559,6 +1497,23 @@ void launch_fp4_gemm_optimized(
         }
     }
 
+    struct TensorMapScope {
+        CUtensorMap* a = nullptr;
+        CUtensorMap* b = nullptr;
+        CUtensorMap* sfa = nullptr;
+        CUtensorMap* sfb = nullptr;
+        ~TensorMapScope() {
+            if (a) cudaFree(a);
+            if (sfa) cudaFree(sfa);
+            if (b) cudaFree(b);
+            if (sfb) cudaFree(sfb);
+        }
+    } maps;
+    maps.a = d_map_A;
+    maps.b = d_map_B;
+    maps.sfa = d_map_SFA;
+    maps.sfb = d_map_SFB;
+
     if (!tma_ok) {
         throw std::runtime_error("TMA descriptor creation failed");
     }
@@ -1613,11 +1568,15 @@ void launch_fp4_gemm_optimized(
     int L_int = static_cast<int>(L);
     int K_scales_int = static_cast<int>(K_scales);
 
+    const uint8_t* A_ptr_arg = A_ptr;
+    const uint8_t* B_ptr_arg = B_ptr;
+    const uint8_t* SFA_ptr_arg = SFA_ptr;
+    const uint8_t* SFB_ptr_arg = SFB_ptr;
     void* kernel_args[] = {
-        const_cast<uint8_t**>(&A_ptr),
-        const_cast<uint8_t**>(&B_ptr),
-        const_cast<uint8_t**>(&SFA_ptr),
-        const_cast<uint8_t**>(&SFB_ptr),
+        const_cast<const uint8_t**>(&A_ptr_arg),
+        const_cast<const uint8_t**>(&B_ptr_arg),
+        const_cast<const uint8_t**>(&SFA_ptr_arg),
+        const_cast<const uint8_t**>(&SFB_ptr_arg),
         &d_map_A,
         &d_map_SFA,
         &d_map_B,
@@ -1631,11 +1590,6 @@ void launch_fp4_gemm_optimized(
     };
 
     check_cuda(cudaLaunchKernel(kernel_ptr, grid, block, kernel_args, shared_bytes, 0), "cudaLaunchKernel");
-
-    if (d_map_A) cudaFree(d_map_A);
-    if (d_map_SFA) cudaFree(d_map_SFA);
-    if (d_map_B) cudaFree(d_map_B);
-    if (d_map_SFB) cudaFree(d_map_SFB);
 } 
 
 template<int TileM, int TileK, int Threads>
@@ -1868,25 +1822,7 @@ def custom_kernel(data: input_t) -> output_t:
     k_packed = K // 2
     K_scales = K // 16
 
-    # Check if dimensions are valid
-    assert K % 256 == 0, f"K must be divisible by 256: {K}"
-    assert k_packed >= 128, f"K_packed too small: {k_packed}"
-    assert M >= 128, f"M too small: {M}"
-    assert N >= 128, f"N too small: {N}"
-
-    # CRITICAL: Extract 2D slices for TMA descriptor creation
-    # Input tensors are [M, K/2, L] and [N, K/2, L] but TMA expects 2D
-    # Since all benchmarks have L=1, we extract the [:, :, 0] slice
-    # 
-    # ZERO-COPY for B matrix:
-    # - B extracted as [N, K/2] in native row-major layout
-    # - TMA descriptor matches this 2D layout exactly
-    # - No transpose or copy needed!
-    # - This achieves maximum memory bandwidth on B200!
-    
-    # Extract 2D slices (L=1 for all benchmarks)
-    # A: [M, K/2, L] -> [M, K/2]
-    # B: [N, K/2, L] -> [N, K/2] (native layout, zero-copy!)
+    # Extract 2D slices (L=1)
     a_2d = a[:, :, 0].contiguous()
     b_2d = b[:, :, 0].contiguous()
     
@@ -1904,10 +1840,6 @@ def custom_kernel(data: input_t) -> output_t:
     sfa_bytes = _u8_flat_storage_view(sfa_permuted[..., 0])
     sfb_bytes = _u8_flat_storage_view(sfb_permuted[..., 0])
     
-    # IMPORTANT: Pass actual K_scales (not padded) for TMA descriptor
-    # atom-tiled layout uses actual K_scales, so TMA must match
-    K_scales = K // 16
-
     mod = get_module()
     mod.launch_fp4_gemm_optimized(
         a_bytes, b_bytes, sfa_bytes, sfb_bytes, c[:, :, 0],
@@ -2002,7 +1934,7 @@ def debug_scales(data: input_t) -> None:
     # A decode (Python)
     a_u8 = a_bytes  # [M, K/2]
     M_a, K_packed = a_u8.shape
-    assert K_packed * 2 == K
+    # K is defined as packed_K * 2
     hi = ((a_u8.long() >> 4) & 0xF)
     lo = (a_u8.long() & 0xF)
 
@@ -2019,7 +1951,7 @@ def debug_scales(data: input_t) -> None:
     # B decode (Python)
     b_u8 = b_bytes  # [N, K/2]
     N_b, K_packed_b = b_u8.shape
-    assert K_packed_b * 2 == K
+    # K is defined as packed_K * 2
     hi_b = ((b_u8.long() >> 4) & 0xF)
     lo_b = (b_u8.long() & 0xF)
 

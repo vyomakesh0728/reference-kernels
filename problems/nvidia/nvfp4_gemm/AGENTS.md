@@ -112,6 +112,22 @@ Global SF (FP8, atom-tiled) → TMA → SMEM
 - [ ] Zero bank conflicts
 - [ ] Minimal warp divergence
 
+## Tasks
+- Double check for redundancy and over protective code? an environment built with PTX inline is a narrow process for a specific thing (GEMM here), there should be little to no SEMANTIC/LAYOUT oracle MISMATCHES because there should NOT be unknowns in this program.
+
+- Check with the official cutlass files or supporting files at /usr/local/cutlass/*  ** only if needed ** 
+
+- Check `submission.py` files for 
+   - consistency 
+   - proper encapsulation
+   - no defensive coding
+   - not overcomplicating the code
+   - no over-protective if statements
+   - not repeating the same code patterns separately 
+   - no silent failing funcs 
+   - structurally perfect
+   - production ready 
+
 ## Key Files 
 
 - `submission.py`: Your optimized kernel implementation
@@ -136,3 +152,4 @@ Global SF (FP8, atom-tiled) → TMA → SMEM
 2. ✅ Achieve geometric mean ≤ 3.04μs on 3 benchmark shapes
 3. ✅ Memory bandwidth utilization > 95% of theoretical peak
 4. ✅ Zero competition rule violations
+
