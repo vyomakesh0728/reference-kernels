@@ -5,55 +5,41 @@ Device count: 1
 Runtime: CUDA
 Platform: Linux-6.8.0-51-generic-x86_64-with-glibc2.35
 Torch: 2.9.1+cu130
-Hostname: fb4dd1fb4f91
-Running failed
-Command 
-python3 eval.py benchmark /tmp/tmpng7xydt3
+Hostname: 32d7d6f49bda
 
-exited with error code 1 after 33.44 seconds.
-Cluster Bot
-APP
- — 8:37 PM
-Program stderr (1/2):
-multiprocessing.pool.RemoteTraceback: 
-"""
-Traceback (most recent call last):
-  File "/usr/lib/python3.10/multiprocessing/pool.py", line 125, in worker
-    result = (True, func(*args, **kwds))
-  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 228, in _run_single_benchmark
-    output = custom_kernel(_clone_data(data))
-  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 136, in _clone_data
-    return tuple(_clone_data(x) for x in data)
-  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 136, in <genexpr>
-    return tuple(_clone_data(x) for x in data)
-  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 142, in _clone_data
-    return data.clone()
-torch.AcceleratorError: CUDA error: an illegal instruction was encountered
-Search for `cudaErrorIllegalInstruction' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
 
-"""
+Benchmarks:
+❌ k: 16384; l: 1; m: 128; n: 7168; seed: 1111 failed testing:
 
-The above exception was the direct cause of the following exception:
+mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 859637 ERROR AT (0, 8, 0): 8472.0 1219.0 ERROR AT (0, 9, 0): -4592.0 -5764.0 ERROR AT (0, 10, 0): 3402.0 -3084.0 ERROR AT (0, 11, 0): -3236.0 -5604.0 ERROR AT (0, 12, 0): -68.0 1470.0 ... and 859632 more mismatched elements.
 
-Traceback (most recent call last):
-  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 498, in <module>
-    sys.exit(main())
-  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 466, in main
-    return run_benchmarking(logger, pool, tests)
-  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 319, in run_benchmarking
-    run_single_benchmark(pool, tests[0], False, 200, 10e7)
-Program stderr (2/2):
-  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 304, in run_single_benchmark
-    return pool.apply(_run_single_benchmark, (test, recheck, max_repeats, max_time_ns))
-  File "/usr/lib/python3.10/multiprocessing/pool.py", line 360, in apply
-    return self.apply_async(func, args, kwds).get()
-  File "/usr/lib/python3.10/multiprocessing/pool.py", line 774, in get
-    raise self._value
-torch.AcceleratorError: CUDA error: an illegal instruction was encountered
-Search for `cudaErrorIllegalInstruction' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+❌ k: 7168; l: 1; m: 128; n: 4096; seed: 1111 failed testing:
+
+mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 491214 ERROR AT (0, 8, 0): 1724.0 1832.0 ERROR AT (0, 9, 0): 637.0 1262.0 ERROR AT (0, 10, 0): -4248.0 -4232.0 ERROR AT (0, 11, 0): -1874.0 1273.0 ERROR AT (0, 12, 0): 1607.0 -828.0 ... and 491209 more mismatched elements.
+
+❌ k: 2048; l: 1; m: 128; n: 7168; seed: 1111 failed testing:
+
+mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 859629 ERROR AT (0, 8, 0): 2938.0 3222.0 ERROR AT (0, 9, 0): -1489.0 -942.0 ERROR AT (0, 10, 0): -1321.0 177.75 ERROR AT (0, 11, 0): -142.75 172.0 ERROR AT (0, 12, 0): 1923.0 1956.0 ... and 859624 more mismatched elements.
+
+Test log (1/2):
+❌ k: 256; l: 1; m: 128; n: 256; seed: 1111
+> mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 30703 ERROR AT (0, 8, 0): -469.0 -295.25 ERROR AT (0, 9, 0): -567.0 -481.75 ERROR AT (0, 10, 0): -260.25 163.5 ERROR AT (0, 11, 0): 619.5 362.0 ERROR AT (0, 12, 0): -498.25 -243.25 ... and 30698 more mismatched elements.
+❌ k: 7168; l: 1; m: 128; n: 1536; seed: 1111
+> mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 184208 ERROR AT (0, 8, 0): -1836.0 -1685.0 ERROR AT (0, 9, 0): -200.5 -1172.0 ERROR AT (0, 10, 0): -935.0 -78.0 ERROR AT (0, 11, 0): 3836.0 2172.0 ERROR AT (0, 12, 0): -321.5 -3366.0 ... and 184203 more mismatched elements.
+❌ k: 1536; l: 1; m: 128; n: 3072; seed: 1111
+> mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 368410 ERROR AT (0, 8, 0): 1654.0 415.25 ERROR AT (0, 9, 0): 405.0 -39.75 ERROR AT (0, 10, 0): -827.0 -86.75 ERROR AT (0, 11, 0): -1158.0 -1827.0 ERROR AT (0, 12, 0): -122.75 476.5 ... and 368405 more mismatched elements.
+❌ k: 256; l: 1; m: 256; n: 7168; seed: 1111
+> mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 1719243 ERROR AT (0, 8, 0): -87.75 -291.5 ERROR AT (0, 9, 0): -367.75 -329.0 ERROR AT (0, 10, 0): 580.0 380.25 ERROR AT (0, 11, 0): 746.0 180.25 ERROR AT (0, 12, 0): -556.0 535.5 ... and 1719238 more mismatched elements.
+❌ k: 2048; l: 1; m: 256; n: 7168; seed: 1111
+> mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 1719285 ERROR AT (0, 8, 0): 2528.0 1438.0 ERROR AT (0, 9, 0): -484.25 424.5 ERROR AT (0, 10, 0): 2001.0 512.0 ERROR AT (0, 11, 0): 2136.0 1710.0 ERROR AT (0, 12, 0): 1172.0 1529.0 ... and 1719280 more mismatched elements.
+❌ k: 7168; l: 1; m: 2304; n: 4608; seed: 1111
+Test log (2/2):
+> mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 9947274 ERROR AT (0, 8, 0): -5036.0 34.5 ERROR AT (0, 9, 0): -643.0 1428.0 ERROR AT (0, 10, 0): 1939.0 453.0 ERROR AT (0, 11, 0): 2240.0 -2844.0 ERROR AT (0, 12, 0): -4780.0 -2454.0 ... and 9947269 more mismatched elements.
+❌ k: 2304; l: 1; m: 384; n: 7168; seed: 1111
+> mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 2578862 ERROR AT (0, 8, 0): 1330.0 691.0 ERROR AT (0, 9, 0): 569.0 723.5 ERROR AT (0, 10, 0): 2394.0 1040.0 ERROR AT (0, 11, 0): 1278.0 2270.0 ERROR AT (0, 12, 0): -2666.0 -2348.0 ... and 2578857 more mismatched elements.
+❌ k: 7168; l: 1; m: 512; n: 512; seed: 1111
+> mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 245594 ERROR AT (0, 8, 0): -590.0 -2980.0 ERROR AT (0, 9, 0): -3530.0 2056.0 ERROR AT (0, 10, 0): -5088.0 -3662.0 ERROR AT (0, 11, 0): 1210.0 373.25 ERROR AT (0, 12, 0): -594.0 -4192.0 ... and 245589 more mismatched elements.
+❌ k: 512; l: 1; m: 512; n: 4096; seed: 1111
+> mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 1964895 ERROR AT (0, 8, 0): 716.0 1992.0 ERROR AT (0, 9, 0): 142.25 -59.75 ERROR AT (0, 10, 0): -472.75 331.25 ERROR AT (0, 11, 0): -957.0 -163.5 ERROR AT (0, 12, 0): 957.0 27.25 ... and 1964890 more mismatched elements.
+❌ k: 7168; l: 1; m: 512; n: 1536; seed: 1111
+> mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 736869 ERROR AT (0, 8, 0): -2942.0 -3458.0 ERROR AT (0, 9, 0): 74.25 1288.0 ERROR AT (0, 10, 0): -205.0 -4644.0 ERROR AT (0, 11, 0): -4116.0 -553.5 ERROR AT (0, 12, 0): -4300.0 -2326.0 ... and 736864 more mismatched elements.

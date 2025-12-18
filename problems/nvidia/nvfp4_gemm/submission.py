@@ -5,13 +5,11 @@ from task import input_t, output_t
 from torch.utils.cpp_extension import load_inline
 # No longer need to_blocked - using sfa_permuted (atom-tiled) directly
 
-
-def _u8_flat_storage_view(t: torch.Tensor) -> torch.Tensor:
+def _u8_strided_view(t: torch.Tensor) -> torch.Tensor:
     st = t.untyped_storage()
     off = t.storage_offset()
-    n = t.numel()
     out = torch.empty((0,), device=t.device, dtype=torch.uint8)
-    out.set_(st, off, (n,), (1,))
+    out.set_(st, off, t.size(), t.stride())
     return out
 
 cutlass_path = os.environ.get("CUTLASS_PATH", "/usr/local/cutlass")
@@ -31,9 +29,19 @@ cuda_source = r"""
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
+#include "cutlass/detail/sm100_tmem_helper.hpp"
 #include <cute/arch/copy_sm100.hpp>
+#include <cute/tensor.hpp>
+#include <cute/atom/mma_atom.hpp>
+#include <cute/arch/mma_sm100_umma.hpp>
 
 using cutlass::half_t;
+
+// Debug-only: targeted dump to localize mismatches around TMEM->reg epilogue.
+// Default off; enable by compiling with -DNVFP4_DEBUG_DUMP=1.
+#ifndef NVFP4_DEBUG_DUMP
+#define NVFP4_DEBUG_DUMP 0
+#endif
 
 // ===== HELPER FUNCTIONS =====
 
@@ -50,9 +58,9 @@ CUresult encode_tma_matrix(
     const void* globalAddress,
     const cuuint64_t* globalDim,
     const cuuint64_t* globalStrides,
-    const cuuint32_t* boxDim
+    const cuuint32_t* boxDim,
+    CUtensorMapSwizzle swizzle
 ) {
-    CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE;
     CUtensorMapL2promotion l2Promotion = CU_TENSOR_MAP_L2_PROMOTION_NONE;
     CUtensorMapFloatOOBfill oobFill = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
     cuuint32_t elementStrides[5];
@@ -239,6 +247,60 @@ __device__ __forceinline__ void tma_load_2d_cta_no_arrive(void* smem_ptr,
     );
 }
 
+// TMA load for CTA (rank-4)
+__device__ __forceinline__ void tma_load_4d_cta_no_arrive(void* smem_ptr,
+                                                           const CUtensorMap* desc,
+                                                           uint32_t coord0,
+                                                           uint32_t coord1,
+                                                           uint32_t coord2,
+                                                           uint32_t coord3,
+                                                           uint64_t* mbar) {
+    uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
+    uint32_t mbar_addr = cvta_to_shared_u32(mbar);
+
+    asm volatile(
+        "cp.async.bulk.tensor.4d.shared::cta.global.mbarrier::complete_tx::bytes "
+        "[%0], [%1, {%3, %4, %5, %6}], [%2];\n"
+        :
+        : "r"(smem_addr),
+          "l"(desc),
+          "r"(mbar_addr),
+          "r"(coord0),
+          "r"(coord1),
+          "r"(coord2),
+          "r"(coord3)
+        : "memory"
+    );
+}
+
+// TMA load for CTA (rank-5) - used for permuted scale-factor views
+__device__ __forceinline__ void tma_load_5d_cta_no_arrive(void* smem_ptr,
+                                                           const CUtensorMap* desc,
+                                                           uint32_t coord0,
+                                                           uint32_t coord1,
+                                                           uint32_t coord2,
+                                                           uint32_t coord3,
+                                                           uint32_t coord4,
+                                                           uint64_t* mbar) {
+    uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
+    uint32_t mbar_addr = cvta_to_shared_u32(mbar);
+
+    asm volatile(
+        "cp.async.bulk.tensor.5d.shared::cta.global.mbarrier::complete_tx::bytes "
+        "[%0], [%1, {%3, %4, %5, %6, %7}], [%2];\n"
+        :
+        : "r"(smem_addr),
+          "l"(desc),
+          "r"(mbar_addr),
+          "r"(coord0),
+          "r"(coord1),
+          "r"(coord2),
+          "r"(coord3),
+          "r"(coord4)
+        : "memory"
+    );
+}
+
 // TMA load for 1D tensor (rank-1) - for pre-permuted scale factors
 __device__ __forceinline__ void tma_load_1d_cta_no_arrive(void* smem_ptr,
                                                            const CUtensorMap* desc,
@@ -335,13 +397,33 @@ __device__ __forceinline__ uint64_t make_smem_desc_tcgen05_addr(
     return desc;
 }
 
+// Build a SM100 UMMA-compatible SMEM descriptor (same 64b encoding as CUTLASS/CuTe UMMA::SmemDescriptor).
+// NOTE: tcgen05.cp and tcgen05.mma both consume this descriptor encoding on SM100.
+__device__ __forceinline__ uint64_t make_umma_smem_desc_addr(
+    uint32_t smem_addr,
+    int leading_byte_offset,
+    int stride_byte_offset,
+    int swizzle_type
+) {
+    cute::UMMA::SmemDescriptor desc;
+    desc.desc_ = 0;
+    desc.start_address_ = static_cast<uint16_t>(smem_addr >> 4);
+    desc.leading_byte_offset_ = static_cast<uint16_t>((leading_byte_offset >> 4) & 0x3FFF);
+    desc.stride_byte_offset_ = static_cast<uint16_t>((stride_byte_offset >> 4) & 0x3FFF);
+    desc.version_ = 1;     // Blackwell requires version=1
+    desc.base_offset_ = 0;
+    desc.lbo_mode_ = 0;
+    desc.layout_type_ = static_cast<uint8_t>(swizzle_type & 0x7);
+    return static_cast<uint64_t>(desc);
+}
+
 // Instruction Descriptor for tcgen05.mma.kind::mxf4nvf4.block_scale
 // For NVFP4 (e2m1) with FP8 (e4m3) block scales
 // InstrDescriptorBlockScaled bitfield (32 bits, matches CuTe exactly):
 //   [0:2)   - sparse_id2 (0 for non-sparse)
 //   [2:3)   - sparse_flag (0=dense)
 //   [3:4)   - reserved
-//   [4:6)   - b_sf_id (always 0 for cta_group::1)
+//   [4:6)   - b_sf_id (derived from TMEM address high bits)
 //   [6:7)   - reserved
 //   [7:10)  - a_format (5=E2M1 for NVFP4)
 //   [10:13) - b_format (5=E2M1 for NVFP4)
@@ -352,16 +434,16 @@ __device__ __forceinline__ uint64_t make_smem_desc_tcgen05_addr(
 //   [17:23) - n_dim (N >> 3)
 //   [23:24) - scale_format (0=E4M3)
 //   [24:29) - m_dim (M >> 4)
-//   [29:31) - a_sf_id (always 0 for cta_group::1)
-//   [31:32) - k_size (0 for K64)
+//   [29:31) - a_sf_id (derived from TMEM address high bits)
+//   [31:32) - k_size (0 for dense K64 on MXF4)
 __device__ __forceinline__ uint64_t make_instr_desc_mxf4(
     int tile_m,          // Must be 128 for SM100
     int tile_n,          // 8-256, multiple of 8
     int a_major,         // 0=K-major, 1=MN-major
     int b_major,         // 0=K-major, 1=MN-major
     int sf_format,       // 0=E4M3, 1=E8M0
-    uint32_t /*tmem_sfa*/,   // Unused - SF IDs are always 0 for cta_group::1
-    uint32_t /*tmem_sfb*/    // Unused - TMEM addresses passed separately to instruction
+    uint32_t tmem_sfa,       // Used to derive SF ID bits
+    uint32_t tmem_sfb        // Used to derive SF ID bits
 ) {
     uint32_t desc = 0;
     
@@ -373,6 +455,14 @@ __device__ __forceinline__ uint64_t make_instr_desc_mxf4(
     // [3:4) reserved
     // [4:6) b_sf_id = 0 (always 0 for single CTA)
     // [6:7) reserved
+    // SF IDs are encoded from the top bits of the TMEM addresses (CuTe convention).
+    // These are not the TMEM base addresses themselves; they select which SF region
+    // the instruction uses.
+    uint32_t a_sf_id = (tmem_sfa & 0xC0000000u) >> 30;
+    uint32_t b_sf_id = (tmem_sfb & 0xC0000000u) >> 30;
+    // [4:6) b_sf_id
+    desc |= ((b_sf_id & 0x3u) << 4);
+
     // [7:10) a_format = 5 (E2M1)
     desc |= (E2M1_FORMAT << 7);
     // [10:13) b_format = 5 (E2M1)
@@ -389,41 +479,12 @@ __device__ __forceinline__ uint64_t make_instr_desc_mxf4(
     desc |= ((sf_format & 0x1) << 23);
     // [24:29) m_dim = tile_m >> 4
     desc |= (((tile_m >> 4) & 0x1F) << 24);
-    // [29:31) a_sf_id = 0 (always 0 for single CTA)
+    // [29:31) a_sf_id
+    desc |= ((a_sf_id & 0x3u) << 29);
     // [31:32) k_size = 0 (K64 for MXF4 dense)
     
     // idescE: upper 32 bits are the instruction descriptor
     return ((uint64_t)desc << 32);
-}
-
-// Build SMEM descriptor for tcgen05.cp (scale factor copy to TMEM)
-// Similar to SmemDescriptor but simpler for contiguous scale data
-__device__ __forceinline__ uint64_t make_sf_smem_desc(
-    const void* smem_ptr,
-    int leading_byte_offset,  // Stride between rows in bytes
-    int swizzle_type          // 0=NONE, 2=SWIZZLE_128B
-) {
-    uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
-    uint64_t desc = 0;
-    // start_address: bits [0:14), value is smem_addr >> 4
-    desc |= ((uint64_t)(smem_addr >> 4) & 0x3FFF);
-    // leading_byte_offset: bits [16:30), value is leading_byte_offset >> 4
-    desc |= ((uint64_t)((leading_byte_offset >> 4) & 0x3FFF) << 16);
-    // layout_type (swizzle): bits [61:64)
-    desc |= ((uint64_t)(swizzle_type & 0x7) << 61);
-    return desc;
-}
-
-__device__ __forceinline__ uint64_t make_sf_smem_desc_addr(
-    uint32_t smem_addr,
-    int leading_byte_offset,
-    int swizzle_type
-) {
-    uint64_t desc = 0;
-    desc |= ((uint64_t)(smem_addr >> 4) & 0x3FFF);
-    desc |= ((uint64_t)((leading_byte_offset >> 4) & 0x3FFF) << 16);
-    desc |= ((uint64_t)(swizzle_type & 0x7) << 61);
-    return desc;
 }
 
 // Prefetch tile using TMA - simplified for Rank-2 (L=1) GEMM
@@ -466,7 +527,6 @@ __device__ __forceinline__ void prefetch_tile(
             // --- TMA Load SFA (atom-tiled layout: 2048 bytes per K-tile) ---
             // Atom-tiled: (32, 4, rest_m, 4, rest_k) flattened → 2048 bytes
             // TMA box is [16, 32] = 512 bytes, need 4 loads to get 2048 bytes total
-            int n_col_blocks = (K_scales + 3) / 4;
             int m_block_sfa = c_m / TileM;
             int k_tile_idx_sfa = k_tile_base / TileK;
             bool valid_sfa = valid_m;
@@ -484,45 +544,19 @@ __device__ __forceinline__ void prefetch_tile(
                 );
             }
             if (valid_sfa) {
-                // Atom-tiled layout: (32, 4, rest_m, 4, rest_k) flattened
-                // For M-block m_block_sfa and K-tile k_tile_idx_sfa:
-                // - Byte offset = element_offset (FP8 is 1 byte)
-                // - Element offset in flattened array:
-                //   = sum over all outer dimensions
-                //   
-                // Flattened stride for dimension rest_k: 1
-                // Flattened stride for dimension (4 before rest_k): rest_k
-                // Flattened stride for dimension rest_m: 4 * rest_k
-                // Flattened stride for dimension (4 after 32): rest_m * 4 * rest_k
-                // Flattened stride for dimension 32: 4 * rest_m * 4 * rest_k
-                //
-                // For one M-tile, one K-tile, we access:
-                // - All of (32, 4): covers the atom
-                // - m_block_sfa in rest_m
-                // - All of 4 (second 4)
-                // - 4 consecutive values in rest_k: k_tile_idx_sfa*4 + [0,1,2,3]
-                //
-                // Total bytes per M-tile, K-tile = 32 * 4 * 4 = 512...wait, that's wrong
-                // Actually: 32 * 4 * 1 * 4 * 1 = 512 for ONE rest_k value
-                // We need 4 rest_k values (one K-tile = 16 scales = 4 * 4-scale blocks)
-                // So 4 loads of 512 bytes each
-                
-                int rest_k_dim = n_col_blocks;  // (K_scales + 3) / 4
-                
+                // SFA comes in as the permuted physical layout (32, 4, rest_m, 4, rest_k)
+                // with non-trivial strides. Use a rank-4 packed view to fetch 4x512B per K-tile:
+                // packed16 = mm4*4 + kk4 (16 bytes), and mm32 is 32 rows.
                 #pragma unroll
                 for (int t = 0; t < 4; ++t) {
-                    // Byte offset for t-th chunk in atom-tiled flattened layout
-                    // Each chunk: (32, 4, 1, 4, 1) = 512 bytes at specific (rest_m, rest_k) indices
-                    // rest_m index = m_block_sfa
-                    // rest_k index = k_tile_idx_sfa * 4 + t
-                    //
                     int rest_k_idx = k_tile_idx_sfa * 4 + t;
-                    uint32_t byte_offset = (uint32_t(m_block_sfa) * uint32_t(rest_k_dim) + uint32_t(rest_k_idx)) * 512u;
-                    uint32_t row_offset = byte_offset / 16;  // Convert to row index (16 bytes per row)
-                    
-                    tma_load_2d_cta_no_arrive(
-                        sfa_stage[stage] + t * 512,  // 512 bytes offset per tile in SMEM
-                        desc_SFA, 0, row_offset, mbar_stage(mbar_a, stage)
+                    tma_load_4d_cta_no_arrive(
+                        sfa_stage[stage] + t * 512,
+                        desc_SFA,
+                        0, 0,
+                        static_cast<uint32_t>(m_block_sfa),
+                        static_cast<uint32_t>(rest_k_idx),
+                        mbar_stage(mbar_a, stage)
                     );
                 }
             }
@@ -535,7 +569,6 @@ __device__ __forceinline__ void prefetch_tile(
             bool valid_n = (c_n < N);
 
             // --- TMA Load SFB (atom-tiled layout: 2048 bytes per K-tile) ---
-            int n_col_blocks_sfb = (K_scales + 3) / 4;
             int n_block_sfb = c_n / TileM;  // TileN = TileM = 128
             int k_tile_idx_sfb = k_tile_base / TileK;
             bool valid_sfb = valid_n;
@@ -553,19 +586,18 @@ __device__ __forceinline__ void prefetch_tile(
                 );
             }
             if (valid_sfb) {
-                // Atom-tiled layout: (32, 4, rest_n, 4, rest_k) flattened
-                // Same logic as SFA but using n_block_sfb instead of m_block_sfa
-                int rest_k_dim_sfb = n_col_blocks_sfb;  // (K_scales + 3) / 4
-                
+                // SFB comes in as the permuted physical layout (32, 4, rest_n, 4, rest_k)
+                // with non-trivial strides. Use the same rank-4 packed view as SFA.
                 #pragma unroll
                 for (int t = 0; t < 4; ++t) {
                     int rest_k_idx = k_tile_idx_sfb * 4 + t;
-                    uint32_t byte_offset = (uint32_t(n_block_sfb) * uint32_t(rest_k_dim_sfb) + uint32_t(rest_k_idx)) * 512u;
-                    uint32_t row_offset = byte_offset / 16;
-                    
-                    tma_load_2d_cta_no_arrive(
+                    tma_load_4d_cta_no_arrive(
                         sfb_stage[stage] + t * 512,
-                        desc_SFB, 0, row_offset, mbar_stage(mbar_b, stage)
+                        desc_SFB,
+                        0, 0,
+                        static_cast<uint32_t>(n_block_sfb),
+                        static_cast<uint32_t>(rest_k_idx),
+                        mbar_stage(mbar_b, stage)
                     );
                 }
             }
@@ -1112,16 +1144,7 @@ fp4_gemm_rank2_cta(
     }
 
     // Allocate TMEM once per CTA (b32 columns)
-    constexpr uint32_t ACC_COLS        = TileN;                           // 128 columns for FP32 values
-    constexpr uint32_t KScalesTile     = TileK / 16;                      // 16 FP8 scales per K-tile
-    constexpr uint32_t SF_KBLOCK_COUNT = KScalesTile / 4;                 // 4 K-block panels per K-tile
-    // Cp4x32x128b copies 32 rows × 128b (16B) per row. Each row is 16B = 4 TMEM b32 columns.
-    constexpr uint32_t SF_COLS_PER_KB  = 16u / 4u;                        // 4 columns per K-block panel
-    constexpr uint32_t SFA_COLS_TOTAL  = SF_KBLOCK_COUNT * SF_COLS_PER_KB;
-    constexpr uint32_t TMEM_COL_SFA_BASE = ACC_COLS;
-    constexpr uint32_t TMEM_COL_SFB_BASE = ACC_COLS + SFA_COLS_TOTAL;
-    // Keep allocation size conservative: tcgen05.alloc has strict granularity/size requirements.
-    // We reserve a full 512-column tile and sub-allocate within it.
+    // PTX: nCols must be power-of-2, in [32,512]. Allocate full 512 columns.
     constexpr uint32_t TMEM_COLS_TOTAL = 512u;
     __syncthreads();
     if (tid < 4) {
@@ -1131,16 +1154,55 @@ fp4_gemm_rank2_cta(
     
     uint32_t dst_smem = cvta_to_shared_u32(tmem_base_ptr_tcgen05);
     uint32_t num_cols = TMEM_COLS_TOTAL;
-    asm volatile(
-        "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
-        :
-        : "r"(dst_smem), "r"(num_cols));
+    // PTX: allocation must be performed by a single warp in the CTA.
+    if (warp_id == 0) {
+        asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n"
+                    :
+                    : "r"(dst_smem), "r"(num_cols)
+                    : "memory");
+    }
     __syncthreads();
     // Use a CTA-uniform base pointer; alloc writes the same base for each warp.
     uint32_t tmem_c = tmem_base_ptr_tcgen05[0];
-    
-    uint32_t tmem_sfa_base = tmem_c + TMEM_COL_SFA_BASE;
-    uint32_t tmem_sfb_base = tmem_c + TMEM_COL_SFB_BASE;
+
+    // Place SFA/SFB in TMEM using the same column-offset rules as CUTLASS.
+    // This avoids hardcoding "256" and avoids assuming linear column packing.
+    #if __CUDA_ARCH__ >= 1000
+    using namespace cute;
+    using MmaOp = SM100_MMA_MXF4_SS<
+        cutlass::float_e2m1_t, cutlass::float_e2m1_t, float, cutlass::float_ue4m3_t,
+        TileM, TileN, 16, UMMA::Major::K, UMMA::Major::K
+    >;
+    auto tiled_mma = make_tiled_mma(MmaOp{});
+
+    // CTA-wide accumulator tensor in TMEM (MMA-partitioned), matching CUTLASS' partition_shape_C flow.
+    // NOTE: Do NOT use partition_fragment_C here; that yields a per-thread fragment and breaks epilogue coverage.
+    auto acc_shape = partition_shape_C(tiled_mma, make_shape(Int<TileM>{}, Int<TileN>{}));  // ((MMA_TILE_M,MMA_TILE_N), MMA_M, MMA_N)
+    auto tCtAcc = make_tensor<typename MMA_Traits<MmaOp>::FrgTypeC>(acc_shape);
+    tCtAcc.data() = make_tmem_ptr<float>(tmem_c);
+
+    constexpr int kKBlock = 64;
+    static_assert(TileK % kKBlock == 0, "TileK must be divisible by kKBlock");
+    constexpr int kNumKBlocks = TileK / kKBlock;
+
+    // tmem_sf_frg expects ((MMA_MN, (VecSize, NSF)), num_MMA_MN, num_MMA_K)
+    constexpr int kSfVecSize = 16;
+    constexpr int kSfNSF = kKBlock / kSfVecSize;  // 4 for K=64, vec=16
+    static_assert(kSfVecSize * kSfNSF == kKBlock, "Scale-factor NSF mismatch");
+    auto tmem_shape_sf = make_shape(
+        make_shape(Int<TileM>{}, make_shape(Int<kSfVecSize>{}, Int<kSfNSF>{})),
+        Int<1>{},
+        Int<kNumKBlocks>{}
+    );
+
+    auto tCtSFA = make_tensor<typename MMA_Traits<MmaOp>::FrgTypeSFA>(tmem_shape_sf);
+    auto tCtSFB = make_tensor<typename MMA_Traits<MmaOp>::FrgTypeSFB>(tmem_shape_sf);
+
+    uint32_t tmem_sfa_base = tmem_c + cutlass::detail::find_tmem_tensor_col_offset(tCtAcc);
+    tCtSFA.data() = make_tmem_ptr<cutlass::float_ue4m3_t>(tmem_sfa_base);
+    uint32_t tmem_sfb_base = tmem_sfa_base + cutlass::detail::find_tmem_tensor_col_offset(tCtSFA);
+    tCtSFB.data() = make_tmem_ptr<cutlass::float_ue4m3_t>(tmem_sfb_base);
+    #endif
 
     // NOTE: TMEM accumulator initialization is handled by scaleC=0 on the first MMA.
     // tcgen05.mma with scaleC=0 (predicate p=false) does D = A*B, ignoring existing C.
@@ -1189,29 +1251,39 @@ fp4_gemm_rank2_cta(
         // =========================================================================
         // Each K-block holds 32 rows × 16B/row = 512B of FP8 scale data in SMEM.
         // sfa_stage/sfb_stage are laid out as 4 contiguous 512B chunks (one per K-block).
+        //
+        // NOTE: Match kutte.py oracle issue scope: issue tcgen05.cp from a single warp
+        // (warp 0) and a single lane (lane 0). This avoids redundant copies from
+        // multiple warps in the CTA that can corrupt TMEM scale panels.
         uint32_t sfa_stage_smem = cvta_to_shared_u32(sfa_stage[stage]);
         uint32_t sfb_stage_smem = cvta_to_shared_u32(sfb_stage[stage]);
-        #pragma unroll
-        for (int kb = 0; kb < int(SF_KBLOCK_COUNT); ++kb) {
-            uint32_t sfa_dst = tmem_sfa_base + kb * SF_COLS_PER_KB;
-            uint64_t desc_sfa = make_sf_smem_desc_addr(
-                sfa_stage_smem + uint32_t(kb) * 512u, 16, 0
-            );
-            asm volatile(
-                "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
-                :: "r"(sfa_dst), "l"(desc_sfa)
-                : "memory"
-            );
+        if (warp_id == 0 && lane_id == 0) {
+            // tcgen05.cp ... warpx4 is a broadcast op; do NOT manually replicate
+            // via DP shifts here. Issue exactly one UTCCP per 512B scale panel.
+            #pragma unroll
+            for (int kb = 0; kb < kNumKBlocks; ++kb) {
+                uint64_t desc_sfa = make_umma_smem_desc_addr(
+                    sfa_stage_smem + uint32_t(kb) * 512u,
+                    16, 0, 0
+                );
+                uint32_t sfa_dst = raw_pointer_cast(tCtSFA(_, _, kb).data());
+                asm volatile(
+                    "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
+                    :: "r"(sfa_dst), "l"(desc_sfa)
+                    : "memory"
+                );
 
-            uint32_t sfb_dst = tmem_sfb_base + kb * SF_COLS_PER_KB;
-            uint64_t desc_sfb = make_sf_smem_desc_addr(
-                sfb_stage_smem + uint32_t(kb) * 512u, 16, 0
-            );
-            asm volatile(
-                "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
-                :: "r"(sfb_dst), "l"(desc_sfb)
-                : "memory"
-            );
+                uint64_t desc_sfb = make_umma_smem_desc_addr(
+                    sfb_stage_smem + uint32_t(kb) * 512u,
+                    16, 0, 0
+                );
+                uint32_t sfb_dst = raw_pointer_cast(tCtSFB(_, _, kb).data());
+                asm volatile(
+                    "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
+                    :: "r"(sfb_dst), "l"(desc_sfb)
+                    : "memory"
+                );
+            }
         }
 
         __syncthreads();
@@ -1220,50 +1292,65 @@ fp4_gemm_rank2_cta(
         // MMA: one tcgen05.mma per K-block (K=64), with ACCUMULATE disabled only
         // for the first K-block of the full GEMM.
         // =========================================================================
-        constexpr int kKBlock = 64;
-        constexpr int kKBlockPackedBytes = kKBlock / 2;  // FP4 packed: 2 values / byte
-        static_assert(TileK % kKBlock == 0, "TileK must be divisible by kKBlock");
-        constexpr int kNumKBlocks = TileK / kKBlock;
+        using namespace cute;
+        using ElementAB = cutlass::float_e2m1_t;
+        using SmemLayoutAtomAB = UMMA::Layout_K_SW128_Atom<ElementAB>;
+        auto smem_layout_a = tile_to_shape(SmemLayoutAtomAB{}, make_shape(Int<TileM>{}, Int<TileK>{}));
+        auto smem_layout_b = tile_to_shape(SmemLayoutAtomAB{}, make_shape(Int<TileN>{}, Int<TileK>{}));
 
-        uint32_t a_stage_smem = cvta_to_shared_u32(a_packed_stage[stage]);
-        uint32_t b_stage_smem = cvta_to_shared_u32(b_packed_stage[stage]);
+        auto sA_full = make_tensor(make_smem_ptr<ElementAB>(a_packed_stage[stage]), smem_layout_a);
+        auto sB_full = make_tensor(make_smem_ptr<ElementAB>(b_packed_stage[stage]), smem_layout_b);
 
         auto mma_kb = [&](int kb, bool accum) {
-            uint32_t a_kb_smem = a_stage_smem + uint32_t(kb) * uint32_t(kKBlockPackedBytes);
-            uint32_t b_kb_smem = b_stage_smem + uint32_t(kb) * uint32_t(kKBlockPackedBytes);
+            // Derive per-K-block SMEM descriptors from canonical UMMA layouts (no raw pointer offsets).
+            // Each K-block is 64 elements in K (i.e. 32 bytes packed).
+            auto sA_kb = local_tile(
+                sA_full,
+                make_shape(Int<TileM>{}, Int<kKBlock>{}),
+                make_coord(Int<0>{}, kb)
+            );
+            auto sB_kb = local_tile(
+                sB_full,
+                make_shape(Int<TileN>{}, Int<kKBlock>{}),
+                make_coord(Int<0>{}, kb)
+            );
+            uint64_t desc_a_smem = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sA_kb));
+            uint64_t desc_b_smem = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sB_kb));
 
-            uint64_t desc_a_smem = make_smem_desc_tcgen05_addr(a_kb_smem, TileKPacked, 0, 0);
-            uint64_t desc_b_smem = make_smem_desc_tcgen05_addr(b_kb_smem, TileKPacked, 0, 0);
+            uint32_t tmem_sfa_kb = raw_pointer_cast(tCtSFA(_, _, kb).data());
+            uint32_t tmem_sfb_kb = raw_pointer_cast(tCtSFB(_, _, kb).data());
 
-            uint32_t tmem_sfa_kb = tmem_sfa_base + uint32_t(kb) * SF_COLS_PER_KB;
-            uint32_t tmem_sfb_kb = tmem_sfb_base + uint32_t(kb) * SF_COLS_PER_KB;
-
-            if (accum) {
-                asm volatile(
-                    "{\n\t"
-                    ".reg .pred p;\n\t"
-                    "setp.ne.b32 p, 1, 0;\n\t"
-                    "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
-                    "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
-                    "}\n"
-                    :
-                    : "r"(tmem_c), "l"(desc_a_smem), "l"(desc_b_smem),
-                      "r"(idescE_hi), "r"(tmem_sfa_kb), "r"(tmem_sfb_kb)
-                    : "memory"
-                );
-            } else {
-                asm volatile(
-                    "{\n\t"
-                    ".reg .pred p;\n\t"
-                    "setp.ne.b32 p, 0, 0;\n\t"
-                    "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
-                    "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
-                    "}\n"
-                    :
-                    : "r"(tmem_c), "l"(desc_a_smem), "l"(desc_b_smem),
-                      "r"(idescE_hi), "r"(tmem_sfa_kb), "r"(tmem_sfb_kb)
-                    : "memory"
-                );
+            // NOTE: Match kutte.py oracle issue scope: issue tcgen05.mma only from
+            // warp 0 lane 0. Issuing from multiple warps can deterministically
+            // over-accumulate and produce finite-but-wrong outputs.
+            if (warp_id == 0 && lane_id == 0) {
+                if (accum) {
+                    asm volatile(
+                        "{\n\t"
+                        ".reg .pred p;\n\t"
+                        "setp.ne.b32 p, 1, 0;\n\t"
+                        "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
+                        "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
+                        "}\n"
+                        :
+                        : "r"(tmem_c), "l"(desc_a_smem), "l"(desc_b_smem),
+                          "r"(idescE_hi), "r"(tmem_sfa_kb), "r"(tmem_sfb_kb)
+                        : "memory"
+                    );
+                } else {
+                    asm volatile(
+                        "{\n\t"
+                        ".reg .pred p;\n\t"
+                        "setp.ne.b32 p, 0, 0;\n\t"
+                        "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
+                        "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
+                        "}\n"
+                        :
+                        : "r"(tmem_c), "l"(desc_a_smem), "l"(desc_b_smem),
+                          "r"(idescE_hi), "r"(tmem_sfa_kb), "r"(tmem_sfb_kb)
+                        : "memory"
+                    );
+                }
             }
         };
 
@@ -1288,10 +1375,12 @@ fp4_gemm_rank2_cta(
     // WAIT: Ensure all async tcgen05.mma operations complete before reading TMEM
     // ========================================================================
     #if __CUDA_ARCH__ >= 1000
-    // tcgen05.wait::ld.sync.aligned waits for TMEM loads/MMA to complete
-    // This ensures accumulator in TMEM is ready for reading
-    // Syntax from CUTLASS barrier.h fence_view_async_tmem_load()
-    asm volatile("tcgen05.wait::ld.sync.aligned;\n" ::: "memory");
+    // Ensure tcgen05 async operations complete before reading TMEM.
+    // Match kutte.py oracle issue scope: only the issuing warp performs the wait,
+    // then the CTA syncs before the epilogue reads TMEM.
+    if (warp_id == 0 && lane_id == 0) {
+        asm volatile("tcgen05.wait::ld.sync.aligned;\n" ::: "memory");
+    }
     __syncthreads();
     #endif
 
@@ -1299,78 +1388,86 @@ fp4_gemm_rank2_cta(
     // EPILOGUE: TMEM -> register -> global D
     // ========================================================================
     {
-        // TMEM layout: 128 rows × 128 cols for accumulator
-        // SM100_TMEM_LOAD_16dp256b1x loads 16 data paths (rows) at once.
-        // Each call gives ALL 16 lanes data at the SAME column range, but different rows.
-        // Lane i gets 4 floats for row (row_base + i) at columns [col, col+3].
-        //
-        // To cover 128 columns, we need 128/4 = 32 separate loads per row set.
-        // With 8 subpartitions handling 16 rows each, each subpart does 32 loads.
-        
-        bool full_tile = (m_tile + TileM <= M) && (n_tile + TileN <= N);
-        int subpart_in_warp = lane_id / 16;  // 0 or 1
-        int lane_in_subpart = lane_id % 16;  // 0..15
-        int global_subpart = warp_id * 2 + subpart_in_warp;  // 0..7
-            
-        // Each of 8 subpartitions handles 16 rows (128 rows / 8 subparts)
-        int row_base = global_subpart * 16;
-        int my_row_in_tile = row_base + lane_in_subpart;
-        int global_row = m_tile + my_row_in_tile;
-            
-        // TMEM address: row_base in DP field (bits 31:16), column in low bits
-        uint32_t tmem_row_base = tmem_c + (row_base << 16);
-            
-        // Loop over all 32 column groups (128 columns / 4 cols per load)
-        #pragma unroll
-        for (int col_group = 0; col_group < 32; ++col_group) {
-            int col_base = col_group * 4;  // 0, 4, 8, ..., 124
-            
-            uint32_t d0, d1, d2, d3;
-            cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_16dp256b1x::copy(
-                tmem_row_base + col_base, d0, d1, d2, d3);
-            
-            float f0 = __uint_as_float(d0);
-            float f1 = __uint_as_float(d1);
-            float f2 = __uint_as_float(d2);
-            float f3 = __uint_as_float(d3);
+        // Correctness-first TMEM epilogue:
+        // Use CuTe's TMEM->register copy partitioning so we don't guess TMEM address math.
+        using namespace cute;
+        using X = Underscore;
 
-            if (full_tile) {
-                half* out = D + global_row * N + (n_tile + col_base);
-                unsigned long long out_addr = reinterpret_cast<unsigned long long>(out);
-                if ((out_addr & 0x3ull) == 0ull) {
-                    __half2 h01 = __floats2half2_rn(f0, f1);
-                    __half2 h23 = __floats2half2_rn(f2, f3);
-                    *reinterpret_cast<__half2*>(out) = h01;
-                    *reinterpret_cast<__half2*>(out + 2) = h23;
-                } else {
-                    out[0] = __float2half(f0);
-                    out[1] = __float2half(f1);
-                    out[2] = __float2half(f2);
-                    out[3] = __float2half(f3);
+        Tensor mD = make_tensor(make_gmem_ptr<cutlass::half_t>(reinterpret_cast<cutlass::half_t*>(D)),
+                                make_shape(M, N),
+                                make_stride(N, 1));
+        Tensor gD = local_tile(mD, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
+
+        auto tiled_t2r = make_tmem_copy(SM100_TMEM_LOAD_16dp256b1x{}, tensor<0>(tCtAcc));
+        int thread_idx = tid % int(size(tiled_t2r));
+        auto thread_t2r = tiled_t2r.get_slice(thread_idx);
+
+        // Slice the single MMA_M / MMA_N tile (TileM=TileN=128 => MMA_M=MMA_N=1).
+        Tensor tAcc = tCtAcc(make_coord(X{}, X{}), _0{}, _0{});             // (CTA_M,CTA_N)
+        Tensor tTR_tAcc = thread_t2r.partition_S(tAcc);                     // (T2R,T2R_M,T2R_N)
+        Tensor tTR_gD = thread_t2r.partition_D(gD);                         // (T2R,T2R_M,T2R_N)
+        Tensor tTR_rAcc = make_tensor<float>(shape(tTR_gD));                // (T2R,T2R_M,T2R_N)
+
+        copy(tiled_t2r, tTR_tAcc, tTR_rAcc);
+
+        #if NVFP4_DEBUG_DUMP
+        if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+            if (tid == 0) {
+                printf("DUMP tile=(%d,%d) block=%d t2r_size=%d\n",
+                       int(blockIdx.x), int(blockIdx.y), int(blockDim.x), int(size(tiled_t2r)));
+            }
+
+            Tensor coordMN = make_identity_tensor(make_shape(M, N));        // (M,N) -> (m,n)
+            Tensor cMN = local_tile(coordMN, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
+            Tensor tTR_cMN = thread_t2r.partition_D(cMN);
+            #pragma unroll
+            for (int i = 0; i < size(tTR_rAcc); ++i) {
+                auto mn = tTR_cMN(i);
+                int gm = int(get<0>(mn));
+                int gn = int(get<1>(mn));
+                if (gm == 0 && gn >= 0 && gn < 32) {
+                    float acc = tTR_rAcc(i);
+                    float out = __half2float(__float2half_rn(acc));
+                    printf("DUMP m=%d n=%d tid=%d thr=%d i=%d acc=%f out=%f\n",
+                           gm, gn, int(tid), int(thread_idx), int(i), acc, out);
                 }
-            } else {
-                if (global_row < M) {
-                    int gc0 = n_tile + col_base;
-                    int gc1 = n_tile + col_base + 1;
-                    int gc2 = n_tile + col_base + 2;
-                    int gc3 = n_tile + col_base + 3;
+            }
+        }
+        #endif
 
-                    if (gc0 < N) D[global_row * N + gc0] = __float2half(f0);
-                    if (gc1 < N) D[global_row * N + gc1] = __float2half(f1);
-                    if (gc2 < N) D[global_row * N + gc2] = __float2half(f2);
-                    if (gc3 < N) D[global_row * N + gc3] = __float2half(f3);
+        bool full_tile = (m_tile + TileM <= M) && (n_tile + TileN <= N);
+        if (full_tile) {
+            #pragma unroll
+            for (int i = 0; i < size(tTR_rAcc); ++i) {
+                tTR_gD(i) = cutlass::half_t(__float2half_rn(tTR_rAcc(i)));
+            }
+        } else {
+            Tensor coordMN = make_identity_tensor(make_shape(M, N));        // (M,N) -> (m,n)
+            Tensor cMN = local_tile(coordMN, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
+            Tensor tTR_cMN = thread_t2r.partition_D(cMN);
+            #pragma unroll
+            for (int i = 0; i < size(tTR_rAcc); ++i) {
+                auto mn = tTR_cMN(i);
+                if (get<0>(mn) < M && get<1>(mn) < N) {
+                    tTR_gD(i) = cutlass::half_t(__float2half_rn(tTR_rAcc(i)));
                 }
             }
         }
     }
 
-    // Free TMEM allocation
-    {
-        uint32_t cols = TMEM_COLS_TOTAL;
-        asm volatile(
-            "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n"
-            :
-            : "r"(tmem_c), "r"(cols));
+    // Free TMEM allocation (must be explicit before CTA exit)
+    __syncthreads();  // ensure no warp still uses TMEM
+    if (warp_id == 0) {
+        uint32_t taddr = tmem_c;
+        uint32_t ncols = TMEM_COLS_TOTAL;
+        asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n"
+                    :
+                    : "r"(taddr), "r"(ncols)
+                    : "memory");
+        asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;\n"
+                    :
+                    :
+                    : "memory");
     }
     #endif  // !USE_tcgen05_MAINLOOP
 #endif
@@ -1413,6 +1510,8 @@ void launch_fp4_gemm_optimized(
     CUtensorMap *d_map_A = nullptr, *d_map_B = nullptr, *d_map_SFA = nullptr, *d_map_SFB = nullptr;
     CUtensorMap *map_A_ptr = &map_A, *map_B_ptr = &map_B, *map_SFA_ptr = &map_SFA, *map_SFB_ptr = &map_SFB;
     bool tma_ok = true;
+    int tma_fail_code = 0;
+    const char* tma_fail_which = nullptr;
 
     // A: M x K (Rank-2)
     {
@@ -1421,10 +1520,13 @@ void launch_fp4_gemm_optimized(
         cuuint64_t strides_A[1] = {static_cast<cuuint64_t>(K/2)};
         
         CUresult resA = encode_tma_matrix(map_A_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
-                                     2, A_ptr, dims_A, strides_A, box_A);
+                                     2, A_ptr, dims_A, strides_A, box_A,
+                                     CU_TENSOR_MAP_SWIZZLE_128B);
         if (resA != CUDA_SUCCESS) {
              printf("ERROR: TMA A descriptor failed with code %d\n", resA);
              tma_ok = false;
+             tma_fail_code = int(resA);
+             tma_fail_which = "A";
         } else {
             check_cuda(cudaMalloc(&d_map_A, sizeof(CUtensorMap)), "cudaMalloc d_map_A");
             check_cuda(cudaMemcpy(d_map_A, map_A_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_A");
@@ -1438,59 +1540,95 @@ void launch_fp4_gemm_optimized(
         cuuint64_t strides_B[1] = {static_cast<cuuint64_t>(K/2)};
         
         CUresult resB = encode_tma_matrix(map_B_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
-                                     2, B_ptr, dims_B, strides_B, box_B);
+                                     2, B_ptr, dims_B, strides_B, box_B,
+                                     CU_TENSOR_MAP_SWIZZLE_128B);
         if (resB != CUDA_SUCCESS) {
              printf("ERROR: TMA B descriptor failed with code %d\n", resB);
              tma_ok = false;
+             tma_fail_code = int(resB);
+             tma_fail_which = "B";
         } else {
             check_cuda(cudaMalloc(&d_map_B, sizeof(CUtensorMap)), "cudaMalloc d_map_B");
             check_cuda(cudaMemcpy(d_map_B, map_B_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_B");
         }
     }
 
-    // SFA: atom-tiled layout (32, 4, rest_m, 4, rest_k) flattened
-    // This matches sfa_permuted from reference.py and kutte.py
+    // SFA: permuted physical layout tensor passed as a rank-5 uint8 view.
+    // We encode a rank-4 TMA view by logically packing (mm4, kk4) into a contiguous 16B dim:
+    //   original: (mm32, mm4, rest_m, kk4, rest_k) with stride(kk4)=1 and stride(mm4)=4
+    //   packed:   (packed16, mm32, rest_m, rest_k) where packed16 = mm4*4 + kk4
     {
-        int rest_m = (M + 127) / 128;  // ceil_div(M, 128)
-        int rest_k = (K_scales + 3) / 4;  // ceil_div(K_scales, 4)
-        // Total bytes = 32 * 4 * rest_m * 4 * rest_k
-        cuuint64_t total_bytes = static_cast<cuuint64_t>(32) * 4 * rest_m * 4 * rest_k;
-        
-        // 2D descriptor: [16 bytes width, total_bytes/16 rows]
-        cuuint64_t total_rows = total_bytes / 16;
-        cuuint64_t dims_SFA[2] = {16, total_rows};
-        cuuint32_t box_SFA[2] = {16, 32};  // Load 512 bytes per TMA (32 rows × 16 bytes)
-        cuuint64_t strides_SFA[1] = {16};
-        
+        TORCH_CHECK(SFA.is_cuda(), "SFA must be CUDA");
+        TORCH_CHECK(SFA.scalar_type() == torch::kUInt8, "SFA must be uint8");
+        TORCH_CHECK(SFA.dim() == 5, "SFA must be rank-5");
+        TORCH_CHECK(SFA.size(0) == 32 && SFA.size(1) == 4 && SFA.size(3) == 4,
+                    "SFA shape must be (32,4,rest_m,4,rest_k)");
+        TORCH_CHECK(SFA.stride(3) == 1, "SFA expects contiguous kk4 dimension");
+        TORCH_CHECK(SFA.stride(1) == 4, "SFA expects mm4 stride 4 (packed16 contiguity)");
+        TORCH_CHECK(SFA.stride(0) == 16, "SFA expects mm32 stride 16 (packed16 contiguity)");
+
+        cuuint64_t dims_SFA[4] = {
+            16ull,                              // packed16 (mm4*4 + kk4)
+            static_cast<cuuint64_t>(SFA.size(0)), // mm32 (32)
+            static_cast<cuuint64_t>(SFA.size(2)), // rest_m
+            static_cast<cuuint64_t>(SFA.size(4)), // rest_k
+        };
+        cuuint64_t strides_SFA[3] = {
+            static_cast<cuuint64_t>(SFA.stride(0)), // mm32
+            static_cast<cuuint64_t>(SFA.stride(2)), // rest_m
+            static_cast<cuuint64_t>(SFA.stride(4)), // rest_k
+        };
+        cuuint32_t box_SFA[4] = {16, 32, 1, 1};     // 16B x 32 rows = 512B
+
         CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
-                                     2, const_cast<void*>(static_cast<const void*>(SFA_ptr)),
-                                     dims_SFA, strides_SFA, box_SFA);
+                                     4, const_cast<void*>(static_cast<const void*>(SFA_ptr)),
+                                     dims_SFA, strides_SFA, box_SFA,
+                                     CU_TENSOR_MAP_SWIZZLE_NONE);
         if (resSFA != CUDA_SUCCESS) {
              printf("ERROR: TMA SFA descriptor failed with code %d\\n", resSFA);
              tma_ok = false;
+             tma_fail_code = int(resSFA);
+             tma_fail_which = "SFA";
         } else {
             check_cuda(cudaMalloc(&d_map_SFA, sizeof(CUtensorMap)), "cudaMalloc d_map_SFA");
             check_cuda(cudaMemcpy(d_map_SFA, map_SFA_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFA");
         }
     }
 
-    // SFB: atom-tiled layout (32, 4, rest_n, 4, rest_k) flattened
+    // SFB: permuted physical layout tensor passed as a rank-5 uint8 view.
+    // Same rank-4 packed16 encoding as SFA.
     {
-        int rest_n = (N + 127) / 128;  // ceil_div(N, 128)
-        int rest_k = (K_scales + 3) / 4;  // ceil_div(K_scales, 4)
-        cuuint64_t total_bytes = static_cast<cuuint64_t>(32) * 4 * rest_n * 4 * rest_k;
-        
-        cuuint64_t total_rows = total_bytes / 16;
-        cuuint64_t dims_SFB[2] = {16, total_rows};
-        cuuint32_t box_SFB[2] = {16, 32};
-        cuuint64_t strides_SFB[1] = {16};
-        
+        TORCH_CHECK(SFB.is_cuda(), "SFB must be CUDA");
+        TORCH_CHECK(SFB.scalar_type() == torch::kUInt8, "SFB must be uint8");
+        TORCH_CHECK(SFB.dim() == 5, "SFB must be rank-5");
+        TORCH_CHECK(SFB.size(0) == 32 && SFB.size(1) == 4 && SFB.size(3) == 4,
+                    "SFB shape must be (32,4,rest_n,4,rest_k)");
+        TORCH_CHECK(SFB.stride(3) == 1, "SFB expects contiguous kk4 dimension");
+        TORCH_CHECK(SFB.stride(1) == 4, "SFB expects mm4 stride 4 (packed16 contiguity)");
+        TORCH_CHECK(SFB.stride(0) == 16, "SFB expects mm32 stride 16 (packed16 contiguity)");
+
+        cuuint64_t dims_SFB[4] = {
+            16ull,
+            static_cast<cuuint64_t>(SFB.size(0)), // mm32 (32)
+            static_cast<cuuint64_t>(SFB.size(2)), // rest_n
+            static_cast<cuuint64_t>(SFB.size(4)), // rest_k
+        };
+        cuuint64_t strides_SFB[3] = {
+            static_cast<cuuint64_t>(SFB.stride(0)), // mm32
+            static_cast<cuuint64_t>(SFB.stride(2)), // rest_n
+            static_cast<cuuint64_t>(SFB.stride(4)), // rest_k
+        };
+        cuuint32_t box_SFB[4] = {16, 32, 1, 1};
+
         CUresult resSFB = encode_tma_matrix(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
-                                     2, const_cast<void*>(static_cast<const void*>(SFB_ptr)),
-                                     dims_SFB, strides_SFB, box_SFB);
+                                     4, const_cast<void*>(static_cast<const void*>(SFB_ptr)),
+                                     dims_SFB, strides_SFB, box_SFB,
+                                     CU_TENSOR_MAP_SWIZZLE_NONE);
         if (resSFB != CUDA_SUCCESS) {
              printf("ERROR: TMA SFB descriptor failed with code %d\\n", resSFB);
              tma_ok = false;
+             tma_fail_code = int(resSFB);
+             tma_fail_which = "SFB";
         } else {
             check_cuda(cudaMalloc(&d_map_SFB, sizeof(CUtensorMap)), "cudaMalloc d_map_SFB");
             check_cuda(cudaMemcpy(d_map_SFB, map_SFB_ptr, sizeof(CUtensorMap), cudaMemcpyHostToDevice), "cudaMemcpy d_map_SFB");
@@ -1515,7 +1653,15 @@ void launch_fp4_gemm_optimized(
     maps.sfb = d_map_SFB;
 
     if (!tma_ok) {
-        throw std::runtime_error("TMA descriptor creation failed");
+        std::string msg = "TMA descriptor creation failed";
+        if (tma_fail_which) {
+            msg += " for ";
+            msg += tma_fail_which;
+        }
+        msg += " (code ";
+        msg += std::to_string(tma_fail_code);
+        msg += ")";
+        throw std::runtime_error(msg);
     }
 
     // Kernel Launch
@@ -1688,62 +1834,6 @@ fp4_scale_debug_rank2_cta(
 #endif
 }
 
-void launch_fp4_scale_debug(
-    torch::Tensor A_bytes, torch::Tensor B_bytes,
-    torch::Tensor SFA, torch::Tensor SFB,
-    torch::Tensor OUT_SFA, torch::Tensor OUT_SFB,
-    torch::Tensor OUT_A, torch::Tensor OUT_B,
-    int64_t M, int64_t N, int64_t K, int64_t L, int64_t K_scales_padded
-) {
-    const uint8_t* A_ptr    = A_bytes.data_ptr<uint8_t>();
-    const uint8_t* B_ptr    = B_bytes.data_ptr<uint8_t>();
-    const uint8_t* SFA_ptr  = SFA.data_ptr<uint8_t>();
-    const uint8_t* SFB_ptr  = SFB.data_ptr<uint8_t>();
-    uint8_t* OUT_SFA_ptr    = OUT_SFA.data_ptr<uint8_t>();
-    uint8_t* OUT_SFB_ptr    = OUT_SFB.data_ptr<uint8_t>();
-    half* OUT_A_ptr         = reinterpret_cast<half*>(OUT_A.data_ptr<at::Half>());
-    half* OUT_B_ptr         = reinterpret_cast<half*>(OUT_B.data_ptr<at::Half>());
-
-    constexpr int kTileM = 128;
-    constexpr int kTileN = 128;
-    constexpr int kTileK = 128;
-    constexpr int kThreads = 256;
-
-    dim3 grid;
-    grid.x = (M + kTileM - 1) / kTileM;
-    grid.y = (N + kTileN - 1) / kTileN;
-    grid.z = L;
-
-    dim3 block(kThreads, 1, 1);
-    size_t shared_bytes = 0;
-
-    auto kernel_ptr = (void*)fp4_scale_debug_rank2_cta<kTileM, kTileK, kThreads>;
-
-    int M_int = static_cast<int>(M);
-    int N_int = static_cast<int>(N);
-    int K_int = static_cast<int>(K);
-    int L_int = static_cast<int>(L);
-    int K_scales_padded_int = static_cast<int>(K_scales_padded);
-
-    void* kernel_args[] = {
-        (void*)&A_ptr,
-        (void*)&B_ptr,
-        (void*)&SFA_ptr,
-        (void*)&SFB_ptr,
-        (void*)&OUT_SFA_ptr,
-        (void*)&OUT_SFB_ptr,
-        (void*)&OUT_A_ptr,
-        (void*)&OUT_B_ptr,
-        &M_int,
-        &N_int,
-        &K_int,
-        &L_int,
-        &K_scales_padded_int
-    };
-
-    check_cuda(cudaLaunchKernel(kernel_ptr, grid, block, kernel_args, shared_bytes, 0),
-               "cudaLaunchKernel debug");
-}
 """
 
 cpp_source = """
@@ -1754,13 +1844,6 @@ void launch_fp4_gemm_optimized(
     int64_t M, int64_t N, int64_t K, int64_t L, int64_t K_scales_padded
 );
 
-void launch_fp4_scale_debug(
-    torch::Tensor A_bytes, torch::Tensor B_bytes,
-    torch::Tensor SFA, torch::Tensor SFB,
-    torch::Tensor OUT_SFA, torch::Tensor OUT_SFB,
-    torch::Tensor OUT_A, torch::Tensor OUT_B,
-    int64_t M, int64_t N, int64_t K, int64_t L, int64_t K_scales_padded
-);
 """
 
 module = None
@@ -1769,34 +1852,39 @@ module = None
 def get_module():
     global module
     if module is None:
+        debug_dump = os.environ.get("NVFP4_DEBUG_DUMP", "0") not in ("", "0", "false", "False")
+        module_name = "nvfp4_gemm_sm100_ptx_dbg" if debug_dump else "nvfp4_gemm_sm100_ptx"
+        extra_cuda_cflags = [
+            "-O3",  # Enable optimizations to fix lambda stack issues
+            "-DNDEBUG",  # Disable debug output for performance testing
+            "--use_fast_math",  # Disabled for debugging
+            "--ftz=true",  # Flush denormals to zero
+            "--prec-div=false",  # Faster division (less precise)
+            "--prec-sqrt=false",  # Faster sqrt (less precise)
+            "--fmad=true",  # Enable fused multiply-add
+            "-std=c++17",
+            "-gencode=arch=compute_100a,code=sm_100a",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
+            "-Xcudafe",
+            "--diag_suppress=20012",
+            "-maxrregcount=128",
+            "--ptxas-options=-v,-warn-lmem-usage",
+            "-lineinfo",
+            f"-I{cutlass_path}/include",
+        ]
+        if debug_dump:
+            extra_cuda_cflags.append("-DNVFP4_DEBUG_DUMP=1")
+
         module = load_inline(
-            name="nvfp4_gemm_sm100_ptx",
+            name=module_name,
             cpp_sources=cpp_source,
             cuda_sources=cuda_source,
             functions=[
                 "launch_fp4_gemm_optimized",
-                "launch_fp4_scale_debug",
             ],
             verbose=False,
-            extra_cuda_cflags=[
-                "-O3",  # Enable optimizations to fix lambda stack issues
-                "-DNDEBUG",  # Disable debug output for performance testing
-                "--use_fast_math",  # Disabled for debugging
-                "--ftz=true",  # Flush denormals to zero
-                "--prec-div=false",  # Faster division (less precise)
-                "--prec-sqrt=false",  # Faster sqrt (less precise)
-                "--fmad=true",  # Enable fused multiply-add
-                "-std=c++17",
-                "-gencode=arch=compute_100a,code=sm_100a",
-                "--expt-relaxed-constexpr",
-                "--expt-extended-lambda",
-                "-Xcudafe",
-                "--diag_suppress=20012",
-                "-maxrregcount=128",
-                "--ptxas-options=-v,-warn-lmem-usage",
-                "-lineinfo",
-                f"-I{cutlass_path}/include",
-            ],
+            extra_cuda_cflags=extra_cuda_cflags,
             extra_ldflags=["-lcuda"],
         )
     return module
@@ -1816,7 +1904,6 @@ def custom_kernel(data: input_t) -> output_t:
 
     a, b, sfa_ref_cpu, sfb_ref_cpu, sfa_permuted, sfb_permuted, c = data
 
-    # ✅ DEFINE VARIABLES FIRST
     M, N, L = c.shape
     K = a.shape[1] * 2  # a.shape[1] is K/2 (packed)
     k_packed = K // 2
@@ -1832,427 +1919,15 @@ def custom_kernel(data: input_t) -> output_t:
 
     # SCALE FACTORS: Use atom-tiled layout (sfa_permuted/sfb_permuted)
     # =========================================================================  
-    # Match kutte.py which uses sfa_permuted: [32, 4, rest_m, 4, rest_k, l]
-    # This is BlockScaledBasicChunk atom layout from blockscaled_layout.py
-    # atom_shape = ((32, 4), (sf_vec_size=16, 4))
     
-    # Use the underlying storage order directly (matches kutte.py pointer semantics).
-    sfa_bytes = _u8_flat_storage_view(sfa_permuted[..., 0])
-    sfb_bytes = _u8_flat_storage_view(sfb_permuted[..., 0])
+    # Preserve the logical addressing of the permuted view (non-contiguous)
+    sfa_bytes = _u8_strided_view(sfa_permuted[..., 0])
+    sfb_bytes = _u8_strided_view(sfb_permuted[..., 0])
     
     mod = get_module()
     mod.launch_fp4_gemm_optimized(
         a_bytes, b_bytes, sfa_bytes, sfb_bytes, c[:, :, 0],
-        M, N, K, 1, K_scales  # Pass actual K_scales for TMA dimensions
+        M, N, K, L, K_scales
     )
 
     return c
-
-def debug_scales(data: input_t) -> None:
-    a, b, sfa_ref_cpu, sfb_ref_cpu, sfa_permuted, sfb_permuted, c = data
-
-    device = a.device
-
-    M, N, L = c.shape
-    K = a.shape[1] * 2
-    K_scales = K // 16
-    K_scales_padded = max(128, ((K_scales + 127) // 128) * 128)
-
-    # A/B bytes: [M, K/2], [N, K/2]
-    a_2d = a[:, :, 0].contiguous()
-    b_2d = b[:, :, 0].contiguous()
-    a_bytes = a_2d.view(torch.uint8)
-    b_bytes = b_2d.view(torch.uint8)
-
-    # Scales 2D and pad to K_scales_padded
-    sfa_2d = sfa_ref_cpu[..., 0].contiguous()
-    sfb_2d = sfb_ref_cpu[..., 0].contiguous()
-
-    if sfa_2d.shape[1] < K_scales_padded:
-        padding = K_scales_padded - sfa_2d.shape[1]
-        sfa_2d = torch.nn.functional.pad(sfa_2d, (0, padding), value=0)
-    if sfb_2d.shape[1] < K_scales_padded:
-        padding = K_scales_padded - sfb_2d.shape[1]
-        sfb_2d = torch.nn.functional.pad(sfb_2d, (0, padding), value=0)
-
-    sfa_bytes = sfa_2d.view(torch.uint8)
-    sfb_bytes = sfb_2d.view(torch.uint8)
-
-    debug_sfa = torch.zeros_like(sfa_bytes)
-    debug_sfb = torch.zeros_like(sfb_bytes)
-
-    # Outputs for decoded A/B
-    out_a = torch.empty((M, K), dtype=torch.float16, device=device)
-    out_b = torch.empty((N, K), dtype=torch.float16, device=device)
-
-    mod = get_module()
-    mod.launch_fp4_scale_debug(
-        a_bytes, b_bytes,
-        sfa_bytes, sfb_bytes,
-        debug_sfa, debug_sfb,
-        out_a, out_b,
-        M, N, K, 1, K_scales_padded,
-    )
-
-    # === Scale byte debug as before ===
-    ref_sfa_bytes = sfa_ref_cpu[..., 0].contiguous().view(torch.uint8)
-    ref_sfb_bytes = sfb_ref_cpu[..., 0].contiguous().view(torch.uint8)
-
-    K_scales_used = K_scales
-    debug_sfa_cpu = debug_sfa[:, :K_scales_used].cpu()
-    debug_sfb_cpu = debug_sfb[:, :K_scales_used].cpu()
-    ref_sfa_cpu = ref_sfa_bytes[:, :K_scales_used].cpu()
-    ref_sfb_cpu = ref_sfb_bytes[:, :K_scales_used].cpu()
-
-    diff_sfa = debug_sfa_cpu != ref_sfa_cpu
-    diff_sfb = debug_sfb_cpu != ref_sfb_cpu
-
-    print("Scale debug SFA mismatches:", int(diff_sfa.sum().item()))
-    print("Scale debug SFB mismatches:", int(diff_sfb.sum().item()))
-
-    max_rows_sfa = min(4, M)
-    max_rows_sfb = min(4, N)
-    max_cols = min(16, K_scales_used)
-
-    print("\nSFA debug vs ref (first rows, first K_scales)")
-    for r in range(max_rows_sfa):
-        print(f"row {r} debug:", debug_sfa_cpu[r, :max_cols].tolist())
-        print(f"row {r}  ref :", ref_sfa_cpu[r, :max_cols].tolist())
-
-    print("\nSFB debug vs ref (first rows, first K_scales)")
-    for r in range(max_rows_sfb):
-        print(f"row {r} debug:", debug_sfb_cpu[r, :max_cols].tolist())
-        print(f"row {r}  ref :", ref_sfb_cpu[r, :max_cols].tolist())
-
-    # === FP4+FP8 decode verification for A/B ===
-    lut = torch.tensor(
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-         -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
-        dtype=torch.float16, device=device,
-    )
-
-    # A decode (Python)
-    a_u8 = a_bytes  # [M, K/2]
-    M_a, K_packed = a_u8.shape
-    # K is defined as packed_K * 2
-    hi = ((a_u8.long() >> 4) & 0xF)
-    lo = (a_u8.long() & 0xF)
-
-    a_fp4 = torch.empty((M_a, K), dtype=torch.float16, device=device)
-    a_fp4[:, 0::2] = lut[hi]
-    a_fp4[:, 1::2] = lut[lo]
-
-    sfa_scale = sfa_ref_cpu[..., 0].to(device=device, dtype=torch.float16)  # [M, K_scales]
-    k_idx = torch.arange(K, device=device)
-    scale_idx = (k_idx // 16).view(1, -1).expand(M_a, -1)             # [M, K]
-    a_scale = sfa_scale.gather(1, scale_idx)
-    a_dec_ref = a_fp4
-
-    # B decode (Python)
-    b_u8 = b_bytes  # [N, K/2]
-    N_b, K_packed_b = b_u8.shape
-    # K is defined as packed_K * 2
-    hi_b = ((b_u8.long() >> 4) & 0xF)
-    lo_b = (b_u8.long() & 0xF)
-
-    b_fp4 = torch.empty((N_b, K), dtype=torch.float16, device=device)
-    b_fp4[:, 0::2] = lut[hi_b]
-    b_fp4[:, 1::2] = lut[lo_b]
-
-    sfb_scale = sfb_ref_cpu[..., 0].to(device=device, dtype=torch.float16)  # [N, K_scales]
-    scale_idx_b = (k_idx // 16).view(1, -1).expand(N_b, -1)
-    b_scale = sfb_scale.gather(1, scale_idx_b)
-    b_dec_ref = b_fp4
-
-    diff_a = (out_a - a_dec_ref).abs()
-    diff_b = (out_b - b_dec_ref).abs()
-    print(f"Decode A max abs diff: {diff_a.max().item()}")
-    print(f"Decode B max abs diff: {diff_b.max().item()}")
-
-    a_ref = a[:, :, 0]
-    b_ref = b[:, :, 0]
-    scale_a = to_blocked(sfa_ref_cpu[:, :, 0]).to(device)
-    scale_b = to_blocked(sfb_ref_cpu[:, :, 0]).to(device)
-
-    c_ref_mm = torch._scaled_mm(
-        a_ref,
-        b_ref.transpose(0, 1),
-        scale_a,
-        scale_b,
-        bias=None,
-        out_dtype=torch.float16,
-    )
-
-    a_dec_kmajor = out_a * a_scale
-    b_dec_kmajor = out_b * b_scale
-    c_debug = a_dec_kmajor @ b_dec_kmajor.transpose(0, 1)
-
-    diff_c = (c_debug - c_ref_mm).abs()
-    max_abs_diff = diff_c.max().item()
-    denom = c_ref_mm.abs().clamp_min(1e-4)
-    max_rel_diff = (diff_c / denom).max().item()
-    print(f"GEMM debug max abs diff: {max_abs_diff}")
-    print(f"GEMM debug max rel diff: {max_rel_diff}")
-
-    # === No-scale GEMM comparison (decode-only semantics) ===
-    ones_sfa = torch.ones_like(sfa_ref_cpu[:, :, 0])
-    ones_sfb = torch.ones_like(sfb_ref_cpu[:, :, 0])
-    scale_a_ones = to_blocked(ones_sfa).to(device)
-    scale_b_ones = to_blocked(ones_sfb).to(device)
-
-    c_ref_noscale = torch._scaled_mm(
-        a_ref,
-        b_ref.transpose(0, 1),
-        scale_a_ones,
-        scale_b_ones,
-        bias=None,
-        out_dtype=torch.float16,
-    )
-
-    c_hw_noscale = out_a @ out_b.transpose(0, 1)
-    diff_noscale = (c_hw_noscale - c_ref_noscale).abs()
-    max_abs_noscale = diff_noscale.max().item()
-    denom_noscale = c_ref_noscale.abs().clamp_min(1e-4)
-    max_rel_noscale = (diff_noscale / denom_noscale).max().item()
-    print(f"No-scale GEMM max abs diff: {max_abs_noscale}")
-    print(f"No-scale GEMM max rel diff: {max_rel_noscale}")
-
-    # === GEMM using to_blocked scale semantics (Python only) ===
-    # Build index maps from (row, k_block) -> flattened scale index implied by to_blocked.
-    rows_a, K_scales = sfa_ref_cpu[..., 0].shape  # [M, K_scales]
-    rows_b, _ = sfb_ref_cpu[..., 0].shape         # [N, K_scales]
-
-    # A-side index map
-    ids_a = torch.arange(rows_a * K_scales, device=device, dtype=torch.int64).view(rows_a, K_scales)
-    flat_ids_a = to_blocked(ids_a)
-    inv_a = torch.empty_like(flat_ids_a)
-    inv_a[flat_ids_a] = torch.arange(flat_ids_a.numel(), device=device, dtype=torch.int64)
-    idx_map_a = inv_a.view(rows_a, K_scales)
-
-    scale_a_flat = to_blocked(sfa_ref_cpu[:, :, 0]).to(device=device, dtype=torch.float16)
-    k_idx = torch.arange(K, device=device)
-    k_block = (k_idx // 16).view(1, -1).expand(rows_a, -1)  # [M, K]
-    idx_flat_full_a = idx_map_a.gather(1, k_block)
-    a_scale_blocked = scale_a_flat[idx_flat_full_a]
-
-    # B-side index map
-    ids_b = torch.arange(rows_b * K_scales, device=device, dtype=torch.int64).view(rows_b, K_scales)
-    flat_ids_b = to_blocked(ids_b)
-    inv_b = torch.empty_like(flat_ids_b)
-    inv_b[flat_ids_b] = torch.arange(flat_ids_b.numel(), device=device, dtype=torch.int64)
-    idx_map_b = inv_b.view(rows_b, K_scales)
-
-    k_block_b = (k_idx // 16).view(1, -1).expand(rows_b, -1)  # [N, K]
-    scale_b_flat = to_blocked(sfb_ref_cpu[:, :, 0]).to(device=device, dtype=torch.float16)
-    idx_flat_full_b = idx_map_b.gather(1, k_block_b)
-    b_scale_blocked = scale_b_flat[idx_flat_full_b]
-
-    # Direct inverse-to_blocked check for scale tensors
-    sfa_ref16 = sfa_ref_cpu[..., 0].to(device=device, dtype=torch.float16)
-    sfb_ref16 = sfb_ref_cpu[..., 0].to(device=device, dtype=torch.float16)
-    recon_sfa = scale_a_flat[idx_map_a]
-    recon_sfb = scale_b_flat[idx_map_b]
-    inv_diff_sfa = (recon_sfa - sfa_ref16).abs().max().item()
-    inv_diff_sfb = (recon_sfb - sfb_ref16).abs().max().item()
-    print(f"Inverse to_blocked SFA max abs diff: {inv_diff_sfa}")
-    print(f"Inverse to_blocked SFB max abs diff: {inv_diff_sfb}")
-
-    # Apply blocked scales to LUT-decoded FP4 (a_fp4, b_fp4)
-    a_dec_blocked = out_a * a_scale_blocked
-    b_dec_blocked = out_b * b_scale_blocked
-
-    c_blocked = a_dec_blocked @ b_dec_blocked.transpose(0, 1)
-    diff_c_blocked = (c_blocked - c_ref_mm).abs()
-    max_abs_blocked = diff_c_blocked.max().item()
-    max_rel_blocked = (diff_c_blocked / denom).max().item()
-    print(f"Blocked GEMM max abs diff: {max_abs_blocked}")
-    print(f"Blocked GEMM max rel diff: {max_rel_blocked}")
-
-    # Compare kernel-based GEMM vs Python blocked GEMM directly
-    inter_diff = (c_debug - c_blocked).abs().max().item()
-    print(f"c_debug vs c_blocked max abs diff: {inter_diff}")
-
-    # === Partial-sum GEMM (apply scales to K-block partial sums, not element-wise) ===
-    # This matches how _scaled_mm actually applies block scales
-    c_partial = torch.zeros((M, N), dtype=torch.float32, device=device)
-    for kb in range(K_scales):
-        k_start = kb * 16
-        k_end = min((kb + 1) * 16, K);
-        a_block = out_a[:, k_start:k_end].float()  # [M, block_size]
-        b_block = out_b[:, k_start:k_end].float()  # [N, block_size]
-        partial = a_block @ b_block.T              # [M, N] partial sum
-        # Apply scales for this K-block: scale_a[m,kb] * scale_b[n,kb]
-        sfa_kb = sfa_ref16[:, kb:kb+1].float()     # [M, 1]
-        sfb_kb = sfb_ref16[:, kb:kb+1].float()     # [N, 1]
-        c_partial += partial * sfa_kb * sfb_kb.T
-    c_partial_fp16 = c_partial.half();
-    
-    diff_partial = (c_partial_fp16 - c_ref_mm).abs()
-    max_abs_partial = diff_partial.max().item()
-    max_rel_partial = (diff_partial / denom).max().item()
-    print(f"Partial-sum GEMM max abs diff: {max_abs_partial}")
-    print(f"Partial-sum GEMM max rel diff: {max_rel_partial}")
-
-    # === Test scale_a only (scale_b = 1) ===
-    ones_sfb = torch.ones_like(sfb_ref_cpu[:, :, 0])
-    scale_b_ones = to_blocked(ones_sfb).to(device)
-    c_ref_scale_a_only = torch._scaled_mm(
-        a_ref, b_ref.transpose(0, 1),
-        scale_a, scale_b_ones,
-        bias=None, out_dtype=torch.float16,
-    )
-    c_ours_scale_a_only = (out_a * a_scale) @ out_b.T
-    diff_scale_a = (c_ours_scale_a_only - c_ref_scale_a_only).abs()
-    print(f"Scale-A-only GEMM max abs diff: {diff_scale_a.max().item()}")
-
-    # === Test scale_b only (scale_a = 1) ===
-    ones_sfa = torch.ones_like(sfa_ref_cpu[:, :, 0])
-    scale_a_ones = to_blocked(ones_sfa).to(device)
-    c_ref_scale_b_only = torch._scaled_mm(
-        a_ref, b_ref.transpose(0, 1),
-        scale_a_ones, scale_b,
-        bias=None, out_dtype=torch.float16,
-    )
-    c_ours_scale_b_only = out_a @ (out_b * b_scale).T
-    diff_scale_b = (c_ours_scale_b_only - c_ref_scale_b_only).abs()
-    print(f"Scale-B-only GEMM max abs diff: {diff_scale_b.max().item()}")
-
-    # === Print sample scale values to verify FP8 decode ===
-    print(f"\nSample FP8 scale values (first 4 rows, first 4 k-blocks):")
-    print(f"sfa_ref16[0:4, 0:4]:\n{sfa_ref16[0:4, 0:4]}")
-    print(f"sfb_ref16[0:4, 0:4]:\n{sfb_ref16[0:4, 0:4]}")
-    
-    # === Print sample output values ===
-    print(f"\nSample output values at [0,0]:")
-    print(f"c_ref_mm[0,0] = {c_ref_mm[0,0].item()}")
-    print(f"c_debug[0,0] = {c_debug[0,0].item()}")
-    print(f"c_hw_noscale[0,0] = {c_hw_noscale[0,0].item()}")
-
-    # === Compute effective scale factor applied by _scaled_mm ===
-    # Ratio of scaled to unscaled output tells us what _scaled_mm is doing
-    effective_scale = c_ref_mm / c_hw_noscale.clamp(min=1e-6);
-    
-    print(f"\n=== Effective scale analysis ===")
-    print(f"Effective scale at [0,0]: {effective_scale[0,0].item():.4f}")
-    print(f"Effective scale at [0,1]: {effective_scale[0,1].item():.4f}")
-    print(f"Effective scale at [1,0]: {effective_scale[1,0].item():.4f}")
-    print(f"Effective scale at [1,1]: {effective_scale[1,1].item():.4f}")
-    
-    # What we compute as scale_a * scale_b product across K
-    # For output [m,n], we sum over k: a[m,k] * b[n,k] * scale_a[m,k//16] * scale_b[n,k//16]
-    # The effective multiplier depends on contribution from each K-block
-    
-    # Try: maybe _scaled_mm applies scales to OUTPUT rows/cols, not per K-block
-    # Test: scale_a applied per row, scale_b per column (using first scale value)
-    row_scale_a = sfa_ref16[:, 0:1]  # [M, 1] - first K-block scale
-    col_scale_b = sfb_ref16[:, 0:1]  # [N, 1] - first K-block scale
-    c_rowcol = c_hw_noscale * row_scale_a * col_scale_b.T
-    diff_rowcol = (c_rowcol - c_ref_mm).abs()
-    print(f"\nRow/Col scale (first kb) max abs diff: {diff_rowcol.max().item()}");
-    
-    # Try: mean scale across all K-blocks applied to output
-    mean_scale_a = sfa_ref16.mean(dim=1, keepdim=True)  # [M, 1]
-    mean_scale_b = sfb_ref16.mean(dim=1, keepdim=True)  # [N, 1]
-    c_mean = c_hw_noscale * mean_scale_a * mean_scale_b.T
-    diff_mean = (c_mean - c_ref_mm).abs()
-    print(f"Mean scale max abs diff: {diff_mean.max().item()}");
-    
-    # Try: sum of scales across K-blocks
-    sum_scale_a = sfa_ref16.sum(dim=1, keepdim=True)  # [M, 1]
-    sum_scale_b = sfb_ref16.sum(dim=1, keepdim=True)  # [N, 1]
-    c_sum = c_hw_noscale * sum_scale_a * sum_scale_b.T
-    diff_sum = (c_sum - c_ref_mm).abs()
-    print(f"Sum scale max abs diff: {diff_sum.max().item()}");
-    
-    # Check: what would make c_hw_noscale[0,0] become c_ref_mm[0,0]?
-    needed_scale = c_ref_mm[0,0].item() / c_hw_noscale[0,0].item();
-    print(f"\nNeeded scale for [0,0]: {needed_scale:.4f}");
-    print(f"scale_a[0,:] = {sfa_ref16[0,:].tolist()}");
-    print(f"scale_b[0,:] = {sfb_ref16[0,:].tolist()}");
-    
-    # === Test: Power-of-2 scales applied to partial sums ===
-    # C[m,n] = sum_kb (partial[m,n,kb] * 2^scale_a[m,kb] * 2^scale_b[n,kb])
-    c_pow2_partial = torch.zeros((M, N), dtype=torch.float32, device=device);
-    for kb in range(K_scales):
-        k_start = kb * 16;
-        k_end = min((kb + 1) * 16, K);
-        a_block = out_a[:, k_start:k_end].float();
-        b_block = out_b[:, k_start:k_end].float();
-        partial = a_block @ b_block.T;
-        # Apply 2^scale for this K-block
-        pow2_sfa_kb = torch.pow(2.0, sfa_ref16[:, kb:kb+1].float());  # [M, 1]
-        pow2_sfb_kb = torch.pow(2.0, sfb_ref16[:, kb:kb+1].float());  # [N, 1]
-        c_pow2_partial += partial * pow2_sfa_kb * pow2_sfb_kb.T;
-    c_pow2_partial_fp16 = c_pow2_partial.half();
-    
-    diff_pow2_partial = (c_pow2_partial_fp16 - c_ref_mm).abs();
-    max_abs_pow2_partial = diff_pow2_partial.max().item();
-    max_rel_pow2_partial = (diff_pow2_partial / denom).max().item();
-    print(f"\nPow2-partial-sum GEMM max abs diff: {max_abs_pow2_partial}");
-    print(f"Pow2-partial-sum GEMM max rel diff: {max_rel_pow2_partial}");
-    print(f"c_pow2_partial[0,0] = {c_pow2_partial_fp16[0,0].item()}");
-    
-    # Compute what average pow2 scale product would be for row 0
-    pow2_a = torch.pow(2.0, sfa_ref16[0,:].float());
-    pow2_b = torch.pow(2.0, sfb_ref16[0,:].float());
-    pow2_products = pow2_a * pow2_b;
-    avg_pow2 = pow2_products.mean().item();
-    print(f"Average 2^scale_a * 2^scale_b for row 0: {avg_pow2:.4f}");
-    
-    # === Check RAW FP8 byte interpretation ===
-    # Maybe _scaled_mm interprets the FP8 bytes differently
-    sfa_bytes_raw = sfa_ref_cpu[..., 0].view(torch.uint8);
-    sfb_bytes_raw = sfb_ref_cpu[..., 0].view(torch.uint8);
-    print(f"\nRaw FP8 bytes for sfa[0,:16]: {sfa_bytes_raw[0,:16].tolist()}");
-    print(f"Raw FP8 bytes for sfb[0,:16]: {sfb_bytes_raw[0,:16].tolist()}");
-    
-    # FP8 e4m3fn interpretation: value = (-1)^sign * 2^(exp-7) * (1 + mantissa/8)
-    # Let's decode manually
-    def decode_fp8_e4m3fn(byte_val):
-        sign = (byte_val >> 7) & 1;
-        exp = (byte_val >> 3) & 0xF;
-        mantissa = byte_val & 0x7;
-        if exp == 0:  # subnormal
-            return ((-1) ** sign) * (2 ** -6) * (mantissa / 8);
-        else:
-            return ((-1) ** sign) * (2 ** (exp - 7)) * (1 + mantissa / 8);
-    
-    # Decode first few bytes manually
-    print(f"\nManual FP8 decode for sfa[0,:4]:");
-    for i in range(4):
-        byte_val = sfa_bytes_raw[0, i].item();
-        decoded = decode_fp8_e4m3fn(byte_val);
-        pytorch_val = sfa_ref16[0, i].item();
-        print(f"  byte {byte_val}: manual={decoded:.4f}, pytorch={pytorch_val:.4f}");
-    
-    # === Try absolute value of scales ===
-    # Maybe _scaled_mm uses |scale| since block scales should be positive
-    a_scale_abs = a_scale.abs();
-    b_scale_abs = b_scale.abs();
-    c_abs_scale = (out_a * a_scale_abs) @ (out_b * b_scale_abs).T;
-    diff_abs = (c_abs_scale - c_ref_mm).abs();
-    print(f"\nAbs-scale GEMM max abs diff: {diff_abs.max().item()}");
-    print(f"c_abs_scale[0,0] = {c_abs_scale[0,0].item()}");
-    
-    # === Try 2^|scale| (power of 2 of absolute value) ===
-    a_scale_pow2_abs = torch.pow(2.0, a_scale.abs().float()).half();
-    b_scale_pow2_abs = torch.pow(2.0, b_scale.abs().float()).half();
-    c_pow2_abs = (out_a * a_scale_pow2_abs) @ (out_b * b_scale_pow2_abs).T;
-    diff_pow2_abs = (c_pow2_abs - c_ref_mm).abs();
-    print(f"Pow2-abs-scale GEMM max abs diff: {diff_pow2_abs.max().item()}");
-    print(f"c_pow2_abs[0,0] = {c_pow2_abs[0,0].item()}");
-    
-    # === Try scale + offset (e.g., scale + 1 to make all positive) ===
-    offset = 4;  # Make all scales positive: -3+4=1, 2+4=6
-    a_scale_offset = (a_scale + offset);
-    b_scale_offset = (b_scale + offset);
-    c_offset = (out_a * a_scale_offset) @ (out_b * b_scale_offset).T;
-    diff_offset = (c_offset - c_ref_mm).abs();
-    print(f"\nScale+{offset} GEMM max abs diff: {diff_offset.max().item()}");
-    
-    # === Try 2^(scale + offset) ===
-    a_scale_pow2_off = torch.pow(2.0, (a_scale + 1).float()).half();
-    b_scale_pow2_off = torch.pow(2.0, (b_scale + 1).float()).half();
-    c_pow2_off = (out_a * a_scale_pow2_off) @ (out_b * b_scale_pow2_off).T;
-    diff_pow2_off = (c_pow2_off - c_ref_mm).abs();
-    print(f"Pow2(scale+1) GEMM max abs diff: {diff_pow2_off.max().item()}");

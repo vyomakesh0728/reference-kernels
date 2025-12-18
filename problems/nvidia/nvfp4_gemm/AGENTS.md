@@ -120,6 +120,9 @@ Global SF (FP8, atom-tiled) → TMA → SMEM
 - Check `submission.py` files for 
    - consistency 
    - proper encapsulation
+   - proper accumulator initialization
+   - no over-scaling or applying scales multiple times 
+   - no OVERHEAD
    - no defensive coding
    - not overcomplicating the code
    - no over-protective if statements
