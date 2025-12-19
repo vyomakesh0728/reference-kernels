@@ -1,0 +1,59 @@
+Running on:
+GPU: NVIDIA B200
+CPU: INTEL(R) XEON(R) PLATINUM 8570
+Device count: 1
+Runtime: CUDA
+Platform: Linux-6.8.0-51-generic-x86_64-with-glibc2.35
+Torch: 2.9.1+cu130
+Hostname: 830f14046724
+Running failed
+Command 
+python3 eval.py benchmark /tmp/tmpfk_tv8wd
+
+exited with error code 1 after 38.19 seconds.
+Cluster Bot
+APP
+ — 6:17 PM
+Program stderr (1/2):
+multiprocessing.pool.RemoteTraceback: 
+"""
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 125, in worker
+    result = (True, func(*args, **kwds))
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 228, in _run_single_benchmark
+    output = custom_kernel(_clone_data(data))
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 136, in _clone_data
+    return tuple(_clone_data(x) for x in data)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 136, in <genexpr>
+    return tuple(_clone_data(x) for x in data)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 142, in _clone_data
+    return data.clone()
+torch.AcceleratorError: CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 498, in <module>
+    sys.exit(main())
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 466, in main
+    return run_benchmarking(logger, pool, tests)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 325, in run_benchmarking
+    result = run_single_benchmark(pool, test, False, 200, 10e9)
+Program stderr (2/2):
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 304, in run_single_benchmark
+    return pool.apply(_run_single_benchmark, (test, recheck, max_repeats, max_time_ns))
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 360, in apply
+    return self.apply_async(func, args, kwds).get()
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 774, in get
+    raise self._value
+torch.AcceleratorError: CUDA error: an illegal memory access was encountered
+Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.

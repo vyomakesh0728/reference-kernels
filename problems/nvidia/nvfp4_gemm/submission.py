@@ -1507,11 +1507,11 @@ fp4_gemm_rank2_cta(
                         cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_addr, v0, v1, v2, v3);
                         cutlass::arch::fence_view_async_tmem_load();
 
-                        // Global memory N coordinate - match reference pattern
-                        // bank_group_index = i + lane_id * (kSwizzleCDMode / kNumBankGroupBytes) = i + lane_id * 8
-                        uint32_t bank_group_index = i + lane_id * (kSwizzleCDMode / kNumBankGroupBytes);
-                        int n_local = int(bank_group_index * kNumElemsPerBankGroup);  // Local offset within this store block
-                        int gn = n_tile + int(w * BLOCK_N + s * STORE_BLOCK_N) + n_local;
+                        // Global memory N coordinate (row-major):
+                        // This must match the mathematical output layout used by reference.py.
+                        // NOTE: the lane/bank-group swizzle in sm100_bf16_gemm.cuh is for SMEM/TMA layout;
+                        // when writing directly to global memory we use the logical N coordinate.
+                        int gn = n_tile + int(w * BLOCK_N + s * STORE_BLOCK_N + i * kNumElemsPerBankGroup);
 
                         // Write to global memory
                         if (full_tile) {
