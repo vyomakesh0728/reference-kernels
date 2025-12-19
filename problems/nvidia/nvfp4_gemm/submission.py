@@ -1234,6 +1234,20 @@ fp4_gemm_rank2_cta(
     tCtSFA.data() = make_tmem_ptr<cutlass::float_ue4m3_t>(tmem_sfa_base);
     uint32_t tmem_sfb_base = tmem_sfa_base + cutlass::detail::find_tmem_tensor_col_offset(tCtSFA);
     tCtSFB.data() = make_tmem_ptr<cutlass::float_ue4m3_t>(tmem_sfb_base);
+
+    __shared__ __align__(16) uint64_t desc_a_smem_sh[kNumKBlocks];
+    __shared__ __align__(16) uint64_t desc_b_smem_sh[kNumKBlocks];
+    __shared__ __align__(16) uint32_t tmem_sfa_kb_sh[kNumKBlocks];
+    __shared__ __align__(16) uint32_t tmem_sfb_kb_sh[kNumKBlocks];
+    __shared__ __align__(4) uint32_t idescE_hi_sh;
+
+    if (warp_id == 0 && lane_id == 0) {
+        #pragma unroll
+        for (int kb = 0; kb < kNumKBlocks; ++kb) {
+            tmem_sfa_kb_sh[kb] = raw_pointer_cast(tCtSFA(_, _, kb).data());
+            tmem_sfb_kb_sh[kb] = raw_pointer_cast(tCtSFB(_, _, kb).data());
+        }
+    }
     #endif
 
     // NOTE: TMEM accumulator initialization is handled by scaleC=0 on the first MMA.
@@ -1250,6 +1264,12 @@ fp4_gemm_rank2_cta(
         tmem_sfa_base, tmem_sfb_base
     );
     uint32_t idescE_hi = uint32_t(idescE >> 32);
+    #endif
+    #if __CUDA_ARCH__ >= 1000
+    if (tid == 0) {
+        idescE_hi_sh = idescE_hi;
+    }
+    __syncthreads();
     #endif
 
     int num_k_tiles = (K + TileK - 1) / TileK;
@@ -1355,29 +1375,33 @@ fp4_gemm_rank2_cta(
         auto sA_full = make_tensor(make_smem_ptr<ElementAB>(a_packed_stage[stage]), smem_layout_a);
         auto sB_full = make_tensor(make_smem_ptr<ElementAB>(b_packed_stage[stage]), smem_layout_b);
 
+        if (warp_id == 0 && lane_id == 0) {
+            #pragma unroll
+            for (int kb = 0; kb < kNumKBlocks; ++kb) {
+                auto sA_kb = local_tile(
+                    sA_full,
+                    make_shape(Int<TileM>{}, Int<kKBlock>{}),
+                    make_coord(Int<0>{}, kb)
+                );
+                auto sB_kb = local_tile(
+                    sB_full,
+                    make_shape(Int<TileN>{}, Int<kKBlock>{}),
+                    make_coord(Int<0>{}, kb)
+                );
+                desc_a_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sA_kb));
+                desc_b_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sB_kb));
+            }
+        }
+        __syncthreads();
+
         auto mma_kb = [&](int kb, bool accum) {
-            // Derive per-K-block SMEM descriptors from canonical UMMA layouts (no raw pointer offsets).
-            // Each K-block is 64 elements in K (i.e. 32 bytes packed).
-            auto sA_kb = local_tile(
-                sA_full,
-                make_shape(Int<TileM>{}, Int<kKBlock>{}),
-                make_coord(Int<0>{}, kb)
-            );
-            auto sB_kb = local_tile(
-                sB_full,
-                make_shape(Int<TileN>{}, Int<kKBlock>{}),
-                make_coord(Int<0>{}, kb)
-            );
-            uint64_t desc_a_smem = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sA_kb));
-            uint64_t desc_b_smem = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sB_kb));
+            uint64_t desc_a_smem = desc_a_smem_sh[kb];
+            uint64_t desc_b_smem = desc_b_smem_sh[kb];
+            uint32_t tmem_sfa_kb = tmem_sfa_kb_sh[kb];
+            uint32_t tmem_sfb_kb = tmem_sfb_kb_sh[kb];
+            uint32_t idesc_hi = idescE_hi_sh;
 
-            uint32_t tmem_sfa_kb = raw_pointer_cast(tCtSFA(_, _, kb).data());
-            uint32_t tmem_sfb_kb = raw_pointer_cast(tCtSFB(_, _, kb).data());
-
-            // NOTE: Match kutte.py oracle issue scope: issue tcgen05.mma only from
-            // warp 0 lane 0. Issuing from multiple warps can deterministically
-            // over-accumulate and produce finite-but-wrong outputs.
-            if (warp_id == 0 && lane_id == 0) {
+            if (warp_id < 4) {
                 if (accum) {
                     asm volatile(
                         "{\n\t"
@@ -1388,7 +1412,7 @@ fp4_gemm_rank2_cta(
                         "}\n"
                         :
                         : "r"(tmem_c), "l"(desc_a_smem), "l"(desc_b_smem),
-                          "r"(idescE_hi), "r"(tmem_sfa_kb), "r"(tmem_sfb_kb)
+                          "r"(idesc_hi), "r"(tmem_sfa_kb), "r"(tmem_sfb_kb)
                         : "memory"
                     );
                 } else {
@@ -1401,7 +1425,7 @@ fp4_gemm_rank2_cta(
                         "}\n"
                         :
                         : "r"(tmem_c), "l"(desc_a_smem), "l"(desc_b_smem),
-                          "r"(idescE_hi), "r"(tmem_sfa_kb), "r"(tmem_sfb_kb)
+                          "r"(idesc_hi), "r"(tmem_sfa_kb), "r"(tmem_sfb_kb)
                         : "memory"
                     );
                 }
@@ -1445,80 +1469,39 @@ fp4_gemm_rank2_cta(
     // EPILOGUE: TMEM -> register -> global D
     // ========================================================================
     {
-        // Correctness-first TMEM epilogue:
-        // Use CuTe's TMEM->register copy partitioning so we don't guess TMEM address math.
-        using namespace cute;
-        using X = Underscore;
+        constexpr int kRowsPerWarp = 32;
+        constexpr int kElemsPerLoad = 4;
+        constexpr int kStoreBlockN = 32;
 
-        Tensor mD = make_tensor(make_gmem_ptr<cutlass::half_t>(reinterpret_cast<cutlass::half_t*>(D)),
-                                make_shape(M, N),
-                                make_stride(N, 1));
-        Tensor gD = local_tile(mD, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
-
-        auto tiled_t2r = make_tmem_copy(SM100_TMEM_LOAD_16dp256b1x{}, tensor<0>(tCtAcc));
-        // IMPORTANT: Do not modulo the slice id.
-        // Each slice corresponds to a distinct lane in the participating thread group.
-        // Modulo causes multiple threads to alias the same slice, producing races and
-        // deterministic corruption that often shows up at N=8 boundaries.
-        int t2r_threads = int(size(tiled_t2r));
-        if (tid < t2r_threads) {
-            auto thread_t2r = tiled_t2r.get_slice(tid);
-
-            // IMPORTANT: tCtAcc is MMA-partitioned. Do NOT slice with (_0{}, _0{}),
-            // which can accidentally select only the first MMA subtile (often visible
-            // as correctness breaking at N=8). Use the same 2D accumulator view that
-            // the TMEM copy was constructed for.
-            Tensor tAcc = tensor<0>(tCtAcc);
-            Tensor tTR_tAcc = thread_t2r.partition_S(tAcc);
-            Tensor tTR_gD = thread_t2r.partition_D(gD);
-            Tensor tTR_rAcc = make_tensor<float>(shape(tTR_gD));
-
-            copy(tiled_t2r, tTR_tAcc, tTR_rAcc);
-            #if __CUDA_ARCH__ >= 1000
-            // Ensure async TMEM loads are visible before consuming tTR_rAcc.
-            asm volatile("tcgen05.wait::ld.sync.aligned;\n" ::: "memory");
-            #endif
-
-            #if NVFP4_DEBUG_DUMP
-            if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-                if (tid == 0) {
-                    printf("DUMP tile=(%d,%d) block=%d t2r_size=%d\n",
-                           int(blockIdx.x), int(blockIdx.y), int(blockDim.x), int(size(tiled_t2r)));
-                }
-
-                Tensor coordMN = make_identity_tensor(make_shape(M, N));
-                Tensor cMN = local_tile(coordMN, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
-                Tensor tTR_cMN = thread_t2r.partition_D(cMN);
+        int row = warp_id * kRowsPerWarp + lane_id;
+        bool full_tile = (m_tile + TileM <= M) && (n_tile + TileN <= N);
+        if (warp_id < 4 && row < TileM) {
+            #pragma unroll
+            for (int n_chunk = 0; n_chunk < TileN; n_chunk += kStoreBlockN) {
                 #pragma unroll
-                for (int i = 0; i < size(tTR_rAcc); ++i) {
-                    auto mn = tTR_cMN(i);
-                    int gm = int(get<0>(mn));
-                    int gn = int(get<1>(mn));
-                    if (gm == 0 && gn >= 0 && gn < 32) {
-                        float acc = tTR_rAcc(i);
-                        float out = __half2float(__float2half_rn(acc));
-                        printf("DUMP m=%d n=%d tid=%d i=%d acc=%f out=%f\n",
-                               gm, gn, int(tid), int(i), acc, out);
-                    }
-                }
-            }
-            #endif
+                for (int i = 0; i < kStoreBlockN; i += kElemsPerLoad) {
+                    int col0 = n_chunk + i;
+                    uint32_t tmem_addr = tmem_c + uint32_t(col0);
 
-            bool full_tile = (m_tile + TileM <= M) && (n_tile + TileN <= N);
-            if (full_tile) {
-                #pragma unroll
-                for (int i = 0; i < size(tTR_rAcc); ++i) {
-                    tTR_gD(i) = cutlass::half_t(__float2half_rn(tTR_rAcc(i)));
-                }
-            } else {
-                Tensor coordMN = make_identity_tensor(make_shape(M, N));
-                Tensor cMN = local_tile(coordMN, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
-                Tensor tTR_cMN = thread_t2r.partition_D(cMN);
-                #pragma unroll
-                for (int i = 0; i < size(tTR_rAcc); ++i) {
-                    auto mn = tTR_cMN(i);
-                    if (get<0>(mn) < M && get<1>(mn) < N) {
-                        tTR_gD(i) = cutlass::half_t(__float2half_rn(tTR_rAcc(i)));
+                    uint32_t v0, v1, v2, v3;
+                    cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_addr, v0, v1, v2, v3);
+                    cutlass::arch::fence_view_async_tmem_load();
+
+                    if (full_tile) {
+                        int base = (m_tile + row) * N + (n_tile + col0);
+                        D[base + 0] = __float2half_rn(__uint_as_float(v0));
+                        D[base + 1] = __float2half_rn(__uint_as_float(v1));
+                        D[base + 2] = __float2half_rn(__uint_as_float(v2));
+                        D[base + 3] = __float2half_rn(__uint_as_float(v3));
+                    } else {
+                        int gm = m_tile + row;
+                        int gn = n_tile + col0;
+                        if (gm < M) {
+                            if (gn + 0 < N) D[gm * N + gn + 0] = __float2half_rn(__uint_as_float(v0));
+                            if (gn + 1 < N) D[gm * N + gn + 1] = __float2half_rn(__uint_as_float(v1));
+                            if (gn + 2 < N) D[gm * N + gn + 2] = __float2half_rn(__uint_as_float(v2));
+                            if (gn + 3 < N) D[gm * N + gn + 3] = __float2half_rn(__uint_as_float(v3));
+                        }
                     }
                 }
             }
