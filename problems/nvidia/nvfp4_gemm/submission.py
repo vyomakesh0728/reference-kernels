@@ -91,6 +91,31 @@ __device__ __forceinline__ float decode_fp8_e4m3(uint8_t val) {
     return __half2float(__float2half_rn(fp8_val));
 }
 
+// Scale factors come from the permuted (atom-tiled) layout:
+//   (mm32=32, mm4=4, rest_mn, kk4=4, rest_k)
+// For a CTA tile (128 rows, TileK=256 => 16 scale columns), we TMA-load 2048B:
+//   4 chunks × 512B, where each 512B chunk is a 32×16 panel:
+//     rows = mm32 (0..31)
+//     cols = packed16 = (mm4*4 + kk4) (0..15)
+// This helper fetches the correct byte for a logical row (0..127) and local
+// scale column (0..15) from that 2048B tile.
+template<int TileK>
+__device__ __forceinline__ uint8_t load_sf_tile_byte_2048(const uint8_t* __restrict__ sf_tile,
+                                                          int row, int scale_col) {
+    static_assert(TileK % 256 == 0 || TileK == 256, "Expected TileK=256 for current kernel");
+    constexpr int SF_STRIDE = TileK / 16;  // 16 scale columns for TileK=256
+    (void)SF_STRIDE;
+    // row: 0..127 => mm32 in [0,31], mm4 in [0,3]
+    int mm32 = row & 31;
+    int mm4  = row >> 5;
+    // scale_col: 0..15 => rest_k in [0,3], kk4 in [0,3]
+    int rest_k = scale_col >> 2;
+    int kk4    = scale_col & 3;
+    int packed16 = (mm4 << 2) | kk4;
+    // 512B chunk per rest_k, 16B per mm32 row
+    return sf_tile[rest_k * 512 + mm32 * 16 + packed16];
+}
+
 // Hardware FP4 decode helper using cvt.rn.f16x2.e2m1x2, adapted from gau.py.
 // Decodes a byte containing two FP4 values (float4_e2m1fn_x2) into a half2.
 __device__ __forceinline__ void fp4x8_to_fp16x2x4(int *out, int in) {
@@ -653,8 +678,8 @@ __device__ __forceinline__ void process_tile(
     // Base K indices for this tile
     const int k_packed_base = k_tile >> 1;
     const int k_scales_base = k_tile >> 4;
-    const int sfa_c0 = (k_scales_base / SfaBoxK) * SfaBoxK;
-    const int sfb_c0 = sfa_c0;
+    // This stage's scale tile corresponds exactly to global scale columns
+    // [k_scales_base, k_scales_base + SF_STRIDE).
 
     // TMA stage tiles interpreted as row-major
     uint8_t* a_tile  = a_packed_stage[stage];   // [TileM, TileKPacked]
@@ -676,17 +701,15 @@ __device__ __forceinline__ void process_tile(
             int scale_col = idx - row * scale_count;   // K-block within the tile
 
             int m_global        = m_tile + row;
-            int global_k_scale  = (k_tile >> 4) + scale_col;
+            int global_k_scale  = k_scales_base + scale_col;
 
             // Load FP8 scale once per 16 FP4 values (8 packed bytes)
             half scale_h = __float2half(0.0f);
             if (m_global < M && global_k_scale < K_scales) {
-                int sfa_col = global_k_scale - sfa_c0;
-                if (sfa_col >= 0 && sfa_col < SfaBoxK) {
-                    int sfa_idx = row * SF_STRIDE + sfa_col;
-                    uint8_t sfa_byte = sfa_tile[sfa_idx];
-                    scale_h = __float2half(decode_fp8_e4m3(sfa_byte));
-                }
+                // scale_col is the *local* scale column within this TileK slice (0..SF_STRIDE-1)
+                // NOTE: sf_tile is in packed16×mm32 chunks (not a simple row-major [128,16]).
+                uint8_t sfa_byte = load_sf_tile_byte_2048<TileK>(sfa_tile, row, scale_col);
+                scale_h = __float2half(decode_fp8_e4m3(sfa_byte));
             }
 
             // Columns of packed FP4 covered by this scale block
@@ -732,16 +755,12 @@ __device__ __forceinline__ void process_tile(
             int scale_col = idx - row * scale_count;    // K-block within tile
 
             int n_global       = n_tile + row;
-            int global_k_scale = (k_tile >> 4) + scale_col;
+            int global_k_scale = k_scales_base + scale_col;
 
             half scale_h = __float2half(0.0f);
             if (n_global < N && global_k_scale < K_scales) {
-                int sfb_col = global_k_scale - sfb_c0;
-                if (sfb_col >= 0 && sfb_col < SfaBoxK) {
-                    int sfb_idx = row * SF_STRIDE + sfb_col;
-                    uint8_t sfb_byte = sfb_tile[sfb_idx];
-                    scale_h = __float2half(decode_fp8_e4m3(sfb_byte));
-                }
+                uint8_t sfb_byte = load_sf_tile_byte_2048<TileK>(sfb_tile, row, scale_col);
+                scale_h = __float2half(decode_fp8_e4m3(sfb_byte));
             }
 
             int col_packed_start = scale_col << 3;
@@ -1437,8 +1456,16 @@ fp4_gemm_rank2_cta(
         Tensor gD = local_tile(mD, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
 
         auto tiled_t2r = make_tmem_copy(SM100_TMEM_LOAD_16dp256b1x{}, tensor<0>(tCtAcc));
-        int thread_idx = tid % int(size(tiled_t2r));
-        auto thread_t2r = tiled_t2r.get_slice(thread_idx);
+        // IMPORTANT: Do not modulo the slice id.
+        // Each slice corresponds to a distinct lane in the participating thread group.
+        // Modulo causes multiple threads to alias the same slice, producing races and
+        // deterministic corruption that often shows up at N=8 boundaries.
+        int t2r_threads = int(size(tiled_t2r));
+        if (tid >= t2r_threads) {
+            // Threads outside the required participant set must not touch TMEM or gmem.
+            return;
+        }
+        auto thread_t2r = tiled_t2r.get_slice(tid);
 
         // Slice the single MMA_M / MMA_N tile (TileM=TileN=128 => MMA_M=MMA_N=1).
         Tensor tAcc = tCtAcc(make_coord(X{}, X{}), _0{}, _0{});             // (CTA_M,CTA_N)
