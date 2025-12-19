@@ -29,6 +29,7 @@ cuda_source = r"""
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
+#include "cutlass/arch/barrier.h"
 #include "cutlass/detail/sm100_tmem_helper.hpp"
 #include <cute/arch/copy_sm100.hpp>
 #include <cute/tensor.hpp>

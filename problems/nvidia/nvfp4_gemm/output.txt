@@ -1,87 +1,159 @@
-python3 test_correctness.py
-================================================================================
-NVFP4 GEMM Correctness Validation
-================================================================================
+Running on:
+GPU: NVIDIA B200
+CPU: INTEL(R) XEON(R) PLATINUM 8570
+Device count: 1
+Runtime: CUDA
+Platform: Linux-6.8.0-51-generic-x86_64-with-glibc2.35
+Torch: 2.9.1+cu130
+Hostname: 24a41ce89ff2
+Running failed
+Command 
+python3 eval.py benchmark /tmp/tmp2iltx06d
 
-Running 10 test cases...
-Tolerance: rtol=1e-03, atol=1e-03
+exited with error code 1 after 23.66 seconds.
+Cluster Bot
+APP
+ — 12:52 PM
+Program stderr (1/9):
+multiprocessing.pool.RemoteTraceback: 
+"""
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.10/dist-packages/torch/utils/cpp_extension.py", line 2597, in _run_ninja_build
+    subprocess.run(
+  File "/usr/lib/python3.10/subprocess.py", line 526, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['ninja', '-v']' returned non-zero exit status 1.
 
+The above exception was the direct cause of the following exception:
 
-[Test 1/10] M=128, N=256, K=256, L=1
-------------------------------------------------------------
-  Generating input data...
-  Running custom kernel...
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 30703 ERROR AT (0, 8, 0): -469.0 -295.25 ERROR AT (0, 9, 0): -567.0 -481.75 ERROR AT (0, 10, 0): -260.25 163.5 ERROR AT (0, 11, 0): 619.5 362.0 ERROR AT (0, 12, 0): -498.25 -243.25 ... and 30698 more mismatched elements.
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 125, in worker
+    result = (True, func(*args, **kwds))
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 228, in _run_single_benchmark
+    output = custom_kernel(_clone_data(data))
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1983, in custom_kernel
+    mod = get_module()
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1935, in get_module
+    module = load_inline(
+  File "/usr/local/lib/python3.10/dist-packages/torch/utils/cpp_extension.py", line 2051, in load_inline
+    return _jit_compile(
+  File "/usr/local/lib/python3.10/dist-packages/torch/utils/cpp_extension.py", line 2134, in _jit_compile
+    _write_ninja_file_and_build_library(
+  File "/usr/local/lib/python3.10/dist-packages/torch/utils/cpp_extension.py", line 2286, in _write_ninja_file_and_build_library
+    _run_ninja_build(
+  File "/usr/local/lib/python3.10/dist-packages/torch/utils/cpp_extension.py", line 2614, in _run_ninja_build
+    raise RuntimeError(message) from e
+Program stderr (2/9):
+RuntimeError: Error building extension 'nvfp4_gemm_sm100_ptx': [1/2] /usr/local/cuda-13.0/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -c /home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu -o cuda.cuda.o 
+FAILED: [code=1] cuda.cuda.o 
+Program stderr (3/9):
+/usr/local/cuda-13.0/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -c /home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu -o cuda.cuda.o 
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(1475): error: namespace "cutlass::arch" has no member "fence_view_async_tmem_load"
+                      cutlass::arch::fence_view_async_tmem_load();
+                                     ^
 
-[Test 2/10] M=128, N=1536, K=7168, L=1
-------------------------------------------------------------
-  Generating input data...
-  Running custom kernel...
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 184208 ERROR AT (0, 8, 0): -1836.0 -1685.0 ERROR AT (0, 9, 0): -200.5 -1172.0 ERROR AT (0, 10, 0): -935.0 -78.0 ERROR AT (0, 11, 0): 3836.0 2172.0 ERROR AT (0, 12, 0): -321.5 -3366.0 ... and 184203 more mismatched elements.
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(902): warning #177-D: variable "SfaBoxK" was declared but never referenced
+      constexpr int SfaBoxK = 128;
+                    ^
 
-[Test 3/10] M=128, N=3072, K=1536, L=1
-------------------------------------------------------------
-  Generating input data...
-  Running custom kernel...
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 368410 ERROR AT (0, 8, 0): 1654.0 415.25 ERROR AT (0, 9, 0): 405.0 -39.75 ERROR AT (0, 10, 0): -827.0 -86.75 ERROR AT (0, 11, 0): -1158.0 -1827.0 ERROR AT (0, 12, 0): -122.75 476.5 ... and 368405 more mismatched elements.
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
 
-[Test 4/10] M=256, N=7168, K=256, L=1
-------------------------------------------------------------
-  Generating input data...
-  Running custom kernel...
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 1719243 ERROR AT (0, 8, 0): -87.75 -291.5 ERROR AT (0, 9, 0): -367.75 -329.0 ERROR AT (0, 10, 0): 580.0 380.25 ERROR AT (0, 11, 0): 746.0 180.25 ERROR AT (0, 12, 0): -556.0 535.5 ... and 1719238 more mismatched elements.
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(904): warning #177-D: variable "a_stride" was declared but never referenced
+      constexpr int a_stride = TileK + 8;
+                    ^
+Program stderr (4/9):
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(905): warning #177-D: variable "b_stride" was declared but never referenced
+      constexpr int b_stride = TileK + 8;
+                    ^
 
-[Test 5/10] M=256, N=7168, K=2048, L=1
-------------------------------------------------------------
-  Generating input data...
-  Running custom kernel...
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 1719285 ERROR AT (0, 8, 0): 2528.0 1438.0 ERROR AT (0, 9, 0): -484.25 424.5 ERROR AT (0, 10, 0): 2001.0 512.0 ERROR AT (0, 11, 0): 2136.0 1710.0 ERROR AT (0, 12, 0): 1172.0 1529.0 ... and 1719280 more mismatched elements.
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(911): warning #177-D: variable "is_consumer" was declared but never referenced
+      const bool is_consumer = true;
+                 ^
 
-[Test 6/10] M=2304, N=4608, K=7168, L=1
-------------------------------------------------------------
-  Generating input data...
-  Running custom kernel...
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 9947274 ERROR AT (0, 8, 0): -5036.0 34.5 ERROR AT (0, 9, 0): -643.0 1428.0 ERROR AT (0, 10, 0): 1939.0 453.0 ERROR AT (0, 11, 0): 2240.0 -2844.0 ERROR AT (0, 12, 0): -4780.0 -2454.0 ... and 9947269 more mismatched elements.
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(921): warning #177-D: variable "tile_rows" was declared but never referenced
+      const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
+                ^
 
-[Test 7/10] M=384, N=7168, K=2304, L=1
-------------------------------------------------------------
-  Generating input data...
-  Running custom kernel...
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 2578862 ERROR AT (0, 8, 0): 1330.0 691.0 ERROR AT (0, 9, 0): 569.0 723.5 ERROR AT (0, 10, 0): 2394.0 1040.0 ERROR AT (0, 11, 0): 1278.0 2270.0 ERROR AT (0, 12, 0): -2666.0 -2348.0 ... and 2578857 more mismatched elements.
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(922): warning #177-D: variable "tile_cols" was declared but never referenced
+      const int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
+                ^
 
-[Test 8/10] M=512, N=512, K=7168, L=1
-------------------------------------------------------------
-  Generating input data...
-  Running custom kernel...
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 245594 ERROR AT (0, 8, 0): -590.0 -2980.0 ERROR AT (0, 9, 0): -3530.0 2056.0 ERROR AT (0, 10, 0): -5088.0 -3662.0 ERROR AT (0, 11, 0): 1210.0 373.25 ERROR AT (0, 12, 0): -594.0 -4192.0 ... and 245589 more mismatched elements.
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(535): warning #177-D: variable "c_k_scales" was declared but never referenced
+              uint32_t c_k_scales = static_cast<uint32_t>(k_tile_base >> 4);
+                       ^
+          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
 
-[Test 9/10] M=512, N=4096, K=512, L=1
-------------------------------------------------------------
-  Generating input data...
-  Running custom kernel...
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 1964895 ERROR AT (0, 8, 0): 716.0 1992.0 ERROR AT (0, 9, 0): 142.25 -59.75 ERROR AT (0, 10, 0): -472.75 331.25 ERROR AT (0, 11, 0): -957.0 -163.5 ERROR AT (0, 12, 0): 957.0 27.25 ... and 1964890 more mismatched elements.
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(527): warning #177-D: variable "SfaBoxK" was declared but never referenced
+      constexpr int SfaBoxK = 128;
+                    ^
+Program stderr (5/9):
+          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
 
-[Test 10/10] M=512, N=1536, K=7168, L=1
-------------------------------------------------------------
-  Generating input data...
-  Running custom kernel...
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 736869 ERROR AT (0, 8, 0): -2942.0 -3458.0 ERROR AT (0, 9, 0): 74.25 1288.0 ERROR AT (0, 10, 0): -205.0 -4644.0 ERROR AT (0, 11, 0): -4116.0 -553.5 ERROR AT (0, 12, 0): -4300.0 -2326.0 ... and 736864 more mismatched elements.
+1 error detected in the compilation of "/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu".
+ninja: build stopped: subcommand failed.
 
-================================================================================
-SUMMARY
-================================================================================
-Total tests: 10
-Passed:      0 (0%)
-Failed:      10 (100%)
+"""
 
-✗ 10 test(s) failed
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 498, in <module>
+    sys.exit(main())
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 466, in main
+    return run_benchmarking(logger, pool, tests)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 319, in run_benchmarking
+    run_single_benchmark(pool, tests[0], False, 200, 10e7)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 304, in run_single_benchmark
+    return pool.apply(_run_single_benchmark, (test, recheck, max_repeats, max_time_ns))
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 360, in apply
+    return self.apply_async(func, args, kwds).get()
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 774, in get
+    raise self._value
+Program stderr (6/9):
+RuntimeError: Error building extension 'nvfp4_gemm_sm100_ptx': [1/2] /usr/local/cuda-13.0/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -c /home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu -o cuda.cuda.o 
+FAILED: [code=1] cuda.cuda.o 
+Program stderr (7/9):
+/usr/local/cuda-13.0/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -c /home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu -o cuda.cuda.o 
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(1475): error: namespace "cutlass::arch" has no member "fence_view_async_tmem_load"
+                      cutlass::arch::fence_view_async_tmem_load();
+                                     ^
+
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(902): warning #177-D: variable "SfaBoxK" was declared but never referenced
+      constexpr int SfaBoxK = 128;
+                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(904): warning #177-D: variable "a_stride" was declared but never referenced
+      constexpr int a_stride = TileK + 8;
+                    ^
+Program stderr (8/9):
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(905): warning #177-D: variable "b_stride" was declared but never referenced
+      constexpr int b_stride = TileK + 8;
+                    ^
+
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(911): warning #177-D: variable "is_consumer" was declared but never referenced
+      const bool is_consumer = true;
+                 ^
+
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(921): warning #177-D: variable "tile_rows" was declared but never referenced
+      const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
+                ^
+
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(922): warning #177-D: variable "tile_cols" was declared but never referenced
+      const int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
+                ^
+
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(535): warning #177-D: variable "c_k_scales" was declared but never referenced
+              uint32_t c_k_scales = static_cast<uint32_t>(k_tile_base >> 4);
+                       ^
+          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
+
+/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu(527): warning #177-D: variable "SfaBoxK" was declared but never referenced
+      constexpr int SfaBoxK = 128;
+                    ^
+Program stderr (9/9):
+          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
+
+1 error detected in the compilation of "/home/runner/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx/cuda.cu".
+ninja: build stopped: subcommand failed.
