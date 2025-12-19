@@ -493,11 +493,10 @@ __device__ __forceinline__ uint64_t make_instr_desc_mxf4(
     // [3:4) reserved
     // [4:6) b_sf_id = 0 (always 0 for single CTA)
     // [6:7) reserved
-    // SF IDs are encoded from the top bits of the TMEM addresses (CuTe convention).
-    // These are not the TMEM base addresses themselves; they select which SF region
-    // the instruction uses.
-    uint32_t a_sf_id = (tmem_sfa & 0xC0000000u) >> 30;
-    uint32_t b_sf_id = (tmem_sfb & 0xC0000000u) >> 30;
+    // For this kernel we allocate SF in the default SF region and do not use multi-region SF.
+    // Keep SF IDs at 0 to avoid depending on allocator-specific TMEM address high bits.
+    uint32_t a_sf_id = 0;
+    uint32_t b_sf_id = 0;
     // [4:6) b_sf_id
     desc |= ((b_sf_id & 0x3u) << 4);
 
