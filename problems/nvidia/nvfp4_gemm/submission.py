@@ -225,6 +225,18 @@ __device__ __forceinline__ void mbarrier_wait_parity(uint64_t* mbar, uint32_t ph
     );
 }
 
+#if __CUDA_ARCH__ >= 1000
+__device__ __forceinline__ void tcgen05_commit_mbarrier(uint64_t* mbar) {
+    uint32_t bar_intptr = cvta_to_shared_u32(mbar);
+    asm volatile(
+        "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];\n"
+        :
+        : "r"(bar_intptr)
+        : "memory"
+    );
+}
+#endif
+
 // TMA load for CTA (rank-2, L=1) - no cluster
 __device__ __forceinline__ void tma_load_2d_cta_no_arrive(void* smem_ptr,
                                                            const CUtensorMap* desc,
@@ -494,7 +506,7 @@ __device__ __forceinline__ void prefetch_tile(
     bool use_tma_a, bool is_producer, int warp_id, int lane_id,
     int m_tile, int n_tile, int K_packed, int K_scales, int M, int N,
     uint8_t** a_packed_stage, uint8_t** b_packed_stage, uint8_t** sfa_stage, uint8_t** sfb_stage,
-    uint64_t* mbar_a, uint64_t* mbar_b,
+    uint64_t* mbar,
     const CUtensorMap* desc_A, const CUtensorMap* desc_B,
     const CUtensorMap* desc_SFA, const CUtensorMap* desc_SFB
 ) {
@@ -525,28 +537,25 @@ __device__ __forceinline__ void prefetch_tile(
             // bool valid_m = (c_m + TileM) <= static_cast<uint32_t>(M);
 
             // --- TMA Load SFA (atom-tiled layout: 2048 bytes per K-tile) ---
-            // Atom-tiled: (32, 4, rest_m, 4, rest_k) flattened → 2048 bytes
-            // TMA box is [16, 32] = 512 bytes, need 4 loads to get 2048 bytes total
+            // Atom-tiled physical: (mm32=32, mm4=4, rest_m, kk4=4, rest_k)
+            // Reason about it as (rest_m, rest_k, 32, 4, 4) where (32,4,4) is the
+            // natural contiguous 512B scale panel.
+            //
+            // For TMA encoding, the fastest-changing (minor) box dimension must be
+            // at least 16B-wide, so we use a packed16 = (mm4*4 + kk4) dimension:
+            // box = (packed16=16B, mm32=32, 1, 1) => 16*32 = 512 bytes.
             int m_block_sfa = c_m / TileM;
             int k_tile_idx_sfa = k_tile_base / TileK;
             bool valid_sfa = valid_m;
 
-            // Calculate expected bytes for mbar_a (4 × 512 = 2048 bytes for scales)
-            uint32_t bytes_a = 0;
-            if (valid_m && valid_k) bytes_a += TileM * TileKPacked;
-            if (valid_sfa) bytes_a += 2048;  // SF_TILE_BYTES
-
-            mbarrier_arrive_expect_tx(mbar_stage(mbar_a, stage), bytes_a);
-
             if (valid_m && valid_k) {
                 tma_load_2d_cta_no_arrive(
-                    a_packed_stage[stage], desc_A, c0_a, c1_a, mbar_stage(mbar_a, stage)
+                    a_packed_stage[stage], desc_A, c0_a, c1_a, mbar_stage(mbar, stage)
                 );
             }
             if (valid_sfa) {
-                // SFA comes in as the permuted physical layout (32, 4, rest_m, 4, rest_k)
-                // with non-trivial strides. Use a rank-4 packed view to fetch 4x512B per K-tile:
-                // packed16 = mm4*4 + kk4 (16 bytes), and mm32 is 32 rows.
+                // SFA comes in as the permuted physical layout (32, 4, rest_m, 4, rest_k).
+                // The TMA descriptor exposes the natural contiguous 512B panel as (packed16, mm32).
                 #pragma unroll
                 for (int t = 0; t < 4; ++t) {
                     int rest_k_idx = k_tile_idx_sfa * 4 + t;
@@ -556,7 +565,7 @@ __device__ __forceinline__ void prefetch_tile(
                         0, 0,
                         static_cast<uint32_t>(m_block_sfa),
                         static_cast<uint32_t>(rest_k_idx),
-                        mbar_stage(mbar_a, stage)
+                        mbar_stage(mbar, stage)
                     );
                 }
             }
@@ -573,21 +582,14 @@ __device__ __forceinline__ void prefetch_tile(
             int k_tile_idx_sfb = k_tile_base / TileK;
             bool valid_sfb = valid_n;
 
-            // Calculate expected bytes for mbar_b (4 × 512 = 2048 bytes for scales)
-            uint32_t bytes_b = 0;
-            if (valid_n && valid_k) bytes_b += TileM * TileKPacked; // TileN=TileM=128
-            if (valid_sfb) bytes_b += 2048;  // SF_TILE_BYTES
-
-            mbarrier_arrive_expect_tx(mbar_stage(mbar_b, stage), bytes_b);
-
             if (valid_n && valid_k) {
                 tma_load_2d_cta_no_arrive(
-                    b_packed_stage[stage], desc_B, c0_b, c1_b, mbar_stage(mbar_b, stage)
+                    b_packed_stage[stage], desc_B, c0_b, c1_b, mbar_stage(mbar, stage)
                 );
             }
             if (valid_sfb) {
-                // SFB comes in as the permuted physical layout (32, 4, rest_n, 4, rest_k)
-                // with non-trivial strides. Use the same rank-4 packed view as SFA.
+                // SFB comes in as the permuted physical layout (32, 4, rest_n, 4, rest_k).
+                // Use the same packed16×mm32 512B box as SFA.
                 #pragma unroll
                 for (int t = 0; t < 4; ++t) {
                     int rest_k_idx = k_tile_idx_sfb * 4 + t;
@@ -597,10 +599,18 @@ __device__ __forceinline__ void prefetch_tile(
                         0, 0,
                         static_cast<uint32_t>(n_block_sfb),
                         static_cast<uint32_t>(rest_k_idx),
-                        mbar_stage(mbar_b, stage)
+                        mbar_stage(mbar, stage)
                     );
                 }
             }
+
+            // Arrive after issuing all bulk tensor copies (A+SFA+B+SFB).
+            uint32_t bytes_total = 0;
+            if (valid_m && valid_k) bytes_total += TileM * TileKPacked;
+            if (valid_sfa) bytes_total += 2048;  // SF_TILE_BYTES
+            if (valid_n && valid_k) bytes_total += TileM * TileKPacked; // TileN=TileM=128
+            if (valid_sfb) bytes_total += 2048;  // SF_TILE_BYTES
+            mbarrier_arrive_expect_tx(mbar_stage(mbar, stage), bytes_total);
         }
     }
 }
@@ -932,8 +942,9 @@ fp4_gemm_rank2_cta(
         offset += static_cast<size_t>(aligned - addr);
     };
 
-    uint64_t* mbar_a = alloc_mbar_array(StageCount);
-    uint64_t* mbar_b = alloc_mbar_array(StageCount);
+    uint64_t* mbar = alloc_mbar_array(StageCount);
+    uint64_t* mbar_cp = alloc_mbar_array(StageCount);
+    uint64_t* mbar_mma = alloc_mbar_array(StageCount);
 
     // TMA destinations (SWIZZLE_128B -> 1024 byte alignment)
     align_up_smem_1024();
@@ -991,8 +1002,9 @@ fp4_gemm_rank2_cta(
 
     if (tid == 0) {
         for (int s = 0; s < StageCount; ++s) {
-            mbarrier_init(mbar_stage(mbar_a, s)); 
-            mbarrier_init(mbar_stage(mbar_b, s));
+            mbarrier_init(mbar_stage(mbar, s));
+            mbarrier_init(mbar_stage(mbar_cp, s));
+            mbarrier_init(mbar_stage(mbar_mma, s));
         }
         __threadfence_block();
     }
@@ -1020,7 +1032,7 @@ fp4_gemm_rank2_cta(
                 s, k_tile, use_tma_a, is_producer, warp_id, lane_id,
                 m_tile, n_tile, K_packed, K_scales, M, N,
                 a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
-                mbar_a, mbar_b,
+                mbar,
                 desc_A, desc_B, desc_SFA, desc_SFB
             );
         }
@@ -1036,14 +1048,13 @@ fp4_gemm_rank2_cta(
                 (stage + StageCount - 1) % StageCount, next_k, use_tma_a, is_producer, warp_id, lane_id,
                 m_tile, n_tile, K_packed, K_scales, M, N,
                 a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
-                mbar_a, mbar_b,
+                mbar,
                 desc_A, desc_B, desc_SFA, desc_SFB
             );
         }
 
         // Wait for current stage
-        mbarrier_wait_parity(mbar_stage(mbar_a, stage), phase);
-        mbarrier_wait_parity(mbar_stage(mbar_b, stage), phase);
+        mbarrier_wait_parity(mbar_stage(mbar, stage), phase);
         __syncthreads(); // Ensure all threads see data
 
         // Process tile
@@ -1137,7 +1148,7 @@ fp4_gemm_rank2_cta(
                 s, k_tile, use_tma_a, is_producer, warp_id, lane_id,
                 m_tile, n_tile, K_packed, K_scales, M, N,
                 a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
-                mbar_a, mbar_b,
+                mbar,
                 desc_A, desc_B, desc_SFA, desc_SFB
             );
         }
@@ -1220,6 +1231,14 @@ fp4_gemm_rank2_cta(
     uint32_t idescE_hi = uint32_t(idescE >> 32);
     #endif
 
+    int num_k_tiles = (K + TileK - 1) / TileK;
+    int last_tile_iter = num_k_tiles - 1;
+    int last_stage = last_tile_iter % StageCount;
+    uint32_t last_phase = uint32_t((last_tile_iter / StageCount) & 1);
+    int prev_tile_iter = last_tile_iter - 1;
+    int prev_stage = prev_tile_iter % StageCount;
+    uint32_t prev_phase = uint32_t((prev_tile_iter / StageCount) & 1);
+
     // Main K-loop
     for (int k_tile = 0; k_tile < K; k_tile += TileK) {
         int tile_iter = (k_tile / TileK);
@@ -1229,19 +1248,25 @@ fp4_gemm_rank2_cta(
         
         // Issue TMA prefetch for next tile
         if (next_k < K) {
+            // Wait for tcgen05.mma to finish consuming the stage we are about to overwrite.
+            int write_stage = (stage + StageCount - 1) % StageCount;
+            if (warp_id == 0 && lane_id == 0 && tile_iter > 0) {
+                int prev_iter_for_write = tile_iter - 1;
+                uint32_t wait_phase = uint32_t((prev_iter_for_write / StageCount) & 1);
+                mbarrier_wait_parity(mbar_stage(mbar_mma, write_stage), wait_phase);
+            }
             prefetch_tile<TileM, TileK>(
                 (stage + StageCount - 1) % StageCount, next_k, use_tma_a, is_producer, warp_id, lane_id,
                 m_tile, n_tile, K_packed, K_scales, M, N,
                 a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
-                mbar_a, mbar_b,
+                mbar,
                 desc_A, desc_B, desc_SFA, desc_SFB
             );
         }
 
         // Wait for current TMA to complete (reduce spin to a single warp)
         if (warp_id == 0) {
-            mbarrier_wait_parity(mbar_stage(mbar_a, stage), phase);
-            mbarrier_wait_parity(mbar_stage(mbar_b, stage), phase);
+            mbarrier_wait_parity(mbar_stage(mbar, stage), phase);
         }
         __syncthreads();
 
@@ -1284,6 +1309,14 @@ fp4_gemm_rank2_cta(
                     : "memory"
                 );
             }
+            // ADD tcgen05.commit here
+            tcgen05_commit_mbarrier(mbar_stage(mbar_cp, stage));
+        }
+
+        // Ensure scale-panel TMEM stores are visible before tcgen05.mma reads them.
+        // Use all warps in the warpgroup to avoid relying on lane-level execution for fences.
+        if (warp_id < 4) {
+            asm volatile("tcgen05.wait::st.sync.aligned;\n" ::: "memory");
         }
 
         __syncthreads();
@@ -1366,20 +1399,23 @@ fp4_gemm_rank2_cta(
                 mma_kb(kb, true);
             }
         }
+
+        // Signal completion of in-flight tcgen05.mma operations for this stage.
+        if (warp_id == 0 && lane_id == 0) {
+            tcgen05_commit_mbarrier(mbar_stage(mbar_mma, stage));
+        }
         #endif  // __CUDA_ARCH__ >= 1000
 
         __syncthreads();
     }
 
-    // ========================================================================
-    // WAIT: Ensure all async tcgen05.mma operations complete before reading TMEM
-    // ========================================================================
+    // Ensure all in-flight tcgen05.mma operations are complete before reading TMEM.
     #if __CUDA_ARCH__ >= 1000
-    // Ensure tcgen05 async operations complete before reading TMEM.
-    // Match kutte.py oracle issue scope: only the issuing warp performs the wait,
-    // then the CTA syncs before the epilogue reads TMEM.
-    if (warp_id == 0 && lane_id == 0) {
-        asm volatile("tcgen05.wait::ld.sync.aligned;\n" ::: "memory");
+    if (warp_id == 0 && num_k_tiles > 0) {
+        mbarrier_wait_parity(mbar_stage(mbar_mma, last_stage), last_phase);
+        if (num_k_tiles > 1) {
+            mbarrier_wait_parity(mbar_stage(mbar_mma, prev_stage), prev_phase);
+        }
     }
     __syncthreads();
     #endif
@@ -1409,6 +1445,10 @@ fp4_gemm_rank2_cta(
         Tensor tTR_rAcc = make_tensor<float>(shape(tTR_gD));                // (T2R,T2R_M,T2R_N)
 
         copy(tiled_t2r, tTR_tAcc, tTR_rAcc);
+        #if __CUDA_ARCH__ >= 1000
+        // Ensure async TMEM loads are visible before consuming tTR_rAcc.
+        asm volatile("tcgen05.wait::ld.sync.aligned;\n" ::: "memory");
+        #endif
 
         #if NVFP4_DEBUG_DUMP
         if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
@@ -1553,10 +1593,12 @@ void launch_fp4_gemm_optimized(
         }
     }
 
-    // SFA: permuted physical layout tensor passed as a rank-5 uint8 view.
-    // We encode a rank-4 TMA view by logically packing (mm4, kk4) into a contiguous 16B dim:
-    //   original: (mm32, mm4, rest_m, kk4, rest_k) with stride(kk4)=1 and stride(mm4)=4
-    //   packed:   (packed16, mm32, rest_m, rest_k) where packed16 = mm4*4 + kk4
+    // SFA: permuted physical layout tensor passed as a rank-5 uint8 view:
+    //   (mm32=32, mm4=4, rest_m, kk4=4, rest_k)
+    //
+    // Reason about it as (rest_m, rest_k, 32, 4, 4) where (32,4,4) is the natural
+    // contiguous 512B panel, but encode TMA with a 16B-wide minor dimension:
+    //   packed16 = (mm4*4 + kk4) (16 bytes), then mm32 (32 rows) => 512 bytes.
     {
         TORCH_CHECK(SFA.is_cuda(), "SFA must be CUDA");
         TORCH_CHECK(SFA.scalar_type() == torch::kUInt8, "SFA must be uint8");
@@ -1564,11 +1606,11 @@ void launch_fp4_gemm_optimized(
         TORCH_CHECK(SFA.size(0) == 32 && SFA.size(1) == 4 && SFA.size(3) == 4,
                     "SFA shape must be (32,4,rest_m,4,rest_k)");
         TORCH_CHECK(SFA.stride(3) == 1, "SFA expects contiguous kk4 dimension");
-        TORCH_CHECK(SFA.stride(1) == 4, "SFA expects mm4 stride 4 (packed16 contiguity)");
-        TORCH_CHECK(SFA.stride(0) == 16, "SFA expects mm32 stride 16 (packed16 contiguity)");
+        TORCH_CHECK(SFA.stride(1) == 4, "SFA expects mm4 stride 4");
+        TORCH_CHECK(SFA.stride(0) == 16, "SFA expects mm32 stride 16");
 
         cuuint64_t dims_SFA[4] = {
-            16ull,                              // packed16 (mm4*4 + kk4)
+            16ull,                               // packed16 (mm4*4 + kk4)
             static_cast<cuuint64_t>(SFA.size(0)), // mm32 (32)
             static_cast<cuuint64_t>(SFA.size(2)), // rest_m
             static_cast<cuuint64_t>(SFA.size(4)), // rest_k
@@ -1578,7 +1620,7 @@ void launch_fp4_gemm_optimized(
             static_cast<cuuint64_t>(SFA.stride(2)), // rest_m
             static_cast<cuuint64_t>(SFA.stride(4)), // rest_k
         };
-        cuuint32_t box_SFA[4] = {16, 32, 1, 1};     // 16B x 32 rows = 512B
+        cuuint32_t box_SFA[4] = {16, 32, 1, 1};      // 16B x 32 rows = 512B
 
         CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      4, const_cast<void*>(static_cast<const void*>(SFA_ptr)),
@@ -1596,7 +1638,7 @@ void launch_fp4_gemm_optimized(
     }
 
     // SFB: permuted physical layout tensor passed as a rank-5 uint8 view.
-    // Same rank-4 packed16 encoding as SFA.
+    // Same packed16×mm32 encoding as SFA (box=16B×32).
     {
         TORCH_CHECK(SFB.is_cuda(), "SFB must be CUDA");
         TORCH_CHECK(SFB.scalar_type() == torch::kUInt8, "SFB must be uint8");
@@ -1604,11 +1646,11 @@ void launch_fp4_gemm_optimized(
         TORCH_CHECK(SFB.size(0) == 32 && SFB.size(1) == 4 && SFB.size(3) == 4,
                     "SFB shape must be (32,4,rest_n,4,rest_k)");
         TORCH_CHECK(SFB.stride(3) == 1, "SFB expects contiguous kk4 dimension");
-        TORCH_CHECK(SFB.stride(1) == 4, "SFB expects mm4 stride 4 (packed16 contiguity)");
-        TORCH_CHECK(SFB.stride(0) == 16, "SFB expects mm32 stride 16 (packed16 contiguity)");
+        TORCH_CHECK(SFB.stride(1) == 4, "SFB expects mm4 stride 4");
+        TORCH_CHECK(SFB.stride(0) == 16, "SFB expects mm32 stride 16");
 
         cuuint64_t dims_SFB[4] = {
-            16ull,
+            16ull,                               // packed16 (mm4*4 + kk4)
             static_cast<cuuint64_t>(SFB.size(0)), // mm32 (32)
             static_cast<cuuint64_t>(SFB.size(2)), // rest_n
             static_cast<cuuint64_t>(SFB.size(4)), // rest_k
@@ -1673,8 +1715,9 @@ void launch_fp4_gemm_optimized(
     
     // Mbarriers (StageCount)
     offset = align(offset, 16);
-    offset += StageCount * 16; // mbar_a
-    offset += StageCount * 16; // mbar_b
+    offset += StageCount * 16; // mbar
+    offset += StageCount * 16; // mbar_cp
+    offset += StageCount * 16; // mbar_mma
     
     // TMA A (StageCount)
     offset = align(offset, 1024);

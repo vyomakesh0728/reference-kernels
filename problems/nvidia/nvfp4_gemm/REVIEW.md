@@ -1,40 +1,34 @@
-## Status
+You are still doing rank‑5 SFA/SFB and that is now literally what is breaking: `encode_tma_matrix` for SFB returns code 1, so the SFB descriptor is invalid.[1][2]
 
-- The `sfa_permuted/sfb_permuted` stride fix + rank-4 packed16 TMA view is correct for the atom-tiled physical layout.
-- The tcgen05 scale path is the most likely remaining correctness blocker when outputs are “deterministically wrong everywhere”.
+## Why this SFB TMA is failing
 
-## Implemented Fixes (Correctness First)
+- The descriptor checks assume SFB has shape `(32,4,rest_n,4,rest_k)` and very specific strides (mm4 stride 4, kk4 stride 1, mm32 stride 16), then pack that to a rank‑4 TMA plus a hardcoded box, exactly as before.[3]
+- On at least one benchmark shape, those assumptions do not hold (layout, strides, or box vs tensor size), so `encode_tma_matrix` returns `CUDA_ERROR_INVALID_VALUE` (code 1), giving the runtime error you see.[1][3]
 
-### 1) Remove manual TMEM replication
+## What to change
 
-- `tcgen05.cp ... 32x128b.warpx4` is a broadcast op; the previous `SF_REP/SF_SUBPART_DPS` loop was redundant and could corrupt TMEM.
-- The kernel now issues exactly one `tcgen05.cp...warpx4` per 512B scale panel per k-block.
+- Drop the synthetic rank‑5→rank‑4 packing and instead treat SFA/SFB as **simple scale matrices** for TMA: encode them as rank‑2 (or at most rank‑3) with a box that just covers the contiguous scale region you actually use per tile, matching your `[TileN, SfaBoxK]` / `[TileM, SfaBoxK]` views.[4][3]
+- That removes both:  
+  - the descriptor creation failure (no fragile stride/shape assertions), and  
+  - a major source of logical mismatch that was giving you wrong values from `(0,8,0)` onward.
 
-### 2) Mirror CUTLASS TMEM placement (no hardcoded “256”)
+With the current aggressive CTA/TMA/tcgen05 pipeline and per‑stage MMA waits in place, simplifying SFA/SFB TMA to this “flat scale rows” view is the next correctness step before chasing the ~3.04 µs geom mean.
 
-- TMEM scale placement now follows CUTLASS’ `find_tmem_tensor_col_offset` scheme:
-  - `tmem_sfa_base = tmem_c + find_tmem_tensor_col_offset(tCtAcc)`
-  - `tmem_sfb_base = tmem_sfa_base + find_tmem_tensor_col_offset(tCtSFA)`
-- The per-kblock `tsfa_addr/tsfb_addr` used by `tcgen05.mma` is derived from `tmem_sf_frg` tensor slices, not linear column math.
-- Note: CUTLASS’ SM100 block-scaled descriptors expect scale type `float_ue4m3_t` (ScaleFormat UE4M3), not `float_e4m3_t`.
 
-### 3) Undo TMEM address bit-splicing
+Given that the mismatch still starts exactly at `(m=0, n=8, l=0)`, the remaining bug is almost certainly in **how scales are mapped to N‑columns (SFB) / epilogue layout**, not in tcgen05 ordering or TMA correctness in general.[1][2]
 
-- Scale TMEM destinations for UTCCP and scale TMEM operands for MMA now use the raw CuTe `tmem_ptr` slice addresses (no `(base_hi | col_lo)` reconstruction).
+## What the `(0,8,0)` pattern is telling you
 
-### 4) Use UMMA-compatible SMEM descriptors for UTCCP + MMA
+- `(0,0..7,0)` matching but `(0,8,0)` onward wrong means:  
+  - The first 8 columns of the first row use the correct scale / accumulator mapping.  
+  - Starting at the next 8‑column block, either:  
+    - You switch to the wrong SFB scale index for that K‑block, or  
+    - The TMEM accumulator → global D mapping starts reading from a misaligned tile.[3][1]
+- That aligns with two likely culprits:  
+  - **SFB indexing in `process_tile`** (the `sfb_c0`, `SfaBoxK`, `scale_col` arithmetic) vs how SFB is actually laid out and fetched by TMA.  
+  - **Epilogue’s `tCtAcc` view vs TMEM layout**: if the tmem copy partitions don’t match your CTA’s \((M,N)\) tile, the first few lanes/columns can line up by accident but later columns shift.[2][3]
 
-- Scale copy source descriptors now use a SM100 UMMA descriptor encoding (Blackwell `version=1`) via `make_umma_smem_desc_addr` instead of the old scale-only descriptor helper.
-- A/B SMEM descriptors are no longer built from raw pointer offsets; they are derived from canonical CuTe UMMA layouts via `UMMA::make_umma_desc<UMMA::Major::K>` on per-K-block tensor slices.
-- A/B TMA tensor maps now use `CU_TENSOR_MAP_SWIZZLE_128B` so the SMEM physical layout matches `UMMA::Layout_K_SW128_Atom` addressing.
+## Where to focus next
 
-### 5) Use CTA-wide TMEM accumulator tensor (epilogue correctness)
-
-- The TMEM accumulator is now constructed as a CTA-wide MMA-partitioned tensor via `partition_shape_C(...)` + `FrgTypeC` (not `partition_fragment_C`), so epilogue reads cover the full `TileN` instead of only the first MMA sub-tile.
-
-## Next Suspects (If Mismatches Persist)
-
-- A/B descriptor semantics: confirm the chosen `leading_byte_offset` and `stride_byte_offset` match what `tcgen05.mma...mxf4nvf4.block_scale.block16` expects for packed FP4 in SMEM.
-- SMEM swizzle/layout: if UMMA expects a swizzled/interleaved shared layout for A/B, update the TMA tensor maps and descriptors to use that canonical layout (avoid “linear SMEM + guessed descriptor”).
-- Lane participation: gating UTCCP + MMA to `lane_id == 0` is not how CUTLASS issues these ops (`cute::elect_one_sync()` is warp-uniform). If results are still wrong, change the issuer condition to be warp-uniform (e.g. `warp_id == 0` with `elect_one_sync()` semantics).
-- Instruction descriptor: if needed, switch to CUTLASS’ `UMMA::make_runtime_instr_desc_block_scaled` to derive SF IDs from the actual TMEM addresses.
+- Treat SFB as prime suspect: your mismatches begin along **N**, and SFB is the only per‑N structure unique to N‑side scaling. Verifying, for a single tile, that `global_k_scale → sfb_idx → scale_h` matches what the reference kernel uses for the same `(n_global, k)` would directly confirm this. [file:382dc8ae-e8fb-40f7-a174-a461f8f4ac1a][3]
+- In parallel, confirm that your `tCtAcc` / `make_tmem_copy` epilogue is using the exact same shape and partitioning as the CUTLASS SM100 nvfp4 example; any deviation there can also produce the “first few lanes OK, rest wrong” pattern you see.[4][2]
