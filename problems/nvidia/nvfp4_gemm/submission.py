@@ -1469,39 +1469,64 @@ fp4_gemm_rank2_cta(
     // ========================================================================
     // EPILOGUE: TMEM -> register -> global D
     // ========================================================================
+    // Match sm100_bf16_gemm.cuh epilogue pattern exactly for correct TMEM addressing
     {
-        constexpr int kRowsPerWarp = 32;
-        constexpr int kElemsPerLoad = 4;
-        constexpr int kStoreBlockN = 32;
+        constexpr uint32_t LAYOUT_AD_M = 128;
+        constexpr uint32_t BLOCK_N = TileN;
+        constexpr uint32_t kNumMWaves = 1;
+        constexpr uint32_t kSwizzleCDMode = 128;
+        constexpr uint32_t kNumBankGroupBytes = 16;
+        constexpr uint32_t kNumElemsPerBankGroup = kNumBankGroupBytes / sizeof(float);
+        constexpr uint32_t STORE_BLOCK_N = kSwizzleCDMode / sizeof(float);
+        constexpr uint32_t kNumStores = BLOCK_N / STORE_BLOCK_N;
+        constexpr bool kHasShortcut = (kSwizzleCDMode / kNumBankGroupBytes) == 8;
+        constexpr uint32_t accum_stage_idx = 0;  // Single accumulator stage for our case
 
-        int row = warp_id * kRowsPerWarp + lane_id;
+        // Each thread handles one row (M dimension)
+        int row_base = warp_id * 32 + lane_id;
         bool full_tile = (m_tile + TileM <= M) && (n_tile + TileN <= N);
-        if (warp_id < 4 && row < TileM) {
+        if (warp_id < 4 && row_base < TileM) {
+            // Global memory M coordinate (same for all iterations)
+            int gm = m_tile + row_base;
+            
             #pragma unroll
-            for (int n_chunk = 0; n_chunk < TileN; n_chunk += kStoreBlockN) {
+            for (uint32_t w = 0; w < kNumMWaves; ++w) {
                 #pragma unroll
-                for (int i = 0; i < kStoreBlockN; i += kElemsPerLoad) {
-                    int col0 = n_chunk + i;
-                    uint32_t tmem_addr = tmem_c + uint32_t(col0);
+                for (uint32_t s = 0; s < kNumStores; ++s) {
+                    #pragma unroll
+                    for (uint32_t i = 0; i < STORE_BLOCK_N / kNumElemsPerBankGroup; ++i) {
+                        // TMEM address: N-dimension offset from base
+                        // SM100_TMEM_LOAD is warp-collective: same address gives different rows to different threads
+                        uint32_t tmem_addr = tmem_c +
+                                             accum_stage_idx * kNumMWaves * BLOCK_N +
+                                             w * BLOCK_N +
+                                             s * STORE_BLOCK_N + i * kNumElemsPerBankGroup;
 
-                    uint32_t v0, v1, v2, v3;
-                    cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_addr, v0, v1, v2, v3);
-                    cutlass::arch::fence_view_async_tmem_load();
+                        // Load 4 consecutive FP32 values from TMEM
+                        uint32_t v0, v1, v2, v3;
+                        cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_addr, v0, v1, v2, v3);
+                        cutlass::arch::fence_view_async_tmem_load();
 
-                    if (full_tile) {
-                        int base = (m_tile + row) * N + (n_tile + col0);
-                        D[base + 0] = __float2half_rn(__uint_as_float(v0));
-                        D[base + 1] = __float2half_rn(__uint_as_float(v1));
-                        D[base + 2] = __float2half_rn(__uint_as_float(v2));
-                        D[base + 3] = __float2half_rn(__uint_as_float(v3));
-                    } else {
-                        int gm = m_tile + row;
-                        int gn = n_tile + col0;
-                        if (gm < M) {
-                            if (gn + 0 < N) D[gm * N + gn + 0] = __float2half_rn(__uint_as_float(v0));
-                            if (gn + 1 < N) D[gm * N + gn + 1] = __float2half_rn(__uint_as_float(v1));
-                            if (gn + 2 < N) D[gm * N + gn + 2] = __float2half_rn(__uint_as_float(v2));
-                            if (gn + 3 < N) D[gm * N + gn + 3] = __float2half_rn(__uint_as_float(v3));
+                        // Global memory N coordinate - match reference pattern
+                        // bank_group_index = i + lane_id * (kSwizzleCDMode / kNumBankGroupBytes) = i + lane_id * 8
+                        uint32_t bank_group_index = i + lane_id * (kSwizzleCDMode / kNumBankGroupBytes);
+                        int n_local = int(bank_group_index * kNumElemsPerBankGroup);  // Local offset within this store block
+                        int gn = n_tile + int(w * BLOCK_N + s * STORE_BLOCK_N) + n_local;
+
+                        // Write to global memory
+                        if (full_tile) {
+                            int base = gm * N + gn;
+                            D[base + 0] = __float2half_rn(__uint_as_float(v0));
+                            D[base + 1] = __float2half_rn(__uint_as_float(v1));
+                            D[base + 2] = __float2half_rn(__uint_as_float(v2));
+                            D[base + 3] = __float2half_rn(__uint_as_float(v3));
+                        } else {
+                            if (gm < M) {
+                                if (gn + 0 < N) D[gm * N + gn + 0] = __float2half_rn(__uint_as_float(v0));
+                                if (gn + 1 < N) D[gm * N + gn + 1] = __float2half_rn(__uint_as_float(v1));
+                                if (gn + 2 < N) D[gm * N + gn + 2] = __float2half_rn(__uint_as_float(v2));
+                                if (gn + 3 < N) D[gm * N + gn + 3] = __float2half_rn(__uint_as_float(v3));
+                            }
                         }
                     }
                 }
