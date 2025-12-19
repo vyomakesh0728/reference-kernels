@@ -1461,64 +1461,65 @@ fp4_gemm_rank2_cta(
         // Modulo causes multiple threads to alias the same slice, producing races and
         // deterministic corruption that often shows up at N=8 boundaries.
         int t2r_threads = int(size(tiled_t2r));
-        if (tid >= t2r_threads) {
-            // Threads outside the required participant set must not touch TMEM or gmem.
-            return;
-        }
-        auto thread_t2r = tiled_t2r.get_slice(tid);
+        if (tid < t2r_threads) {
+            auto thread_t2r = tiled_t2r.get_slice(tid);
 
-        // Slice the single MMA_M / MMA_N tile (TileM=TileN=128 => MMA_M=MMA_N=1).
-        Tensor tAcc = tCtAcc(make_coord(X{}, X{}), _0{}, _0{});             // (CTA_M,CTA_N)
-        Tensor tTR_tAcc = thread_t2r.partition_S(tAcc);                     // (T2R,T2R_M,T2R_N)
-        Tensor tTR_gD = thread_t2r.partition_D(gD);                         // (T2R,T2R_M,T2R_N)
-        Tensor tTR_rAcc = make_tensor<float>(shape(tTR_gD));                // (T2R,T2R_M,T2R_N)
+            // IMPORTANT: tCtAcc is MMA-partitioned. Do NOT slice with (_0{}, _0{}),
+            // which can accidentally select only the first MMA subtile (often visible
+            // as correctness breaking at N=8). Use the same 2D accumulator view that
+            // the TMEM copy was constructed for.
+            Tensor tAcc = tensor<0>(tCtAcc);
+            Tensor tTR_tAcc = thread_t2r.partition_S(tAcc);
+            Tensor tTR_gD = thread_t2r.partition_D(gD);
+            Tensor tTR_rAcc = make_tensor<float>(shape(tTR_gD));
 
-        copy(tiled_t2r, tTR_tAcc, tTR_rAcc);
-        #if __CUDA_ARCH__ >= 1000
-        // Ensure async TMEM loads are visible before consuming tTR_rAcc.
-        asm volatile("tcgen05.wait::ld.sync.aligned;\n" ::: "memory");
-        #endif
+            copy(tiled_t2r, tTR_tAcc, tTR_rAcc);
+            #if __CUDA_ARCH__ >= 1000
+            // Ensure async TMEM loads are visible before consuming tTR_rAcc.
+            asm volatile("tcgen05.wait::ld.sync.aligned;\n" ::: "memory");
+            #endif
 
-        #if NVFP4_DEBUG_DUMP
-        if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-            if (tid == 0) {
-                printf("DUMP tile=(%d,%d) block=%d t2r_size=%d\n",
-                       int(blockIdx.x), int(blockIdx.y), int(blockDim.x), int(size(tiled_t2r)));
-            }
+            #if NVFP4_DEBUG_DUMP
+            if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+                if (tid == 0) {
+                    printf("DUMP tile=(%d,%d) block=%d t2r_size=%d\n",
+                           int(blockIdx.x), int(blockIdx.y), int(blockDim.x), int(size(tiled_t2r)));
+                }
 
-            Tensor coordMN = make_identity_tensor(make_shape(M, N));        // (M,N) -> (m,n)
-            Tensor cMN = local_tile(coordMN, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
-            Tensor tTR_cMN = thread_t2r.partition_D(cMN);
-            #pragma unroll
-            for (int i = 0; i < size(tTR_rAcc); ++i) {
-                auto mn = tTR_cMN(i);
-                int gm = int(get<0>(mn));
-                int gn = int(get<1>(mn));
-                if (gm == 0 && gn >= 0 && gn < 32) {
-                    float acc = tTR_rAcc(i);
-                    float out = __half2float(__float2half_rn(acc));
-                    printf("DUMP m=%d n=%d tid=%d thr=%d i=%d acc=%f out=%f\n",
-                           gm, gn, int(tid), int(thread_idx), int(i), acc, out);
+                Tensor coordMN = make_identity_tensor(make_shape(M, N));
+                Tensor cMN = local_tile(coordMN, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
+                Tensor tTR_cMN = thread_t2r.partition_D(cMN);
+                #pragma unroll
+                for (int i = 0; i < size(tTR_rAcc); ++i) {
+                    auto mn = tTR_cMN(i);
+                    int gm = int(get<0>(mn));
+                    int gn = int(get<1>(mn));
+                    if (gm == 0 && gn >= 0 && gn < 32) {
+                        float acc = tTR_rAcc(i);
+                        float out = __half2float(__float2half_rn(acc));
+                        printf("DUMP m=%d n=%d tid=%d i=%d acc=%f out=%f\n",
+                               gm, gn, int(tid), int(i), acc, out);
+                    }
                 }
             }
-        }
-        #endif
+            #endif
 
-        bool full_tile = (m_tile + TileM <= M) && (n_tile + TileN <= N);
-        if (full_tile) {
-            #pragma unroll
-            for (int i = 0; i < size(tTR_rAcc); ++i) {
-                tTR_gD(i) = cutlass::half_t(__float2half_rn(tTR_rAcc(i)));
-            }
-        } else {
-            Tensor coordMN = make_identity_tensor(make_shape(M, N));        // (M,N) -> (m,n)
-            Tensor cMN = local_tile(coordMN, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
-            Tensor tTR_cMN = thread_t2r.partition_D(cMN);
-            #pragma unroll
-            for (int i = 0; i < size(tTR_rAcc); ++i) {
-                auto mn = tTR_cMN(i);
-                if (get<0>(mn) < M && get<1>(mn) < N) {
+            bool full_tile = (m_tile + TileM <= M) && (n_tile + TileN <= N);
+            if (full_tile) {
+                #pragma unroll
+                for (int i = 0; i < size(tTR_rAcc); ++i) {
                     tTR_gD(i) = cutlass::half_t(__float2half_rn(tTR_rAcc(i)));
+                }
+            } else {
+                Tensor coordMN = make_identity_tensor(make_shape(M, N));
+                Tensor cMN = local_tile(coordMN, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
+                Tensor tTR_cMN = thread_t2r.partition_D(cMN);
+                #pragma unroll
+                for (int i = 0; i < size(tTR_rAcc); ++i) {
+                    auto mn = tTR_cMN(i);
+                    if (get<0>(mn) < M && get<1>(mn) < N) {
+                        tTR_gD(i) = cutlass::half_t(__float2half_rn(tTR_rAcc(i)));
+                    }
                 }
             }
         }
