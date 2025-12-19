@@ -644,6 +644,8 @@ __device__ __forceinline__ void process_tile(
     // ldmatrix alignment requirements.
     constexpr int b_k_stride = TileN;
     constexpr int SfaBoxK = 128;
+    // Correct stride for scale factor tiles: 2048 bytes = 128 rows × 16 cols
+    constexpr int SF_STRIDE = TileK / 16;  // 16 scales per row (256/16=16)
 
     const int K_packed = K >> 1;
     // K_scales is already passed as parameter
@@ -657,8 +659,8 @@ __device__ __forceinline__ void process_tile(
     // TMA stage tiles interpreted as row-major
     uint8_t* a_tile  = a_packed_stage[stage];   // [TileM, TileKPacked]
     uint8_t* b_tile  = b_packed_stage[stage];   // [TileN, TileKPacked]
-    uint8_t* sfa_tile = sfa_stage[stage];       // [TileM, SfaBoxK]
-    uint8_t* sfb_tile = sfb_stage[stage];       // [TileN, SfaBoxK]
+    uint8_t* sfa_tile = sfa_stage[stage];       // [TileM, SF_STRIDE] = [128, 16]
+    uint8_t* sfb_tile = sfb_stage[stage];       // [TileN, SF_STRIDE] = [128, 16]
 
     int curr_k = (K - k_tile) < TileK ? (K - k_tile) : TileK;
     int curr_cols_a = (curr_k + 1) >> 1;
@@ -681,7 +683,7 @@ __device__ __forceinline__ void process_tile(
             if (m_global < M && global_k_scale < K_scales) {
                 int sfa_col = global_k_scale - sfa_c0;
                 if (sfa_col >= 0 && sfa_col < SfaBoxK) {
-                    int sfa_idx = row * SfaBoxK + sfa_col;
+                    int sfa_idx = row * SF_STRIDE + sfa_col;
                     uint8_t sfa_byte = sfa_tile[sfa_idx];
                     scale_h = __float2half(decode_fp8_e4m3(sfa_byte));
                 }
@@ -736,7 +738,7 @@ __device__ __forceinline__ void process_tile(
             if (n_global < N && global_k_scale < K_scales) {
                 int sfb_col = global_k_scale - sfb_c0;
                 if (sfb_col >= 0 && sfb_col < SfaBoxK) {
-                    int sfb_idx = row * SfaBoxK + sfb_col;
+                    int sfb_idx = row * SF_STRIDE + sfb_col;
                     uint8_t sfb_byte = sfb_tile[sfb_idx];
                     scale_h = __float2half(decode_fp8_e4m3(sfb_byte));
                 }
