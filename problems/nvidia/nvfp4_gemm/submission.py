@@ -1201,7 +1201,9 @@ fp4_gemm_rank2_cta(
     #if __CUDA_ARCH__ >= 1000
     using namespace cute;
     using MmaOp = SM100_MMA_MXF4_SS<
-        cutlass::float_e2m1_t, cutlass::float_e2m1_t, float, cutlass::float_ue4m3_t,
+        cutlass::detail::float_e2m1_unpacksmem_t,
+        cutlass::detail::float_e2m1_unpacksmem_t,
+        float, cutlass::float_ue4m3_t,
         TileM, TileN, 16, UMMA::Major::K, UMMA::Major::K
     >;
     auto tiled_mma = make_tiled_mma(MmaOp{});
