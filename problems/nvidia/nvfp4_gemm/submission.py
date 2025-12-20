@@ -562,19 +562,16 @@ __device__ __forceinline__ void prefetch_tile(
             }
             if (valid_sfa) {
                 // SFA comes in as the permuted physical layout (32, 4, rest_m, 4, rest_k).
-                // The TMA descriptor exposes the natural contiguous 512B panel as (packed16, mm32).
-                #pragma unroll
-                for (int t = 0; t < 4; ++t) {
-                    int rest_k_idx = k_tile_idx_sfa * 4 + t;
-                    tma_load_4d_cta_no_arrive(
-                        sfa_stage[stage] + t * 512,
-                        desc_SFA,
-                        0, 0,
-                        static_cast<uint32_t>(m_block_sfa),
-                        static_cast<uint32_t>(rest_k_idx),
-                        mbar_stage(mbar, stage)
-                    );
-                }
+                // TMA box covers packed16×mm32×rest_m×rest_k (2048B for TileK=256).
+                int rest_k_base = k_tile_idx_sfa * 4;
+                tma_load_4d_cta_no_arrive(
+                    sfa_stage[stage],
+                    desc_SFA,
+                    0, 0,
+                    static_cast<uint32_t>(m_block_sfa),
+                    static_cast<uint32_t>(rest_k_base),
+                    mbar_stage(mbar, stage)
+                );
             }
 
             // --- TMA Load B (N x K) ---
@@ -596,19 +593,15 @@ __device__ __forceinline__ void prefetch_tile(
             }
             if (valid_sfb) {
                 // SFB comes in as the permuted physical layout (32, 4, rest_n, 4, rest_k).
-                // Use the same packed16×mm32 512B box as SFA.
-                #pragma unroll
-                for (int t = 0; t < 4; ++t) {
-                    int rest_k_idx = k_tile_idx_sfb * 4 + t;
-                    tma_load_4d_cta_no_arrive(
-                        sfb_stage[stage] + t * 512,
-                        desc_SFB,
-                        0, 0,
-                        static_cast<uint32_t>(n_block_sfb),
-                        static_cast<uint32_t>(rest_k_idx),
-                        mbar_stage(mbar, stage)
-                    );
-                }
+                int rest_k_base = k_tile_idx_sfb * 4;
+                tma_load_4d_cta_no_arrive(
+                    sfb_stage[stage],
+                    desc_SFB,
+                    0, 0,
+                    static_cast<uint32_t>(n_block_sfb),
+                    static_cast<uint32_t>(rest_k_base),
+                    mbar_stage(mbar, stage)
+                );
             }
 
             // Arrive after issuing all bulk tensor copies (A+SFA+B+SFB).
@@ -1793,6 +1786,13 @@ void launch_fp4_gemm_optimized(
         TORCH_CHECK(SFA.stride(1) == 4, "SFA expects mm4 stride 4");
         TORCH_CHECK(SFA.stride(0) == 16, "SFA expects mm32 stride 16");
 
+        #if NVFP4_DEBUG_DUMP
+        printf("SFA size=[%ld,%ld,%ld,%ld,%ld] stride=[%ld,%ld,%ld,%ld,%ld] K_scales=%ld\n",
+               SFA.size(0), SFA.size(1), SFA.size(2), SFA.size(3), SFA.size(4),
+               SFA.stride(0), SFA.stride(1), SFA.stride(2), SFA.stride(3), SFA.stride(4),
+               K_scales);
+        #endif
+
         cuuint64_t dims_SFA[4] = {
             16ull,                               // packed16 (mm4*4 + kk4)
             static_cast<cuuint64_t>(SFA.size(0)), // mm32 (32)
@@ -1806,6 +1806,9 @@ void launch_fp4_gemm_optimized(
         };
         // TileK=256 => 4 chunks of 512B each (rest_k)
         constexpr cuuint32_t kScaleChunksPerTile = kTileK / 64;
+        #if NVFP4_DEBUG_DUMP
+        printf("SFA kScaleChunksPerTile=%u\n", kScaleChunksPerTile);
+        #endif
         cuuint32_t box_SFA[4] = {16, 32, 1, kScaleChunksPerTile};      // 16B x 32 rows x rest_k
 
         CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
@@ -1835,6 +1838,13 @@ void launch_fp4_gemm_optimized(
         TORCH_CHECK(SFB.stride(1) == 4, "SFB expects mm4 stride 4");
         TORCH_CHECK(SFB.stride(0) == 16, "SFB expects mm32 stride 16");
 
+        #if NVFP4_DEBUG_DUMP
+        printf("SFB size=[%ld,%ld,%ld,%ld,%ld] stride=[%ld,%ld,%ld,%ld,%ld] K_scales=%ld\n",
+               SFB.size(0), SFB.size(1), SFB.size(2), SFB.size(3), SFB.size(4),
+               SFB.stride(0), SFB.stride(1), SFB.stride(2), SFB.stride(3), SFB.stride(4),
+               K_scales);
+        #endif
+
         cuuint64_t dims_SFB[4] = {
             16ull,                               // packed16 (mm4*4 + kk4)
             static_cast<cuuint64_t>(SFB.size(0)), // mm32 (32)
@@ -1848,6 +1858,9 @@ void launch_fp4_gemm_optimized(
         };
         // TileK=256 => 4 chunks of 512B each (rest_k)
         constexpr cuuint32_t kScaleChunksPerTile = kTileK / 64;
+        #if NVFP4_DEBUG_DUMP
+        printf("SFB kScaleChunksPerTile=%u\n", kScaleChunksPerTile);
+        #endif
         cuuint32_t box_SFB[4] = {16, 32, 1, kScaleChunksPerTile};
 
         CUresult resSFB = encode_tma_matrix(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,

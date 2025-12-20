@@ -42,6 +42,7 @@ trigger: auto
 - Latest patch: MmaOp now uses float_e2m1_unpacksmem_t for A/B to keep MMA traits consistent with idescE E2M1 format.
 - Latest patch: added debug prints for MMA scale vector/opcode and TMEM scale addresses; removed TMEM load debug that caused a hang.
 - Latest patch: TMA SFA/SFB box now loads full 2048B per tile (rest_k chunks), and UMMA A/B SMEM descriptor slicing uses kKBlockPacked.
+- Latest patch: SFA/SFB TMA now issued as a single 2048B 4D load per tile (no 4x512 overflow), and added NVFP4_DEBUG_DUMP prints for SFA/SFB sizes/strides and kScaleChunksPerTile.
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.
