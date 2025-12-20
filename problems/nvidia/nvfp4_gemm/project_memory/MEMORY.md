@@ -40,7 +40,7 @@ trigger: auto
 - Latest patch: UMMA instruction descriptor now uses float_e2m1_unpacksmem_t for A/B to set a_format/b_format to MXF8F6F4 E2M1 (5).
 - Latest patch: UMMA A/B SMEM descriptors reverted to 4-bit element layout (float_e2m1_unpacksmem_t, TileK/kKBlock) to match MMA element size; debug prints reverted to nibble view.
 - Latest patch: MmaOp now uses float_e2m1_unpacksmem_t for A/B to keep MMA traits consistent with idescE E2M1 format.
-- Latest patch: added debug prints for MMA scale vector/opcode and TMEM scale loads via SM100_TMEM_LOAD_32dp32b2x to inspect SFA/SFB layout.
+- Latest patch: added debug prints for MMA scale vector/opcode and TMEM scale addresses; removed TMEM load debug that caused a hang.
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.

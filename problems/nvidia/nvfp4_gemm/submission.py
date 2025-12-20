@@ -1514,13 +1514,6 @@ fp4_gemm_rank2_cta(
             uint32_t tmem_sfa0 = tmem_sfa_kb_sh[0];
             uint32_t tmem_sfb0 = tmem_sfb_kb_sh[0];
             printf("tmem_sfa0_addr=0x%08x tmem_sfb0_addr=0x%08x\n", tmem_sfa0, tmem_sfb0);
-            uint32_t tsfa0 = 0, tsfa1 = 0;
-            uint32_t tsfb0 = 0, tsfb1 = 0;
-            cute::SM100_TMEM_LOAD_32dp32b2x::copy(tmem_sfa0, tsfa0, tsfa1);
-            cute::SM100_TMEM_LOAD_32dp32b2x::copy(tmem_sfb0, tsfb0, tsfb1);
-            cutlass::arch::fence_view_async_tmem_load();
-            printf("tmem_sfa0_b32[0..1]: 0x%08x 0x%08x\n", tsfa0, tsfa1);
-            printf("tmem_sfb0_b32[0..1]: 0x%08x 0x%08x\n", tsfb0, tsfb1);
         }
 #endif
 
