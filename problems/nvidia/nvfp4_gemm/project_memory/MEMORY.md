@@ -49,6 +49,7 @@ trigger: auto
 - Latest patch: UMMA A/B SMEM descriptors now built manually from raw SMEM base + TileKPacked stride (lbo=TileKPacked, sbo=1, swizzle=128B).
 - Latest patch: removed NVFP4_DEBUG_DUMP brkpt/print from fp4_gemm_rank2_cta.
 - Latest patch: switched tcgen05.mma to scale_vec::4X (kScaleVec=4) for K=64 blockscale handling.
+- Latest patch: non-tcgen05 decode now clamps col_packed_end to TileKPacked and guards tile index to prevent OOB.
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.

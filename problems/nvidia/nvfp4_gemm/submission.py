@@ -696,6 +696,9 @@ __device__ __forceinline__ void process_tile(
             if (col_packed_end > curr_cols_a) {
                 col_packed_end = curr_cols_a;
             }
+            if (col_packed_end > TileKPacked) {
+                col_packed_end = TileKPacked;
+            }
 
             int   k_base_block = k_tile + (col_packed_start << 1);
             half* a_dst        = a_f16_smem + row * a_stride;
@@ -705,8 +708,8 @@ __device__ __forceinline__ void process_tile(
                 int k_packed_global = (k_base >> 1);
 
                 uint8_t packed = 0;
-                if (m_global < M && k_packed_global < K_packed) {
-                    int a_tile_idx = row * TileKPacked + col_packed;
+                int a_tile_idx = row * TileKPacked + col_packed;
+                if (m_global < M && k_packed_global < K_packed && col_packed < TileKPacked) {
                     packed = a_tile[a_tile_idx];
                 }
 
@@ -746,6 +749,9 @@ __device__ __forceinline__ void process_tile(
             if (col_packed_end > curr_cols_b) {
                 col_packed_end = curr_cols_b;
             }
+            if (col_packed_end > TileKPacked) {
+                col_packed_end = TileKPacked;
+            }
 
             int k_base_block = k_tile + (col_packed_start << 1);
 
@@ -754,8 +760,8 @@ __device__ __forceinline__ void process_tile(
                 int k_packed_global = (k_base >> 1);
 
                 uint8_t packed = 0;
-                if (n_global < N && k_packed_global < K_packed) {
-                    int b_tile_idx = row * TileKPacked + col_packed;
+                int b_tile_idx = row * TileKPacked + col_packed;
+                if (n_global < N && k_packed_global < K_packed && col_packed < TileKPacked) {
                     packed = b_tile[b_tile_idx];
                 }
 
