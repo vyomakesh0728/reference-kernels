@@ -49,6 +49,7 @@ trigger: auto
 - Latest patch: UMMA A/B SMEM descriptors reverted to UMMA::make_umma_desc on Layout_K_SW128_Atom with kKBlock element tiles.
 - Latest patch: removed NVFP4_DEBUG_DUMP brkpt/print from fp4_gemm_rank2_cta.
 - Latest patch: switched tcgen05.mma to scale_vec::4X (kScaleVec=4) for K=64 blockscale handling.
+- Latest patch: replaced manual scale compaction + tcgen05.cp with CUTLASS UTCCP copy using SmemLayoutAtomSFA/SFB and get_utccp_smem_desc_tensor.
 - Latest patch: non-tcgen05 decode now clamps col_packed_end to TileKPacked and guards tile index to prevent OOB.
 
 ## Current debugging hypotheses

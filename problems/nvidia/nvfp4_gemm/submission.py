@@ -35,6 +35,8 @@ cuda_source = r"""
 #include <cute/arch/copy_sm100.hpp>
 #include <cute/tensor.hpp>
 #include <cute/atom/mma_atom.hpp>
+#include <cute/atom/mma_traits_sm100.hpp>
+#include <cute/atom/copy_traits_sm100.hpp>
 #include <cute/arch/mma_sm100_umma.hpp>
 #include <cute/arch/mma_sm100_desc.hpp>
 
@@ -981,7 +983,7 @@ fp4_gemm_rank2_cta(
     }
 
 #if USE_tcgen05_MAINLOOP
-    // Compact scale tiles for tcgen05.cp: ensure byte-for-byte packed16 order.
+    // Keep reserved space for potential scale compaction (unused with UTCCP path).
     align_up_smem_128();
     uint8_t* sfa_compact_stage[StageCount];
     for (int s = 0; s < StageCount; ++s) {
@@ -1339,93 +1341,36 @@ fp4_gemm_rank2_cta(
 
         #if __CUDA_ARCH__ >= 1000
         // =========================================================================
-        // Compact scale tiles into packed16 order (byte-for-byte match to to_blocked)
+        // Scale SMEM -> TMEM using CUTLASS UTCCP path (layout-correct)
         // =========================================================================
         {
-            constexpr int kScalePanelBytes = 32 * 16;
-            constexpr int kTotalScaleBytes = kNumKBlocks * kScalePanelBytes;
-            uint8_t* sfa_src = sfa_stage[stage];
-            uint8_t* sfb_src = sfb_stage[stage];
-            uint8_t* sfa_dst = sfa_compact_stage[stage];
-            uint8_t* sfb_dst = sfb_compact_stage[stage];
-            for (int idx = tid; idx < kTotalScaleBytes; idx += Threads) {
-                int mm32 = (idx & 511) >> 4;
-                int packed16 = (idx & 511) & 15;
-                int kb = idx >> 9;
-                int mm4 = packed16 >> 2;
-                int kk4 = packed16 & 3;
-                int row_global = mm32 + (mm4 << 5);
-                int scale_col = (kb << 2) + kk4;
-                int dst_idx = (kb << 9) + (mm32 << 4) + packed16;
-                sfa_dst[dst_idx] = load_sf_tile_byte_2048<TileK>(sfa_src, row_global, scale_col);
-                sfb_dst[dst_idx] = load_sf_tile_byte_2048<TileK>(sfb_src, row_global, scale_col);
-            }
-        }
-        __syncthreads();
-#if NVFP4_DEBUG_DUMP
-        if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-            printf("sfa_stage[0..31]:");
-            #pragma unroll
-            for (int i = 0; i < 32; ++i) {
-                printf(" %02x", sfa_stage[stage][i]);
-            }
-            printf("\n");
-            printf("sfa_compact[0..31]:");
-            #pragma unroll
-            for (int i = 0; i < 32; ++i) {
-                printf(" %02x", sfa_compact_stage[stage][i]);
-            }
-            printf("\n");
-            printf("sfb_compact[0..31]:");
-            #pragma unroll
-            for (int i = 0; i < 32; ++i) {
-                printf(" %02x", sfb_compact_stage[stage][i]);
-            }
-            printf("\n");
-        }
-#endif
-        __syncthreads();
+            auto tCsSFA = make_tensor(make_smem_ptr(sfa_stage[stage]), SmemLayoutAtomSFA{});
+            auto tCsSFB = make_tensor(make_smem_ptr(sfb_stage[stage]), SmemLayoutAtomSFB{});
 
-        // =========================================================================
-        // Scale SMEM -> TMEM (Cp4x32x128b): one copy per K-block (K=64)
-        // =========================================================================
-        // Each K-block holds 32 rows × 16B/row = 512B of FP8 scale data in SMEM.
-        // sfa_stage/sfb_stage are laid out as 4 contiguous 512B chunks (one per K-block).
-        //
-        // NOTE: Match kutte.py oracle issue scope: issue tcgen05.cp from a single warp
-        // (warp 0) and a single lane (lane 0). This avoids redundant copies from
-        // multiple warps in the CTA that can corrupt TMEM scale panels.
-        uint32_t sfa_stage_smem = cvta_to_shared_u32(sfa_compact_stage[stage]);
-        uint32_t sfb_stage_smem = cvta_to_shared_u32(sfb_compact_stage[stage]);
-        // Scale SMEM->TMEM copy is warpgroup-scoped (.warpx4). All threads in the
-        // 4-warp warpgroup must participate (no lane_id gating).
-        if (warp_id < 4) {
-            // Issue one UTCCP per 512B scale panel (per K-block).
-            #pragma unroll
-            for (int kb = 0; kb < kNumKBlocks; ++kb) {
-                uint64_t desc_sfa = make_umma_smem_desc_addr(
-                    sfa_stage_smem + uint32_t(kb) * 512u,
-                    16, 0, 0
-                );
-                uint32_t sfa_dst = raw_pointer_cast(tCtSFA(_, _, kb).data());
-                asm volatile(
-                    "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
-                    :: "r"(sfa_dst), "l"(desc_sfa)
-                    : "memory"
-                );
+            auto tCsSFA_compact = make_tensor(tCsSFA.data(), filter_zeros(tCsSFA.layout()));
+            auto tCtSFA_compact = make_tensor(tCtSFA.data(), filter_zeros(tCtSFA.layout()));
+            auto tCsSFB_compact = make_tensor(tCsSFB.data(), filter_zeros(tCsSFB.layout()));
+            auto tCtSFB_compact = make_tensor(tCtSFB.data(), filter_zeros(tCtSFB.layout()));
 
-                uint64_t desc_sfb = make_umma_smem_desc_addr(
-                    sfb_stage_smem + uint32_t(kb) * 512u,
-                    16, 0, 0
-                );
-                uint32_t sfb_dst = raw_pointer_cast(tCtSFB(_, _, kb).data());
-                asm volatile(
-                    "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;\n"
-                    :: "r"(sfb_dst), "l"(desc_sfb)
-                    : "memory"
-                );
-            }
+            using AtomThrID = typename decltype(tiled_mma)::AtomThrID;
+            using UtccpOp = cute::conditional_t<(decltype(cute::size(AtomThrID{}) == Int<2>{})::value),
+                SM100_UTCCP_4x32dp128bit_2cta, SM100_UTCCP_4x32dp128bit_1cta>;
+
+            auto tiled_copy_s2t_SFA = make_utccp_copy(UtccpOp{}, tCtSFA_compact);
+            auto thr_copy_s2t_SFA = tiled_copy_s2t_SFA.get_slice(0);
+            auto thr_tCsSFA_compact_s2t_ = thr_copy_s2t_SFA.partition_S(tCsSFA_compact);
+            auto thr_tCsSFA_compact_s2t = get_utccp_smem_desc_tensor<UtccpOp>(thr_tCsSFA_compact_s2t_);
+            auto thr_tCtSFA_compact_s2t = thr_copy_s2t_SFA.partition_D(tCtSFA_compact);
+
+            auto tiled_copy_s2t_SFB = make_utccp_copy(UtccpOp{}, tCtSFB_compact);
+            auto thr_copy_s2t_SFB = tiled_copy_s2t_SFB.get_slice(0);
+            auto thr_tCsSFB_compact_s2t_ = thr_copy_s2t_SFB.partition_S(tCsSFB_compact);
+            auto thr_tCsSFB_compact_s2t = get_utccp_smem_desc_tensor<UtccpOp>(thr_tCsSFB_compact_s2t_);
+            auto thr_tCtSFB_compact_s2t = thr_copy_s2t_SFB.partition_D(tCtSFB_compact);
+
             if (warp_id == 0 && lane_id == 0) {
+                copy(tiled_copy_s2t_SFA, thr_tCsSFA_compact_s2t, thr_tCtSFA_compact_s2t);
+                copy(tiled_copy_s2t_SFB, thr_tCsSFB_compact_s2t, thr_tCtSFB_compact_s2t);
                 tcgen05_commit_mbarrier(mbar_stage(mbar_cp, stage));
             }
         }
