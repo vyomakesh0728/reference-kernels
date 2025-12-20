@@ -1496,10 +1496,10 @@ fp4_gemm_rank2_cta(
         if (warp_id == 0 && lane_id == 0) {
             #pragma unroll
             for (int kb = 0; kb < kNumKBlocks; ++kb) {
-                auto sA_kb = local_tile(sA_full, make_shape(Int<TileM>{}, Int<kKBlockPacked>{}), make_coord(Int<0>{}, kb));
-                auto sB_kb = local_tile(sB_full, make_shape(Int<TileN>{}, Int<kKBlockPacked>{}), make_coord(Int<0>{}, kb));
-                desc_a_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sA_kb));
-                desc_b_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sB_kb));
+                uint32_t a_base = cvta_to_shared_u32(a_packed_stage[stage]) + uint32_t(kb * kKBlockPacked);
+                uint32_t b_base = cvta_to_shared_u32(b_packed_stage[stage]) + uint32_t(kb * kKBlockPacked);
+                desc_a_smem_sh[kb] = make_umma_smem_desc_addr(a_base, TileKPacked, 1, 2);
+                desc_b_smem_sh[kb] = make_umma_smem_desc_addr(b_base, TileKPacked, 1, 2);
             }
         }
         __syncthreads();

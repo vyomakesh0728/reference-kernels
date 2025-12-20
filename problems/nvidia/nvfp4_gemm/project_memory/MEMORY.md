@@ -46,6 +46,7 @@ trigger: auto
 - Latest patch: added NVFP4_DEBUG_DUMP decode of UMMA A/B SMEM descriptors (start/lbo/sbo/layout) and printed tmem_c base.
 - Latest patch: removed smem_layout_a/b shape+stride prints (cute::stride/shape deleted for composed layouts); kept ElementAB bits print.
 - Latest patch: added debug prints for expected UMMA descriptor lbo/sbo derived from raw SMEM strides.
+- Latest patch: UMMA A/B SMEM descriptors now built manually from raw SMEM base + TileKPacked stride (lbo=TileKPacked, sbo=1, swizzle=128B).
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.

@@ -40,6 +40,8 @@ desc_a_smem[0]=0x4000404000010080
 desc_b_smem[0]=0x4000404000010880
 desc_a_smem start=0x0080 lbo=0x0001 sbo=0x0040 layout=2
 desc_b_smem start=0x0880 lbo=0x0001 sbo=0x0040 layout=2
+desc_expected_a lbo=0x0008 sbo=0x0000
+desc_expected_b lbo=0x0008 sbo=0x0000
 tmem_sfa0_addr=0x00000080 tmem_sfb0_addr=0x00000090
 tmem_c_base=0x00000000
 map gm=0 gn=0 tmem_addr=0 v=7321.750000 17588.500000 -10227.250000 8000.500000
