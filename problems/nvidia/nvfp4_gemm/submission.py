@@ -1517,6 +1517,16 @@ fp4_gemm_rank2_cta(
             };
             decode_desc(desc_a_smem_sh[0], "desc_a_smem");
             decode_desc(desc_b_smem_sh[0], "desc_b_smem");
+            uint32_t a_base = cvta_to_shared_u32(a_packed_stage[stage]);
+            uint32_t b_base = cvta_to_shared_u32(b_packed_stage[stage]);
+            uint32_t a_k1 = cvta_to_shared_u32(a_packed_stage[stage] + 1);
+            uint32_t a_m1 = cvta_to_shared_u32(a_packed_stage[stage] + TileKPacked);
+            uint32_t b_k1 = cvta_to_shared_u32(b_packed_stage[stage] + 1);
+            uint32_t b_n1 = cvta_to_shared_u32(b_packed_stage[stage] + TileKPacked);
+            printf("desc_expected_a lbo=0x%04x sbo=0x%04x\n",
+                   uint32_t((a_m1 - a_base) >> 4), uint32_t((a_k1 - a_base) >> 4));
+            printf("desc_expected_b lbo=0x%04x sbo=0x%04x\n",
+                   uint32_t((b_n1 - b_base) >> 4), uint32_t((b_k1 - b_base) >> 4));
             uint32_t tmem_sfa0 = tmem_sfa_kb_sh[0];
             uint32_t tmem_sfb0 = tmem_sfb_kb_sh[0];
             printf("tmem_sfa0_addr=0x%08x tmem_sfb0_addr=0x%08x\n", tmem_sfa0, tmem_sfb0);

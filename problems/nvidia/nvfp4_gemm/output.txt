@@ -15,86 +15,38 @@ Tolerance: rtol=1e-03, atol=1e-03
   a_ref packed bytes[0..31]: b3 78 6c e7 89 52 29 d3 c0 5f fb f5 a8 d3 ce 36 70 a3 ca 84 bb 87 fa bf 8d da 72 28 c2 00 19 51
   b_ref packed bytes[0..31]: 76 7d a9 a8 a6 25 10 1b 88 00 ef a6 7d 6c 20 73 8b c6 74 e4 ba b9 ac ce 09 ef 5f 7e 8e a4 68 c1
   Running custom kernel...
-  ✗ ERROR: Error building extension 'nvfp4_gemm_sm100_ptx_dbg': [1/2] /usr/local/cuda-13.0/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx_dbg -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -DNVFP4_DEBUG_DUMP=1 -c /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu -o cuda.cuda.o 
-FAILED: [code=1] cuda.cuda.o 
-/usr/local/cuda-13.0/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx_dbg -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -DNVFP4_DEBUG_DUMP=1 -c /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu -o cuda.cuda.o 
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1600): warning #177-D: variable "LAYOUT_AD_M" was declared but never referenced
-          constexpr uint32_t LAYOUT_AD_M = 128;
-                             ^
-
-Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1608): warning #177-D: variable "kHasShortcut" was declared but never referenced
-          constexpr bool kHasShortcut = (kSwizzleCDMode / kNumBankGroupBytes) == 8;
-                         ^
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(877): warning #177-D: variable "SfaBoxK" was declared but never referenced
-      constexpr int SfaBoxK = 128;
-                    ^
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(879): warning #177-D: variable "a_stride" was declared but never referenced
-      constexpr int a_stride = TileK + 8;
-                    ^
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(880): warning #177-D: variable "b_stride" was declared but never referenced
-      constexpr int b_stride = TileK + 8;
-                    ^
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(886): warning #177-D: variable "is_consumer" was declared but never referenced
-      const bool is_consumer = true;
-                 ^
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(896): warning #177-D: variable "tile_rows" was declared but never referenced
-      const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
-                ^
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(897): warning #177-D: variable "tile_cols" was declared but never referenced
-      const int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
-                ^
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(517): warning #177-D: variable "c_k_scales" was declared but never referenced
-              uint32_t c_k_scales = static_cast<uint32_t>(k_tile_base >> 4);
-                       ^
-          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(509): warning #177-D: variable "SfaBoxK" was declared but never referenced
-      constexpr int SfaBoxK = 128;
-                    ^
-          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1452): error: function "cute::stride<Is...,Fn,O,Layout>(const cute::ComposedLayout<Fn, O, Layout> &) [with Is=<>, Fn=cute::Swizzle<3, 4, 3>, O=cute::smem_ptr_flag_bits<4>, Layout=cute::Layout<cute::tuple<cute::tuple<cute::C<8>, cute::C<16>>, cute::tuple<cute::_256, cute::_1>>, cute::tuple<cute::tuple<cute::_256, cute::C<2048>>, cute::tuple<cute::_1, cute::C<0>>>>]" (declared at line 241 of /usr/local/cutlass/include/cute/layout_composed.hpp) cannot be referenced -- it is a deleted function
-              auto a_stride = stride(smem_layout_a);
-                              ^
-          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1453): error: function "cute::stride<Is...,Fn,O,Layout>(const cute::ComposedLayout<Fn, O, Layout> &) [with Is=<>, Fn=cute::Swizzle<3, 4, 3>, O=cute::smem_ptr_flag_bits<4>, Layout=cute::Layout<cute::tuple<cute::tuple<cute::C<8>, cute::C<16>>, cute::tuple<cute::_256, cute::_1>>, cute::tuple<cute::tuple<cute::_256, cute::C<2048>>, cute::tuple<cute::_1, cute::C<0>>>>]" (declared at line 241 of /usr/local/cutlass/include/cute/layout_composed.hpp) cannot be referenced -- it is a deleted function
-              auto b_stride = stride(smem_layout_b);
-                              ^
-          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1459): error: no suitable conversion function from "std::conditional_t<true, cute::tuple_element_t<0UL, cute::tuple<cute::tuple<cute::Int<8>, cute::Int<16>>, cute::tuple<cute::_256, cute::_1>>>, cute::tuple_element_t<0UL, cute::tuple<cute::tuple<cute::Int<8>, cute::Int<16>>, cute::tuple<cute::_256, cute::_1>>> &>" (aka "std::conditional_t<true, cute::tuple<cute::C<8>, cute::C<16>>, cute::tuple<cute::C<8>, cute::C<16>> &>") to "int" exists
-                     int(get<0>(a_shape)), int(get<1>(a_shape)),
-                         ^
-          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1459): error: no suitable conversion function from "std::conditional_t<true, cute::tuple_element_t<1UL, cute::tuple<cute::Shape<cute::_8, cute::_256>, cute::Stride<cute::_256, cute::_1>>>, cute::tuple_element_t<1UL, cute::tuple<cute::Shape<cute::_8, cute::_256>, cute::Stride<cute::_256, cute::_1>>> &>" (aka "std::conditional_t<true, cute::tuple<cute::C<256>, cute::C<1>>, cute::tuple<cute::C<256>, cute::C<1>> &>") to "int" exists
-                     int(get<0>(a_shape)), int(get<1>(a_shape)),
-                                               ^
-          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1462): error: no suitable conversion function from "std::conditional_t<true, cute::tuple_element_t<0UL, cute::tuple<cute::tuple<cute::Int<8>, cute::Int<16>>, cute::tuple<cute::_256, cute::_1>>>, cute::tuple_element_t<0UL, cute::tuple<cute::tuple<cute::Int<8>, cute::Int<16>>, cute::tuple<cute::_256, cute::_1>>> &>" (aka "std::conditional_t<true, cute::tuple<cute::C<8>, cute::C<16>>, cute::tuple<cute::C<8>, cute::C<16>> &>") to "int" exists
-                     int(get<0>(b_shape)), int(get<1>(b_shape)),
-                         ^
-          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
-
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1462): error: no suitable conversion function from "std::conditional_t<true, cute::tuple_element_t<1UL, cute::tuple<cute::Shape<cute::_8, cute::_256>, cute::Stride<cute::_256, cute::_1>>>, cute::tuple_element_t<1UL, cute::tuple<cute::Shape<cute::_8, cute::_256>, cute::Stride<cute::_256, cute::_1>>> &>" (aka "std::conditional_t<true, cute::tuple<cute::C<256>, cute::C<1>>, cute::tuple<cute::C<256>, cute::C<1>> &>") to "int" exists
-                     int(get<0>(b_shape)), int(get<1>(b_shape)),
-                                               ^
-          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
-
-6 errors detected in the compilation of "/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu".
-ninja: build stopped: subcommand failed.
-
+SFA size=[32,4,1,4,4] stride=[16,4,2048,1,512] K_scales=16
+SFA kScaleChunksPerTile=4
+SFB size=[32,4,2,4,4] stride=[16,4,2048,1,512] K_scales=16
+SFB kScaleChunksPerTile=4
+idescE_kb0=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000080 tmem_sfb=0x00000090
+idescE_kb1=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000084 tmem_sfb=0x00000094
+idescE_kb2=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000088 tmem_sfb=0x00000098
+idescE_kb3=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x0000008c tmem_sfb=0x0000009c
+mma_scale_vec=16 opcode=block16
+sfa_stage[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
+sfa_compact[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
+sfb_compact[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
+a_smem_base=0x00000800 a_k1=0x00000801 a_m1=0x00000880
+b_smem_base=0x00008800 b_k1=0x00008801 b_n1=0x00008880
+a_stride_k=1 a_stride_m=128
+b_stride_k=1 b_stride_n=128
+ElementAB bits=4 TileKPacked=128
+a_packed_stage[0..3]: b3 78 6c e7
+b_packed_stage[0..3]: 76 7d a9 a8
+sA_full k[0..7], m0: 03 0b 08 07 0c 06 07 0e
+sB_full k[0..7], n0: 06 07 0d 07 09 0a 08 0a
+desc_a_smem[0]=0x4000404000010080
+desc_b_smem[0]=0x4000404000010880
+desc_a_smem start=0x0080 lbo=0x0001 sbo=0x0040 layout=2
+desc_b_smem start=0x0880 lbo=0x0001 sbo=0x0040 layout=2
+tmem_sfa0_addr=0x00000080 tmem_sfb0_addr=0x00000090
+tmem_c_base=0x00000000
+map gm=0 gn=0 tmem_addr=0 v=7321.750000 17588.500000 -10227.250000 8000.500000
+D[0..7]: 7320.000 17584.000 -10224.000 8000.000 12256.000 13328.000 -13080.000 -5056.000
+  ref D[0,0..3]: 932.000 -1.000 -531.000 266.500
+  Validating against reference...
+  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32768 ERROR AT (0, 0, 0): 7320.0 932.0 ERROR AT (0, 1, 0): 17584.0 -1.0 ERROR AT (0, 2, 0): -10224.0 -531.0 ERROR AT (0, 3, 0): 8000.0 266.5 ERROR AT (0, 4, 0): 12256.0 -712.0 ... and 32763 more mismatched elements.
 
 ================================================================================
 SUMMARY
