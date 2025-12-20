@@ -1421,7 +1421,7 @@ fp4_gemm_rank2_cta(
         // =========================================================================
         using namespace cute;
         using ElementAB = cutlass::detail::float_e2m1_unpacksmem_t;
-        using SmemLayoutAtomAB = UMMA::Layout_K_SW128_Atom<ElementAB>;
+        using SmemLayoutAtomAB = UMMA::Layout_K_SW64_Atom<ElementAB>;
 
         // A is (Kpacked, M)
         auto smem_layout_a = tile_to_shape(SmemLayoutAtomAB{},
