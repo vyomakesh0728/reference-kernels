@@ -1457,14 +1457,16 @@ fp4_gemm_rank2_cta(
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
                 auto v = sA_full(make_coord(i, 0));
-                printf(" %.3f", static_cast<float>(v));
+                auto val = v.get();
+                printf(" %02x", static_cast<unsigned>(val.raw() & 0xF));
             }
             printf("\n");
             printf("sB_full k[0..7], n0:");
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
                 auto v = sB_full(make_coord(i, 0));
-                printf(" %.3f", static_cast<float>(v));
+                auto val = v.get();
+                printf(" %02x", static_cast<unsigned>(val.raw() & 0xF));
             }
             printf("\n");
         }
