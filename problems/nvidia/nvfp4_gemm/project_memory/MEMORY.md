@@ -24,6 +24,7 @@ trigger: auto
 - Latest patch: `test_correctness.py --only` now prints first 32 bytes of `to_blocked` SFA/SFB for layout comparison.
 - Latest observation: sfa_compact/sfb_compact match to_blocked for first 32 bytes; likely remaining mismatches are from A/B descriptor layout or MMA/epilogue path.
 - Latest patch: `test_correctness.py` adds `--debug-umma` to set `NVFP4_DEBUG_DUMP=1` and print first 32 packed bytes of A/B.
+- Latest patch: fix `--debug-umma` A/B byte print by flattening to 1D before formatting.
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.

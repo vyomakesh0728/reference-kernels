@@ -78,8 +78,8 @@ def run_correctness_tests():
                 print("  to_blocked(sfa_ref_cpu)[0..31]:", " ".join(f"{b:02x}" for b in scale_a[:32].tolist()))
                 print("  to_blocked(sfb_ref_cpu)[0..31]:", " ".join(f"{b:02x}" for b in scale_b[:32].tolist()))
             if args.debug_umma:
-                a_bytes = data[0][:, :, 0].view(torch.uint8).cpu()
-                b_bytes = data[1][:, :, 0].view(torch.uint8).cpu()
+                a_bytes = data[0][:, :, 0].view(torch.uint8).reshape(-1).cpu()
+                b_bytes = data[1][:, :, 0].view(torch.uint8).reshape(-1).cpu()
                 print("  a_ref packed bytes[0..31]:", " ".join(f"{b:02x}" for b in a_bytes[:32].tolist()))
                 print("  b_ref packed bytes[0..31]:", " ".join(f"{b:02x}" for b in b_bytes[:32].tolist()))
 
