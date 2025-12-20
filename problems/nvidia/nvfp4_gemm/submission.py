@@ -906,13 +906,6 @@ fp4_gemm_rank2_cta(
     if (batch >= L || m_tile >= M || n_tile >= N) return;
 
     const int K_packed = K >> 1;
-#if NVFP4_DEBUG_DUMP
-    if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && tid == 0) {
-        printf("brkpt at CTA(0,0,0): m_tile=%d n_tile=%d batch=%d K=%d K_scales=%d K_packed=%d\n",
-               m_tile, n_tile, batch, K, K_scales, K_packed);
-        asm volatile("brkpt;");
-    }
-#endif
     const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
     const int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
 

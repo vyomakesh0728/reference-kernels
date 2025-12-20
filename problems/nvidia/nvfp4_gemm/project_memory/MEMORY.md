@@ -47,8 +47,7 @@ trigger: auto
 - Latest patch: removed smem_layout_a/b shape+stride prints (cute::stride/shape deleted for composed layouts); kept ElementAB bits print.
 - Latest patch: added debug prints for expected UMMA descriptor lbo/sbo derived from raw SMEM strides.
 - Latest patch: UMMA A/B SMEM descriptors now built manually from raw SMEM base + TileKPacked stride (lbo=TileKPacked, sbo=1, swizzle=128B).
-- Latest patch: added NVFP4_DEBUG_DUMP `brkpt` in fp4_gemm_rank2_cta for cuda-gdb kernel stop.
-- Latest patch: moved NVFP4_DEBUG_DUMP brkpt print below K_packed declaration to fix compile error.
+- Latest patch: removed NVFP4_DEBUG_DUMP brkpt/print from fp4_gemm_rank2_cta.
 - Latest patch: switched tcgen05.mma to scale_vec::4X (kScaleVec=4) for K=64 blockscale handling.
 
 ## Current debugging hypotheses
