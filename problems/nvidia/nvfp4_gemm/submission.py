@@ -1436,7 +1436,7 @@ fp4_gemm_rank2_cta(
         auto sB_full = make_tensor(make_smem_ptr<ElementAB>(reinterpret_cast<ElementAB*>(b_packed_stage[stage])), smem_layout_b);
 
 #if NVFP4_DEBUG_DUMP
-        if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && k_tile == 0) {
             uint32_t a_base = cvta_to_shared_u32(a_packed_stage[stage]);
             uint32_t b_base = cvta_to_shared_u32(b_packed_stage[stage]);
             uint32_t a_k1 = cvta_to_shared_u32(a_packed_stage[stage] + 1);
@@ -1447,6 +1447,26 @@ fp4_gemm_rank2_cta(
             printf("b_smem_base=0x%08x b_k1=0x%08x b_n1=0x%08x\n", b_base, b_k1, b_n1);
             printf("a_stride_k=%u a_stride_m=%u\n", a_k1 - a_base, a_m1 - a_base);
             printf("b_stride_k=%u b_stride_n=%u\n", b_k1 - b_base, b_n1 - b_base);
+            printf("a_packed_stage[0..3]: %02x %02x %02x %02x\n",
+                   a_packed_stage[stage][0], a_packed_stage[stage][1],
+                   a_packed_stage[stage][2], a_packed_stage[stage][3]);
+            printf("b_packed_stage[0..3]: %02x %02x %02x %02x\n",
+                   b_packed_stage[stage][0], b_packed_stage[stage][1],
+                   b_packed_stage[stage][2], b_packed_stage[stage][3]);
+            printf("sA_full k[0..7], m0:");
+            #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                auto v = sA_full(make_coord(i, 0));
+                printf(" %02x", static_cast<unsigned>(v.raw() & 0xF));
+            }
+            printf("\n");
+            printf("sB_full k[0..7], n0:");
+            #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                auto v = sB_full(make_coord(i, 0));
+                printf(" %02x", static_cast<unsigned>(v.raw() & 0xF));
+            }
+            printf("\n");
         }
 #endif
 
