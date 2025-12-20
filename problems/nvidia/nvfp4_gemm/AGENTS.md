@@ -6,7 +6,7 @@ You have additional ONE SKILL documented in the current directory containing a "
 
 - nvfp4-gemm-optimizer -> "skills/nvfp4-gemm-optimizer/SKILL.md"
 
-IMPORTANT: You MUST read the SKILL.md file whenever the description of the skills matches the user intent, or may help accomplish their task.
+**IMPORTANT**: You MUST read the SKILL.md file whenever the description of the skills matches the user intent, or may help accomplish their task.
 
 <available_skills>
    nvfp4-gemm-optimizer: `Optimize NVIDIA SM100/SM100a FP4 block-scaled GEMM kernels to achieve ~3.04μs geometric mean on B200 architecture with peak memory bandwidth utilization`
@@ -79,6 +79,8 @@ Global SF (FP8, atom-tiled) → TMA → SMEM
 - ❌ No PyTorch stream references (c10::cuda::getCurrentCUDAStream, etc.)
 - ❌ No cross-run caching beyond compilation/autotune
 - ❌ Code containing word "stream" anywhere
+
+**IMPORTANT** Do not keep on searching for more context beyond what is provided in the problem statement, reference implementation and existing codebase.
 
 **Everything runs on default stream.** Benchmarking only syncs default stream.
 
