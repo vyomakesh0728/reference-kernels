@@ -1,21 +1,50 @@
-For help, type "help".
-Type "apropos word" to search for commands related to "word".
-(cuda-gdb) target cudacore /tmp/cuda_coredump_whimsical-wealthy-chipmunk.8441.1766228432
-Opening GPU coredump: /tmp/cuda_coredump_whimsical-wealthy-chipmunk.8441.1766228432
-[Current focus set to CUDA kernel 0, grid 52, block (0,0,0), thread (96,0,0), device 0, sm 142, warp 0, lane 0]
-#0  fp4_gemm_rank2_cta<128, 256, 128><<<(1,2,1),(128,1,1)>>> () at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu:1298
-1298	    for (int k_tile = 0; k_tile < K; k_tile += TileK) {
-(cuda-gdb) where
-#0  fp4_gemm_rank2_cta<128, 256, 128><<<(1,2,1),(128,1,1)>>> () at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu:1298
-(cuda-gdb) list
-1293	    int prev_tile_iter = last_tile_iter - 1;
-1294	    int prev_stage = prev_tile_iter % StageCount;
-1295	    uint32_t prev_phase = uint32_t((prev_tile_iter / StageCount) & 1);
-1296	
-1297	    // Main K-loop
-1298	    for (int k_tile = 0; k_tile < K; k_tile += TileK) {
-1299	        int tile_iter = (k_tile / TileK);
-1300	        int stage = tile_iter % StageCount;
-1301	        uint32_t phase = uint32_t((tile_iter / StageCount) & 1);
-1302	        int next_k = k_tile + (StageCount - 1) * TileK;
-(cuda-gdb) 
+python3 test_correctness.py --only 1 --debug-umma
+================================================================================
+NVFP4 GEMM Correctness Validation
+================================================================================
+
+Running 1 test cases...
+Tolerance: rtol=1e-03, atol=1e-03
+
+
+[Test 1/1] M=128, N=256, K=256, L=1
+------------------------------------------------------------
+  Generating input data...
+  to_blocked(sfa_ref_cpu)[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
+  to_blocked(sfb_ref_cpu)[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
+  a_ref packed bytes[0..31]: b3 78 6c e7 89 52 29 d3 c0 5f fb f5 a8 d3 ce 36 70 a3 ca 84 bb 87 fa bf 8d da 72 28 c2 00 19 51
+  b_ref packed bytes[0..31]: 76 7d a9 a8 a6 25 10 1b 88 00 ef a6 7d 6c 20 73 8b c6 74 e4 ba b9 ac ce 09 ef 5f 7e 8e a4 68 c1
+  Running custom kernel...
+idescE_kb0=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000080 tmem_sfb=0x00000090
+idescE_kb1=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000084 tmem_sfb=0x00000094
+idescE_kb2=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000088 tmem_sfb=0x00000098
+idescE_kb3=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x0000008c tmem_sfb=0x0000009c
+mma_scale_vec=16 opcode=block16
+sfa_stage[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
+sfa_compact[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
+sfb_compact[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
+a_smem_base=0x00000800 a_k1=0x00000801 a_m1=0x00000880
+b_smem_base=0x00008800 b_k1=0x00008801 b_n1=0x00008880
+a_stride_k=1 a_stride_m=128
+b_stride_k=1 b_stride_n=128
+a_packed_stage[0..3]: b3 78 6c e7
+b_packed_stage[0..3]: 76 7d a9 a8
+sA_full k[0..7], m0: 03 0b 08 07 0c 06 07 0e
+sB_full k[0..7], n0: 06 07 0d 07 09 0a 08 0a
+desc_a_smem[0]=0x4000404000010080
+desc_b_smem[0]=0x4000404000010880
+tmem_sfa0_addr=0x00000080 tmem_sfb0_addr=0x00000090
+map gm=0 gn=0 tmem_addr=0 v=8697.750000 -6123.500000 -283.250000 17688.500000
+D[0..7]: 8696.000 -6124.000 -283.250 17696.000 -13000.000 -10336.000 -7964.000 -24640.000
+  ref D[0,0..3]: 932.000 -1.000 -531.000 266.500
+  Validating against reference...
+  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32767 ERROR AT (0, 0, 0): 8696.0 932.0 ERROR AT (0, 1, 0): -6124.0 -1.0 ERROR AT (0, 2, 0): -283.25 -531.0 ERROR AT (0, 3, 0): 17696.0 266.5 ERROR AT (0, 4, 0): -13000.0 -712.0 ... and 32762 more mismatched elements.
+
+================================================================================
+SUMMARY
+================================================================================
+Total tests: 1
+Passed:      0 (0%)
+Failed:      1 (100%)
+
+✗ 1 test(s) failed

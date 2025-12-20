@@ -1497,11 +1497,12 @@ fp4_gemm_rank2_cta(
 #endif
 
 
+        constexpr int kKBlockPacked = kKBlock / 2;  // 64 elems => 32 bytes packed
         if (warp_id == 0 && lane_id == 0) {
             #pragma unroll
             for (int kb = 0; kb < kNumKBlocks; ++kb) {
-                auto sA_kb = local_tile(sA_full, make_shape(Int<TileM>{}, Int<kKBlock>{}), make_coord(0, kb));
-                auto sB_kb = local_tile(sB_full, make_shape(Int<TileN>{}, Int<kKBlock>{}), make_coord(0, kb));
+                auto sA_kb = local_tile(sA_full, make_shape(Int<TileM>{}, Int<kKBlockPacked>{}), make_coord(Int<0>{}, kb));
+                auto sB_kb = local_tile(sB_full, make_shape(Int<TileN>{}, Int<kKBlockPacked>{}), make_coord(Int<0>{}, kb));
                 desc_a_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sA_kb));
                 desc_b_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sB_kb));
             }
@@ -1803,7 +1804,9 @@ void launch_fp4_gemm_optimized(
             static_cast<cuuint64_t>(SFA.stride(2)), // rest_m
             static_cast<cuuint64_t>(SFA.stride(4)), // rest_k
         };
-        cuuint32_t box_SFA[4] = {16, 32, 1, 1};      // 16B x 32 rows = 512B
+        // TileK=256 => 4 chunks of 512B each (rest_k)
+        constexpr cuuint32_t kScaleChunksPerTile = kTileK / 64;
+        cuuint32_t box_SFA[4] = {16, 32, 1, kScaleChunksPerTile};      // 16B x 32 rows x rest_k
 
         CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      4, const_cast<void*>(static_cast<const void*>(SFA_ptr)),
@@ -1843,7 +1846,9 @@ void launch_fp4_gemm_optimized(
             static_cast<cuuint64_t>(SFB.stride(2)), // rest_n
             static_cast<cuuint64_t>(SFB.stride(4)), // rest_k
         };
-        cuuint32_t box_SFB[4] = {16, 32, 1, 1};
+        // TileK=256 => 4 chunks of 512B each (rest_k)
+        constexpr cuuint32_t kScaleChunksPerTile = kTileK / 64;
+        cuuint32_t box_SFB[4] = {16, 32, 1, kScaleChunksPerTile};
 
         CUresult resSFB = encode_tma_matrix(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      4, const_cast<void*>(static_cast<const void*>(SFB_ptr)),
