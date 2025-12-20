@@ -34,6 +34,7 @@ trigger: auto
 - Latest patch: sA_full/sB_full debug now prints float values (subbyte_reference has no raw()).
 - Latest patch: sA_full/sB_full debug now uses subbyte_reference.get().raw() for nibble print.
 - Latest patch: A/B SMEM layout order switched to (M/N, K) with k-block slicing along K (mode-1).
+- Latest patch: UMMA A/B SMEM descriptors now use uint8_t with (M/N, Kpacked) shape and kKBlockPacked slicing (packed-byte units) plus updated debug prints for k-byte values.
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.

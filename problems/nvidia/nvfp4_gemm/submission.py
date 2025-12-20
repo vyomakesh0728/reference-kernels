@@ -1420,20 +1420,22 @@ fp4_gemm_rank2_cta(
         // for the first K-block of the full GEMM.
         // =========================================================================
         using namespace cute;
-        using ElementAB = cutlass::detail::float_e2m1_unpacksmem_t;
+        using ElementAB = uint8_t;
         using SmemLayoutAtomAB = UMMA::Layout_K_SW128_Atom<ElementAB>;
+        constexpr int TileKPacked = TileK / 2;
+        constexpr int kKBlockPacked = kKBlock / 2;
 
-        // A is (M, K)
+        // A is (M, Kpacked bytes)
         auto smem_layout_a = tile_to_shape(SmemLayoutAtomAB{},
-            make_shape(Int<TileM>{}, Int<TileK>{}),
+            make_shape(Int<TileM>{}, Int<TileKPacked>{}),
             cute::GenRowMajor{});
-        auto sA_full = make_tensor(make_smem_ptr<ElementAB>(reinterpret_cast<ElementAB*>(a_packed_stage[stage])), smem_layout_a);
+        auto sA_full = make_tensor(make_smem_ptr<ElementAB>(a_packed_stage[stage]), smem_layout_a);
 
-        // B is (N, K)
+        // B is (N, Kpacked bytes)
         auto smem_layout_b = tile_to_shape(SmemLayoutAtomAB{},
-            make_shape(Int<TileN>{}, Int<TileK>{}),
+            make_shape(Int<TileN>{}, Int<TileKPacked>{}),
             cute::GenRowMajor{});
-        auto sB_full = make_tensor(make_smem_ptr<ElementAB>(reinterpret_cast<ElementAB*>(b_packed_stage[stage])), smem_layout_b);
+        auto sB_full = make_tensor(make_smem_ptr<ElementAB>(b_packed_stage[stage]), smem_layout_b);
 
 #if NVFP4_DEBUG_DUMP
         if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && k_tile == 0) {
@@ -1453,20 +1455,18 @@ fp4_gemm_rank2_cta(
             printf("b_packed_stage[0..3]: %02x %02x %02x %02x\n",
                    b_packed_stage[stage][0], b_packed_stage[stage][1],
                    b_packed_stage[stage][2], b_packed_stage[stage][3]);
-            printf("sA_full k[0..7], m0:");
+            printf("sA_full kbyte[0..7], m0:");
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
                 auto v = sA_full(make_coord(0, i));
-                auto val = v.get();
-                printf(" %02x", static_cast<unsigned>(val.raw() & 0xF));
+                printf(" %02x", static_cast<unsigned>(v));
             }
             printf("\n");
-            printf("sB_full k[0..7], n0:");
+            printf("sB_full kbyte[0..7], n0:");
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
                 auto v = sB_full(make_coord(0, i));
-                auto val = v.get();
-                printf(" %02x", static_cast<unsigned>(val.raw() & 0xF));
+                printf(" %02x", static_cast<unsigned>(v));
             }
             printf("\n");
         }
@@ -1476,8 +1476,8 @@ fp4_gemm_rank2_cta(
         if (warp_id == 0 && lane_id == 0) {
             #pragma unroll
             for (int kb = 0; kb < kNumKBlocks; ++kb) {
-                auto sA_kb = local_tile(sA_full, make_shape(Int<TileM>{}, Int<kKBlock>{}), make_coord(0, kb));
-                auto sB_kb = local_tile(sB_full, make_shape(Int<TileN>{}, Int<kKBlock>{}), make_coord(0, kb));
+                auto sA_kb = local_tile(sA_full, make_shape(Int<TileM>{}, Int<kKBlockPacked>{}), make_coord(0, kb));
+                auto sB_kb = local_tile(sB_full, make_shape(Int<TileN>{}, Int<kKBlockPacked>{}), make_coord(0, kb));
                 desc_a_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sA_kb));
                 desc_b_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sB_kb));
             }

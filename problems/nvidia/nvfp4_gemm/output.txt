@@ -27,12 +27,12 @@ a_packed_stage[0..3]: b3 78 6c e7
 b_packed_stage[0..3]: 76 7d a9 a8
 sA_full k[0..7], m0: 03 0b 08 07 0c 06 07 0e
 sB_full k[0..7], n0: 06 07 0d 07 09 0a 08 0a
-desc_a_smem[0]=0x8000404000010080
-desc_b_smem[0]=0x8000404000010880
-tmem_addr=0 tmem_vals=-4030.250000 -12794.000000 5541.000000 9507.750000
-D[0..7]: -4030.000 -12792.000 5540.000 9504.000 3470.000 496.000 -656.000 -48928.000
+desc_a_smem[0]=0x4000404000010080
+desc_b_smem[0]=0x4000404000010880
+tmem_addr=0 tmem_vals=8697.750000 -6123.500000 -283.250000 17688.500000
+D[0..7]: 8696.000 -6124.000 -283.250 17696.000 -13000.000 -10336.000 -7964.000 -24640.000
   Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32768 ERROR AT (0, 0, 0): -4030.0 932.0 ERROR AT (0, 1, 0): -12792.0 -1.0 ERROR AT (0, 2, 0): 5540.0 -531.0 ERROR AT (0, 3, 0): 9504.0 266.5 ERROR AT (0, 4, 0): 3470.0 -712.0 ... and 32763 more mismatched elements.
+  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32767 ERROR AT (0, 0, 0): 8696.0 932.0 ERROR AT (0, 1, 0): -6124.0 -1.0 ERROR AT (0, 2, 0): -283.25 -531.0 ERROR AT (0, 3, 0): 17696.0 266.5 ERROR AT (0, 4, 0): -13000.0 -712.0 ... and 32762 more mismatched elements.
 
 ================================================================================
 SUMMARY
