@@ -1,60 +1,25 @@
-python3 test_correctness.py --only 1 --debug-umma
-================================================================================
-NVFP4 GEMM Correctness Validation
-================================================================================
+cuda-gdb --args python3 test_correctness.py --only 1 --debug-umma
+NVIDIA (R) cuda-gdb 13.0
+Portions Copyright (C) 2007-2025 NVIDIA Corporation
+Based on GNU gdb 14.2
+Copyright (C) 2023 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This CUDA-GDB was configured as "x86_64-pc-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://forums.developer.nvidia.com/c/developer-tools/cuda-developer-tools/cuda-gdb>.
+Find the CUDA-GDB manual and other documentation resources online at:
+    <https://docs.nvidia.com/cuda/cuda-gdb/index.html>.
 
-Running 1 test cases...
-Tolerance: rtol=1e-03, atol=1e-03
-
-
-[Test 1/1] M=128, N=256, K=256, L=1
-------------------------------------------------------------
-  Generating input data...
-  to_blocked(sfa_ref_cpu)[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
-  to_blocked(sfb_ref_cpu)[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
-  a_ref packed bytes[0..31]: b3 78 6c e7 89 52 29 d3 c0 5f fb f5 a8 d3 ce 36 70 a3 ca 84 bb 87 fa bf 8d da 72 28 c2 00 19 51
-  b_ref packed bytes[0..31]: 76 7d a9 a8 a6 25 10 1b 88 00 ef a6 7d 6c 20 73 8b c6 74 e4 ba b9 ac ce 09 ef 5f 7e 8e a4 68 c1
-  Running custom kernel...
-SFA size=[32,4,1,4,4] stride=[16,4,2048,1,512] K_scales=16
-SFA kScaleChunksPerTile=4
-SFB size=[32,4,2,4,4] stride=[16,4,2048,1,512] K_scales=16
-SFB kScaleChunksPerTile=4
-idescE_kb0=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000080 tmem_sfb=0x00000090
-idescE_kb1=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000084 tmem_sfb=0x00000094
-idescE_kb2=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000088 tmem_sfb=0x00000098
-idescE_kb3=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x0000008c tmem_sfb=0x0000009c
-mma_scale_vec=16 opcode=block16
-sfa_stage[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
-sfa_compact[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
-sfb_compact[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
-a_smem_base=0x00000800 a_k1=0x00000801 a_m1=0x00000880
-b_smem_base=0x00008800 b_k1=0x00008801 b_n1=0x00008880
-a_stride_k=1 a_stride_m=128
-b_stride_k=1 b_stride_n=128
-ElementAB bits=4 TileKPacked=128
-a_packed_stage[0..3]: b3 78 6c e7
-b_packed_stage[0..3]: 76 7d a9 a8
-sA_full k[0..7], m0: 03 0b 08 07 0c 06 07 0e
-sB_full k[0..7], n0: 06 07 0d 07 09 0a 08 0a
-desc_a_smem[0]=0x4000404000010080
-desc_b_smem[0]=0x4000404000010880
-desc_a_smem start=0x0080 lbo=0x0001 sbo=0x0040 layout=2
-desc_b_smem start=0x0880 lbo=0x0001 sbo=0x0040 layout=2
-desc_expected_a lbo=0x0008 sbo=0x0000
-desc_expected_b lbo=0x0008 sbo=0x0000
-tmem_sfa0_addr=0x00000080 tmem_sfb0_addr=0x00000090
-tmem_c_base=0x00000000
-map gm=0 gn=0 tmem_addr=0 v=7321.750000 17588.500000 -10227.250000 8000.500000
-D[0..7]: 7320.000 17584.000 -10224.000 8000.000 12256.000 13328.000 -13080.000 -5056.000
-  ref D[0,0..3]: 932.000 -1.000 -531.000 266.500
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32768 ERROR AT (0, 0, 0): 7320.0 932.0 ERROR AT (0, 1, 0): 17584.0 -1.0 ERROR AT (0, 2, 0): -10224.0 -531.0 ERROR AT (0, 3, 0): 8000.0 266.5 ERROR AT (0, 4, 0): 12256.0 -712.0 ... and 32763 more mismatched elements.
-
-================================================================================
-SUMMARY
-================================================================================
-Total tests: 1
-Passed:      0 (0%)
-Failed:      1 (100%)
-
-✗ 1 test(s) failed
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+Reading symbols from python3...
+(No debugging symbols found in python3)
+(cuda-gdb) set cuda break_on_launch kernel
+Undefined item: "kernel".
+(cuda-gdb) set cuda kernel_name_regex fp4_gemm_rank2_cta
+Undefined set cuda command: "kernel_name_regex fp4_gemm_rank2_cta".  Try "help set cuda".
+(cuda-gdb) 

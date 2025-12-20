@@ -905,6 +905,12 @@ fp4_gemm_rank2_cta(
     
     if (batch >= L || m_tile >= M || n_tile >= N) return;
 
+#if NVFP4_DEBUG_DUMP
+    if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && tid == 0) {
+        asm volatile("brkpt;");
+    }
+#endif
+
     const int K_packed = K >> 1;
     const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
     const int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
