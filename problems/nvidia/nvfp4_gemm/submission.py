@@ -1423,15 +1423,15 @@ fp4_gemm_rank2_cta(
         using ElementAB = cutlass::detail::float_e2m1_unpacksmem_t;
         using SmemLayoutAtomAB = UMMA::Layout_K_SW64_Atom<ElementAB>;
 
-        // A is (Kpacked, M)
+        // A is (M, K)
         auto smem_layout_a = tile_to_shape(SmemLayoutAtomAB{},
-            make_shape(Int<TileK>{}, Int<TileM>{}),
+            make_shape(Int<TileM>{}, Int<TileK>{}),
             cute::GenRowMajor{});
         auto sA_full = make_tensor(make_smem_ptr<ElementAB>(reinterpret_cast<ElementAB*>(a_packed_stage[stage])), smem_layout_a);
 
-        // B is (Kpacked, N)
+        // B is (N, K)
         auto smem_layout_b = tile_to_shape(SmemLayoutAtomAB{},
-            make_shape(Int<TileK>{}, Int<TileN>{}),
+            make_shape(Int<TileN>{}, Int<TileK>{}),
             cute::GenRowMajor{});
         auto sB_full = make_tensor(make_smem_ptr<ElementAB>(reinterpret_cast<ElementAB*>(b_packed_stage[stage])), smem_layout_b);
 
@@ -1456,7 +1456,7 @@ fp4_gemm_rank2_cta(
             printf("sA_full k[0..7], m0:");
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                auto v = sA_full(make_coord(i, 0));
+                auto v = sA_full(make_coord(0, i));
                 auto val = v.get();
                 printf(" %02x", static_cast<unsigned>(val.raw() & 0xF));
             }
@@ -1464,7 +1464,7 @@ fp4_gemm_rank2_cta(
             printf("sB_full k[0..7], n0:");
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                auto v = sB_full(make_coord(i, 0));
+                auto v = sB_full(make_coord(0, i));
                 auto val = v.get();
                 printf(" %02x", static_cast<unsigned>(val.raw() & 0xF));
             }
@@ -1476,8 +1476,8 @@ fp4_gemm_rank2_cta(
         if (warp_id == 0 && lane_id == 0) {
             #pragma unroll
             for (int kb = 0; kb < kNumKBlocks; ++kb) {
-                auto sA_kb = local_tile(sA_full, make_shape(Int<kKBlock>{}, Int<TileM>{}), make_coord(kb, 0));
-                auto sB_kb = local_tile(sB_full, make_shape(Int<kKBlock>{}, Int<TileN>{}), make_coord(kb, 0));
+                auto sA_kb = local_tile(sA_full, make_shape(Int<TileM>{}, Int<kKBlock>{}), make_coord(0, kb));
+                auto sB_kb = local_tile(sB_full, make_shape(Int<TileN>{}, Int<kKBlock>{}), make_coord(0, kb));
                 desc_a_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sA_kb));
                 desc_b_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sB_kb));
             }

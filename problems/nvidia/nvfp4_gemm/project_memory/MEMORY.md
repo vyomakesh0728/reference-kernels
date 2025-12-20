@@ -33,6 +33,7 @@ trigger: auto
 - Latest patch: added NVFP4_DEBUG_DUMP prints for sA_full/sB_full nibble values and packed stage bytes for k=0 on CTA(0,0,0).
 - Latest patch: sA_full/sB_full debug now prints float values (subbyte_reference has no raw()).
 - Latest patch: sA_full/sB_full debug now uses subbyte_reference.get().raw() for nibble print.
+- Latest patch: A/B SMEM layout order switched to (M/N, K) with k-block slicing along K (mode-1).
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.
