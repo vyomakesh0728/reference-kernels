@@ -487,8 +487,8 @@ __device__ __forceinline__ uint64_t make_instr_desc_mxf4(
 ) {
     // Canonical descriptor construction + runtime SF-ID derivation.
     (void)sf_format;
-    using AType = cutlass::float_e2m1_t;
-    using BType = cutlass::float_e2m1_t;
+    using AType = cutlass::detail::float_e2m1_unpacksmem_t;
+    using BType = cutlass::detail::float_e2m1_unpacksmem_t;
     using CType = float;
     using SFType = cutlass::float_ue4m3_t;
 
