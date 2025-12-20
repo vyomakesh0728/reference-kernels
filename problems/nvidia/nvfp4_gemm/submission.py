@@ -1425,12 +1425,14 @@ fp4_gemm_rank2_cta(
 
         // A is (Kpacked, M)
         auto smem_layout_a = tile_to_shape(SmemLayoutAtomAB{},
-            make_shape(Int<TileK>{}, Int<TileM>{}));
+            make_shape(Int<TileK>{}, Int<TileM>{}),
+            cute::GenRowMajor{});
         auto sA_full = make_tensor(make_smem_ptr<ElementAB>(reinterpret_cast<ElementAB*>(a_packed_stage[stage])), smem_layout_a);
 
         // B is (Kpacked, N)
         auto smem_layout_b = tile_to_shape(SmemLayoutAtomAB{},
-            make_shape(Int<TileK>{}, Int<TileN>{}));
+            make_shape(Int<TileK>{}, Int<TileN>{}),
+            cute::GenRowMajor{});
         auto sB_full = make_tensor(make_smem_ptr<ElementAB>(reinterpret_cast<ElementAB*>(b_packed_stage[stage])), smem_layout_b);
 
 #if NVFP4_DEBUG_DUMP

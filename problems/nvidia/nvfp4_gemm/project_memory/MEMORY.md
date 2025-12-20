@@ -29,6 +29,7 @@ trigger: auto
 - Latest patch: added NVFP4_DEBUG_DUMP prints for A/B SMEM base addresses and D[0..7] epilogue values.
 - Latest patch: added NVFP4_DEBUG_DUMP stride deltas for A/B SMEM and first TMEM load values before epilogue write.
 - Latest patch: switched UMMA A/B layout to cutlass::detail::float_e2m1_unpacksmem_t with TileK/kKBlock to satisfy canonical 4-bit layout constraints.
+- Latest patch: tile_to_shape for A/B now uses GenRowMajor to satisfy block divide constraints.
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.

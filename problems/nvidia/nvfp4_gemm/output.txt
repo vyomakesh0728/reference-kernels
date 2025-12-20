@@ -19,13 +19,13 @@ Tolerance: rtol=1e-03, atol=1e-03
 [2/3] /usr/local/cuda/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx_dbg -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -DNVFP4_DEBUG_DUMP=1 -c /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu -o cuda.cuda.o 
 FAILED: [code=1] cuda.cuda.o 
 /usr/local/cuda/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx_dbg -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -DNVFP4_DEBUG_DUMP=1 -c /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu -o cuda.cuda.o 
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1536): warning #177-D: variable "LAYOUT_AD_M" was declared but never referenced
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1532): warning #177-D: variable "LAYOUT_AD_M" was declared but never referenced
           constexpr uint32_t LAYOUT_AD_M = 128;
                              ^
 
 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
 
-/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1544): warning #177-D: variable "kHasShortcut" was declared but never referenced
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1540): warning #177-D: variable "kHasShortcut" was declared but never referenced
           constexpr bool kHasShortcut = (kSwizzleCDMode / kNumBankGroupBytes) == 8;
                          ^
 
@@ -63,21 +63,15 @@ Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
                     ^
           detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
 
-/usr/local/cutlass/include/cute/atom/mma_traits_sm100.hpp(283): error: static assertion failed with "Not a canonical UMMA_K Layout: Expected MN-size multiple of 8."
-      static_assert(decltype(size<0>(u128_tensor) % Int<8>{} == Int<0>{})::value, "Not a canonical UMMA_K Layout: Expected MN-size multiple of 8.")
+/usr/local/cutlass/include/cute/layout.hpp(1792): error: static assertion failed with "tile_to_shape: block shape does not divide the target shape."
+      static_assert(decltype(evenly_divides(target_shape, block_shape))::value, "tile_to_shape: block shape does not divide the target shape.")
       ^
           detected during:
-            instantiation of "cute::UMMA::SmemDescriptor cute::UMMA::make_umma_desc<MajorMode,TEngine,TLayout>(const cute::Tensor<TEngine, TLayout> &) [with MajorMode=cute::UMMA::Major::K, TEngine=cute::ViewEngine<cute::swizzle_ptr<cute::Swizzle<3, 4, 3>, cute::smem_ptr<uint4 *>>>, TLayout=cute::Layout<cute::tuple<cute::_2, cute::tuple<cute::C<8>, cute::C<16>>>, cute::tuple<cute::C<8>, cute::tuple<cute::_1, cute::C<64>>>>]" at line 1448 of /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu
+            instantiation of "auto cute::tile_to_shape(const cute::Layout<Shape, Stride> &, const TrgShape &, const ModeOrder &) [with Shape=cute::tuple<cute::_8, cute::_256>, Stride=cute::tuple<cute::_256, cute::_1>, TrgShape=cute::tuple<cute::_256, cute::_128>, ModeOrder=cute::GenColMajor]" at line 552 of /usr/local/cutlass/include/cute/layout_composed.hpp
+            instantiation of "auto cute::tile_to_shape(const cute::ComposedLayout<A, O, B> &, const Shape &, const ModeOrder &) [with A=cute::Swizzle<3, 4, 3>, O=cute::smem_ptr_flag_bits<4>, B=cute::Layout<cute::tuple<cute::_8, cute::_256>, cute::tuple<cute::_256, cute::_1>>, Shape=cute::tuple<cute::_256, cute::_128>, ModeOrder=cute::GenColMajor]" at line 1415 of /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu
             instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
 
-/usr/local/cutlass/include/cute/atom/mma_traits_sm100.hpp(290): error: static assertion failed with "Not a canonical UMMA_K Layout: Expected profile failure."
-      static_assert(decltype(congruent(canonical_layout, Shape<Shape<_1,_1>,Shape<_1,_1>>{}))::value, "Not a canonical UMMA_K Layout: Expected profile failure.");
-      ^
-          detected during:
-            instantiation of "cute::UMMA::SmemDescriptor cute::UMMA::make_umma_desc<MajorMode,TEngine,TLayout>(const cute::Tensor<TEngine, TLayout> &) [with MajorMode=cute::UMMA::Major::K, TEngine=cute::ViewEngine<cute::swizzle_ptr<cute::Swizzle<3, 4, 3>, cute::smem_ptr<uint4 *>>>, TLayout=cute::Layout<cute::tuple<cute::_2, cute::tuple<cute::C<8>, cute::C<16>>>, cute::tuple<cute::C<8>, cute::tuple<cute::_1, cute::C<64>>>>]" at line 1448 of /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu
-            instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
-
-2 errors detected in the compilation of "/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu".
+1 error detected in the compilation of "/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu".
 ninja: build stopped: subcommand failed.
 
 
