@@ -1420,19 +1420,22 @@ fp4_gemm_rank2_cta(
         // for the first K-block of the full GEMM.
         // =========================================================================
         using namespace cute;
-        using ElementAB = uint8_t;
+        using ElementAB = uint4;
         using SmemLayoutAtomAB = UMMA::Layout_K_SW128_Atom<ElementAB>;
         constexpr int kKBlockPacked = kKBlock / 2;
+        constexpr int kPack16 = 16;
+        constexpr int TileKPacked16 = TileKPacked / kPack16;
+        constexpr int kKBlockPacked16 = kKBlockPacked / kPack16;
 
         // A is (Kpacked, M)
         auto smem_layout_a = tile_to_shape(SmemLayoutAtomAB{},
-            make_shape(Int<TileKPacked>{}, Int<TileM>{}));
-        auto sA_full = make_tensor(make_smem_ptr<ElementAB>(a_packed_stage[stage]), smem_layout_a);
+            make_shape(Int<TileKPacked16>{}, Int<TileM>{}));
+        auto sA_full = make_tensor(make_smem_ptr<ElementAB>(reinterpret_cast<ElementAB*>(a_packed_stage[stage])), smem_layout_a);
 
         // B is (Kpacked, N)
         auto smem_layout_b = tile_to_shape(SmemLayoutAtomAB{},
-            make_shape(Int<TileKPacked>{}, Int<TileN>{}));
-        auto sB_full = make_tensor(make_smem_ptr<ElementAB>(b_packed_stage[stage]), smem_layout_b);
+            make_shape(Int<TileKPacked16>{}, Int<TileN>{}));
+        auto sB_full = make_tensor(make_smem_ptr<ElementAB>(reinterpret_cast<ElementAB*>(b_packed_stage[stage])), smem_layout_b);
 
 #if NVFP4_DEBUG_DUMP
         if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
@@ -1453,8 +1456,8 @@ fp4_gemm_rank2_cta(
         if (warp_id == 0 && lane_id == 0) {
             #pragma unroll
             for (int kb = 0; kb < kNumKBlocks; ++kb) {
-                auto sA_kb = local_tile(sA_full, make_shape(Int<kKBlockPacked>{}, Int<TileM>{}), make_coord(kb, 0));
-                auto sB_kb = local_tile(sB_full, make_shape(Int<kKBlockPacked>{}, Int<TileN>{}), make_coord(kb, 0));
+                auto sA_kb = local_tile(sA_full, make_shape(Int<kKBlockPacked16>{}, Int<TileM>{}), make_coord(kb, 0));
+                auto sB_kb = local_tile(sB_full, make_shape(Int<kKBlockPacked16>{}, Int<TileN>{}), make_coord(kb, 0));
                 desc_a_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sA_kb));
                 desc_b_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sB_kb));
             }
