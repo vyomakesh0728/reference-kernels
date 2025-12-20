@@ -11,7 +11,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from reference import generate_input, check_implementation
+from reference import generate_input, check_implementation, to_blocked
 from submission import custom_kernel
 from utils import set_seed
 
@@ -68,6 +68,12 @@ def run_correctness_tests():
             # Clone data for custom kernel (to avoid modifying reference data)
             data_copy = tuple(t.clone() if isinstance(t, torch.Tensor) else t for t in data)
             
+            if args.only is not None:
+                scale_a = to_blocked(data[2][:, :, 0]).view(torch.uint8).cpu()
+                scale_b = to_blocked(data[3][:, :, 0]).view(torch.uint8).cpu()
+                print("  to_blocked(sfa_ref_cpu)[0..31]:", " ".join(f"{b:02x}" for b in scale_a[:32].tolist()))
+                print("  to_blocked(sfb_ref_cpu)[0..31]:", " ".join(f"{b:02x}" for b in scale_b[:32].tolist()))
+
             # Run custom kernel
             print("  Running custom kernel...")
             torch.cuda.synchronize()
