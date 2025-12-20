@@ -31,6 +31,7 @@ trigger: auto
 - Latest patch: switched UMMA A/B layout to cutlass::detail::float_e2m1_unpacksmem_t with TileK/kKBlock to satisfy canonical 4-bit layout constraints.
 - Latest patch: switched A/B UMMA layout atom to Layout_K_SW64_Atom for 4-bit canonical tiling with TileM/TileN=128.
 - Latest patch: added NVFP4_DEBUG_DUMP prints for sA_full/sB_full nibble values and packed stage bytes for k=0 on CTA(0,0,0).
+- Latest patch: sA_full/sB_full debug now prints float values (subbyte_reference has no raw()).
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.

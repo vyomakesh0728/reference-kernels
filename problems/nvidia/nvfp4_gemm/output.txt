@@ -15,20 +15,66 @@ Tolerance: rtol=1e-03, atol=1e-03
   a_ref packed bytes[0..31]: b3 78 6c e7 89 52 29 d3 c0 5f fb f5 a8 d3 ce 36 70 a3 ca 84 bb 87 fa bf 8d da 72 28 c2 00 19 51
   b_ref packed bytes[0..31]: 76 7d a9 a8 a6 25 10 1b 88 00 ef a6 7d 6c 20 73 8b c6 74 e4 ba b9 ac ce 09 ef 5f 7e 8e a4 68 c1
   Running custom kernel...
-idescE=0x0820048000000000
-sfa_stage[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
-sfa_compact[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
-sfb_compact[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
-a_smem_base=0x00000800 a_k1=0x00000801 a_m1=0x00000880
-b_smem_base=0x00008800 b_k1=0x00008801 b_n1=0x00008880
-a_stride_k=1 a_stride_m=128
-b_stride_k=1 b_stride_n=128
-desc_a_smem[0]=0x8000402000010080
-desc_b_smem[0]=0x8000402000010880
-tmem_addr=0 tmem_vals=-9718.250000 -1074.000000 7221.000000 2587.750000
-D[0..7]: -9720.000 -1074.000 7220.000 2588.000 12984.000 38720.000 -1096.000 5368.000
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32768 ERROR AT (0, 0, 0): -9720.0 932.0 ERROR AT (0, 1, 0): -1074.0 -1.0 ERROR AT (0, 2, 0): 7220.0 -531.0 ERROR AT (0, 3, 0): 2588.0 266.5 ERROR AT (0, 4, 0): 12984.0 -712.0 ... and 32763 more mismatched elements.
+  ✗ ERROR: Error building extension 'nvfp4_gemm_sm100_ptx_dbg': [1/2] /usr/local/cuda/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx_dbg -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -DNVFP4_DEBUG_DUMP=1 -c /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu -o cuda.cuda.o 
+FAILED: [code=1] cuda.cuda.o 
+/usr/local/cuda/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx_dbg -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -DNVFP4_DEBUG_DUMP=1 -c /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu -o cuda.cuda.o 
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1554): warning #177-D: variable "LAYOUT_AD_M" was declared but never referenced
+          constexpr uint32_t LAYOUT_AD_M = 128;
+                             ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1562): warning #177-D: variable "kHasShortcut" was declared but never referenced
+          constexpr bool kHasShortcut = (kSwizzleCDMode / kNumBankGroupBytes) == 8;
+                         ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(884): warning #177-D: variable "SfaBoxK" was declared but never referenced
+      constexpr int SfaBoxK = 128;
+                    ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(886): warning #177-D: variable "a_stride" was declared but never referenced
+      constexpr int a_stride = TileK + 8;
+                    ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(887): warning #177-D: variable "b_stride" was declared but never referenced
+      constexpr int b_stride = TileK + 8;
+                    ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(893): warning #177-D: variable "is_consumer" was declared but never referenced
+      const bool is_consumer = true;
+                 ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(903): warning #177-D: variable "tile_rows" was declared but never referenced
+      const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
+                ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(904): warning #177-D: variable "tile_cols" was declared but never referenced
+      const int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
+                ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(517): warning #177-D: variable "c_k_scales" was declared but never referenced
+              uint32_t c_k_scales = static_cast<uint32_t>(k_tile_base >> 4);
+                       ^
+          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(509): warning #177-D: variable "SfaBoxK" was declared but never referenced
+      constexpr int SfaBoxK = 128;
+                    ^
+          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1447): error: class "cute::subbyte_reference<cutlass::detail::float_e2m1_unpacksmem_t>" has no member "raw"
+                  printf(" %02x", static_cast<unsigned>(v.raw() & 0xF));
+                                                          ^
+          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1454): error: class "cute::subbyte_reference<cutlass::detail::float_e2m1_unpacksmem_t>" has no member "raw"
+                  printf(" %02x", static_cast<unsigned>(v.raw() & 0xF));
+                                                          ^
+          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
+
+2 errors detected in the compilation of "/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu".
+ninja: build stopped: subcommand failed.
+
 
 ================================================================================
 SUMMARY
