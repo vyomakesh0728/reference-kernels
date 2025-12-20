@@ -4,6 +4,7 @@ Correctness validation test for NVFP4 GEMM kernel.
 Runs custom kernel against reference implementation for all test cases.
 """
 import sys
+import os
 import argparse
 import torch
 from pathlib import Path
@@ -33,6 +34,7 @@ def run_correctness_tests():
     """Run correctness validation for all test cases."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", type=int, default=None, help="Run only the Nth test case (1-based).")
+    parser.add_argument("--debug-umma", action="store_true", help="Enable kernel debug dump for UMMA/TMEM checks.")
     args = parser.parse_args()
 
     test_cases = TEST_CASES
@@ -41,6 +43,8 @@ def run_correctness_tests():
             print(f"--only must be in [1, {len(TEST_CASES)}]")
             return 1
         test_cases = [TEST_CASES[args.only - 1]]
+    if args.debug_umma:
+        os.environ["NVFP4_DEBUG_DUMP"] = "1"
 
     print("=" * 80)
     print("NVFP4 GEMM Correctness Validation")
@@ -73,6 +77,11 @@ def run_correctness_tests():
                 scale_b = to_blocked(data[3][:, :, 0]).view(torch.uint8).cpu()
                 print("  to_blocked(sfa_ref_cpu)[0..31]:", " ".join(f"{b:02x}" for b in scale_a[:32].tolist()))
                 print("  to_blocked(sfb_ref_cpu)[0..31]:", " ".join(f"{b:02x}" for b in scale_b[:32].tolist()))
+            if args.debug_umma:
+                a_bytes = data[0][:, :, 0].view(torch.uint8).cpu()
+                b_bytes = data[1][:, :, 0].view(torch.uint8).cpu()
+                print("  a_ref packed bytes[0..31]:", " ".join(f"{b:02x}" for b in a_bytes[:32].tolist()))
+                print("  b_ref packed bytes[0..31]:", " ".join(f"{b:02x}" for b in b_bytes[:32].tolist()))
 
             # Run custom kernel
             print("  Running custom kernel...")

@@ -22,6 +22,8 @@ trigger: auto
 - Latest patch: added NVFP4_DEBUG_DUMP prints for idescE and first 32 bytes of sfa_stage/sfa_compact/sfb_compact.
 - Latest patch: added `--only` flag to `test_correctness.py` to run a single 1-based test case.
 - Latest patch: `test_correctness.py --only` now prints first 32 bytes of `to_blocked` SFA/SFB for layout comparison.
+- Latest observation: sfa_compact/sfb_compact match to_blocked for first 32 bytes; likely remaining mismatches are from A/B descriptor layout or MMA/epilogue path.
+- Latest patch: `test_correctness.py` adds `--debug-umma` to set `NVFP4_DEBUG_DUMP=1` and print first 32 packed bytes of A/B.
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.
