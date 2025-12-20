@@ -1444,6 +1444,8 @@ fp4_gemm_rank2_cta(
             uint32_t b_n1 = cvta_to_shared_u32(b_packed_stage[stage] + TileKPacked);
             printf("a_smem_base=0x%08x a_k1=0x%08x a_m1=0x%08x\n", a_base, a_k1, a_m1);
             printf("b_smem_base=0x%08x b_k1=0x%08x b_n1=0x%08x\n", b_base, b_k1, b_n1);
+            printf("a_stride_k=%u a_stride_m=%u\n", a_k1 - a_base, a_m1 - a_base);
+            printf("b_stride_k=%u b_stride_n=%u\n", b_k1 - b_base, b_n1 - b_base);
         }
 #endif
 
@@ -1578,6 +1580,15 @@ fp4_gemm_rank2_cta(
                         uint32_t v0, v1, v2, v3;
                         cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_c + tmem_addr, v0, v1, v2, v3);
                         cutlass::arch::fence_view_async_tmem_load();
+#if NVFP4_DEBUG_DUMP
+                        if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 &&
+                            w == 0 && s == 0 && i == 0) {
+                            printf("tmem_addr=%u tmem_vals=%f %f %f %f\n",
+                                   tmem_addr,
+                                   __uint_as_float(v0), __uint_as_float(v1),
+                                   __uint_as_float(v2), __uint_as_float(v3));
+                        }
+#endif
 
                         // Global memory N coordinate (row-major):
                         // This must match the mathematical output layout used by reference.py.

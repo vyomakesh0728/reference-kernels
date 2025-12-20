@@ -27,6 +27,7 @@ trigger: auto
 - Latest patch: fix `--debug-umma` A/B byte print by flattening to 1D before formatting.
 - Latest patch: added NVFP4_DEBUG_DUMP prints for desc_a_smem_sh[0] and desc_b_smem_sh[0].
 - Latest patch: added NVFP4_DEBUG_DUMP prints for A/B SMEM base addresses and D[0..7] epilogue values.
+- Latest patch: added NVFP4_DEBUG_DUMP stride deltas for A/B SMEM and first TMEM load values before epilogue write.
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.
