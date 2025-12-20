@@ -1234,7 +1234,7 @@ fp4_gemm_rank2_cta(
     __shared__ __align__(16) uint64_t desc_b_smem_sh[kNumKBlocks];
     __shared__ __align__(16) uint32_t tmem_sfa_kb_sh[kNumKBlocks];
     __shared__ __align__(16) uint32_t tmem_sfb_kb_sh[kNumKBlocks];
-    __shared__ __align__(4) uint32_t idescE_hi_sh;
+    __shared__ __align__(4) uint32_t idescE_hi_sh[kNumKBlocks];
 
     if (warp_id == 0 && lane_id == 0) {
         #pragma unroll
@@ -1252,25 +1252,40 @@ fp4_gemm_rank2_cta(
     // Build instruction descriptor (constant for all K-tiles)
     // sf_format = 0 for E4M3 scale format
     // a_sf_id and b_sf_id are set to 0 (default ID, not derived from addresses)
-    // Instruction descriptor (derive SF IDs from TMEM addresses)
-    uint32_t tmem_sfa0 = raw_pointer_cast(tCtSFA.data());
-    uint32_t tmem_sfb0 = raw_pointer_cast(tCtSFB.data());
-    uint64_t idescE = make_instr_desc_mxf4(
-        TileM, TileN,
-        0, 0,       // K-major for both A and B
-        0,          // sf_format = E4M3
-        tmem_sfa0, tmem_sfb0
-    );
-    uint32_t idescE_hi = uint32_t(idescE >> 32);
     #endif
     #if __CUDA_ARCH__ >= 1000
-    if (tid == 0) {
-        idescE_hi_sh = idescE_hi;
+    if (warp_id == 0 && lane_id == 0) {
+        #pragma unroll
+        for (int kb = 0; kb < kNumKBlocks; ++kb) {
+            uint64_t idescE = make_instr_desc_mxf4(
+                TileM, TileN,
+                0, 0,       // K-major for both A and B
+                0,          // sf_format = E4M3
+                tmem_sfa_kb_sh[kb], tmem_sfb_kb_sh[kb]
+            );
+            idescE_hi_sh[kb] = uint32_t(idescE >> 32);
+#if NVFP4_DEBUG_DUMP
+            if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+                uint32_t idesc_hi = uint32_t(idescE >> 32);
+                uint32_t a_fmt = (idesc_hi >> 7) & 0x7;
+                uint32_t b_fmt = (idesc_hi >> 10) & 0x7;
+                uint32_t a_maj = (idesc_hi >> 15) & 0x1;
+                uint32_t b_maj = (idesc_hi >> 16) & 0x1;
+                uint32_t n_dim = (idesc_hi >> 17) & 0x3F;
+                uint32_t sf_fmt = (idesc_hi >> 23) & 0x1;
+                uint32_t m_dim = (idesc_hi >> 24) & 0x1F;
+                uint32_t b_sf = (idesc_hi >> 4) & 0x3;
+                uint32_t a_sf = (idesc_hi >> 29) & 0x3;
+                printf("idescE_kb%d=0x%016llx fmt(a,b)=%u,%u major(a,b)=%u,%u dims(m,n)=%u,%u sf_fmt=%u sf_id(a,b)=%u,%u tmem_sfa=0x%08x tmem_sfb=0x%08x\n",
+                       kb, (unsigned long long)idescE, a_fmt, b_fmt, a_maj, b_maj,
+                       m_dim, n_dim, sf_fmt, a_sf, b_sf,
+                       tmem_sfa_kb_sh[kb], tmem_sfb_kb_sh[kb]);
+            }
+#endif
+        }
     }
 #if NVFP4_DEBUG_DUMP
-    if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        printf("idescE=0x%016llx\n", (unsigned long long)idescE);
-    }
+    __syncthreads();
 #endif
     __syncthreads();
     #endif
@@ -1495,7 +1510,7 @@ fp4_gemm_rank2_cta(
             uint64_t desc_b_smem = desc_b_smem_sh[kb];
             uint32_t tmem_sfa_kb = tmem_sfa_kb_sh[kb];
             uint32_t tmem_sfb_kb = tmem_sfb_kb_sh[kb];
-            uint32_t idesc_hi = idescE_hi_sh;
+            uint32_t idesc_hi = idescE_hi_sh[kb];
 
             if (accum) {
                 asm volatile(

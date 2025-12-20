@@ -36,6 +36,7 @@ trigger: auto
 - Latest patch: A/B SMEM layout order switched to (M/N, K) with k-block slicing along K (mode-1).
 - Latest patch: UMMA A/B SMEM descriptors now use uint8_t with (M/N, Kpacked) shape and kKBlockPacked slicing (packed-byte units) plus updated debug prints for k-byte values.
 - Latest patch: epilogue debug now prints gm/gn mapping with TMEM values, and test_correctness prints ref D[0,0..3] under --debug-umma for mapping checks.
+- Latest patch: idescE now built per K-block using tmem_sfa_kb_sh/tmem_sfb_kb_sh, with debug decoding of format/major/sf_id bits and tmem scale addresses.
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.

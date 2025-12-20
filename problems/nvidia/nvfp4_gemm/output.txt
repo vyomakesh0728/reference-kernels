@@ -29,8 +29,9 @@ sA_full kbyte[0..7], m0: b3 78 6c e7 89 52 29 d3
 sB_full kbyte[0..7], n0: 76 7d a9 a8 a6 25 10 1b
 desc_a_smem[0]=0x4000404000010080
 desc_b_smem[0]=0x4000404000010880
-tmem_addr=0 tmem_vals=8697.750000 -6123.500000 -283.250000 17688.500000
+map gm=0 gn=0 tmem_addr=0 v=8697.750000 -6123.500000 -283.250000 17688.500000
 D[0..7]: 8696.000 -6124.000 -283.250 17696.000 -13000.000 -10336.000 -7964.000 -24640.000
+  ref D[0,0..3]: 932.000 -1.000 -531.000 266.500
   Validating against reference...
   ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32767 ERROR AT (0, 0, 0): 8696.0 932.0 ERROR AT (0, 1, 0): -6124.0 -1.0 ERROR AT (0, 2, 0): -283.25 -531.0 ERROR AT (0, 3, 0): 17696.0 266.5 ERROR AT (0, 4, 0): -13000.0 -712.0 ... and 32762 more mismatched elements.
 
