@@ -17,8 +17,10 @@ idescE=0x0820048000000000
 sfa_stage[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
 sfa_compact[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
 sfb_compact[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
+desc_a_smem[0]=0x4000404000010080
+desc_b_smem[0]=0x4000404000010880
   Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32766 ERROR AT (0, 0, 0): -40928.0 932.0 ERROR AT (0, 1, 0): -28480.0 -1.0 ERROR AT (0, 2, 0): inf -531.0 ERROR AT (0, 3, 0): -7560.0 266.5 ERROR AT (0, 4, 0): -44128.0 -712.0 ... and 32761 more mismatched elements.
+  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32767 ERROR AT (0, 0, 0): -9720.0 932.0 ERROR AT (0, 1, 0): -6972.0 -1.0 ERROR AT (0, 2, 0): 18384.0 -531.0 ERROR AT (0, 3, 0): -2112.0 266.5 ERROR AT (0, 4, 0): -11264.0 -712.0 ... and 32762 more mismatched elements.
 
 ================================================================================
 SUMMARY
@@ -26,6 +28,7 @@ SUMMARY
 Total tests: 1
 Passed:      0 (0%)
 Failed:      1 (100%)
+
 
 ✗ 1 test(s) failed
 
@@ -51,8 +54,10 @@ idescE=0x0820048000000000
 sfa_stage[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
 sfa_compact[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
 sfb_compact[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
+desc_a_smem[0]=0x4000404000010080
+desc_b_smem[0]=0x4000404000010880
   Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32766 ERROR AT (0, 0, 0): -40928.0 932.0 ERROR AT (0, 1, 0): -28480.0 -1.0 ERROR AT (0, 2, 0): inf -531.0 ERROR AT (0, 3, 0): -7560.0 266.5 ERROR AT (0, 4, 0): -44128.0 -712.0 ... and 32761 more mismatched elements.
+  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32767 ERROR AT (0, 0, 0): -9720.0 932.0 ERROR AT (0, 1, 0): -6972.0 -1.0 ERROR AT (0, 2, 0): 18384.0 -531.0 ERROR AT (0, 3, 0): -2112.0 266.5 ERROR AT (0, 4, 0): -11264.0 -712.0 ... and 32762 more mismatched elements.
 
 ================================================================================
 SUMMARY

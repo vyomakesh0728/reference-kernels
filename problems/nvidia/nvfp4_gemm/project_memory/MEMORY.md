@@ -26,6 +26,7 @@ trigger: auto
 - Latest patch: `test_correctness.py` adds `--debug-umma` to set `NVFP4_DEBUG_DUMP=1` and print first 32 packed bytes of A/B.
 - Latest patch: fix `--debug-umma` A/B byte print by flattening to 1D before formatting.
 - Latest patch: added NVFP4_DEBUG_DUMP prints for desc_a_smem_sh[0] and desc_b_smem_sh[0].
+- Latest patch: added NVFP4_DEBUG_DUMP prints for A/B SMEM base addresses and D[0..7] epilogue values.
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.

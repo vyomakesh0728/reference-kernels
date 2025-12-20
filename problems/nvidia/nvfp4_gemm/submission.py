@@ -1434,6 +1434,19 @@ fp4_gemm_rank2_cta(
             make_shape(Int<TileKPacked>{}, Int<TileN>{}));
         auto sB_full = make_tensor(make_smem_ptr<ElementAB>(b_packed_stage[stage]), smem_layout_b);
 
+#if NVFP4_DEBUG_DUMP
+        if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+            uint32_t a_base = cvta_to_shared_u32(a_packed_stage[stage]);
+            uint32_t b_base = cvta_to_shared_u32(b_packed_stage[stage]);
+            uint32_t a_k1 = cvta_to_shared_u32(a_packed_stage[stage] + 1);
+            uint32_t a_m1 = cvta_to_shared_u32(a_packed_stage[stage] + TileKPacked);
+            uint32_t b_k1 = cvta_to_shared_u32(b_packed_stage[stage] + 1);
+            uint32_t b_n1 = cvta_to_shared_u32(b_packed_stage[stage] + TileKPacked);
+            printf("a_smem_base=0x%08x a_k1=0x%08x a_m1=0x%08x\n", a_base, a_k1, a_m1);
+            printf("b_smem_base=0x%08x b_k1=0x%08x b_n1=0x%08x\n", b_base, b_k1, b_n1);
+        }
+#endif
+
 
         if (warp_id == 0 && lane_id == 0) {
             #pragma unroll
@@ -1592,6 +1605,17 @@ fp4_gemm_rank2_cta(
             }
         }
     }
+#if NVFP4_DEBUG_DUMP
+    if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        printf("D[0..7]:");
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            float v = __half2float(D[i]);
+            printf(" %.3f", v);
+        }
+        printf("\n");
+    }
+#endif
 
     // Free TMEM allocation (must be explicit before CTA exit)
     __syncthreads();  // ensure no warp still uses TMEM
