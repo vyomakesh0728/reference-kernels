@@ -44,7 +44,7 @@ trigger: auto
 - Latest patch: TMA SFA/SFB box now loads full 2048B per tile (rest_k chunks), and UMMA A/B SMEM descriptor slicing uses kKBlockPacked.
 - Latest patch: SFA/SFB TMA now issued as a single 2048B 4D load per tile (no 4x512 overflow), and added NVFP4_DEBUG_DUMP prints for SFA/SFB sizes/strides and kScaleChunksPerTile.
 - Latest patch: added NVFP4_DEBUG_DUMP decode of UMMA A/B SMEM descriptors (start/lbo/sbo/layout) and printed tmem_c base.
-- Latest patch: added NVFP4_DEBUG_DUMP prints for smem_layout_a/b shape+stride and ElementAB bits to compare expected UMMA layout.
+- Latest patch: removed smem_layout_a/b shape+stride prints (cute::stride/shape deleted for composed layouts); kept ElementAB bits print.
 
 ## Current debugging hypotheses
 - SFA/SFB TMA uses rank-4 (packed16, mm32, rest_m/n, rest_k) because inputs are strided atom-tiled layouts (`sfa_permuted/sfb_permuted`); flattening to rank-2/1D is not inherently simpler and risks wrong re-linearization.

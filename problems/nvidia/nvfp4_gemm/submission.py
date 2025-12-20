@@ -1460,20 +1460,10 @@ fp4_gemm_rank2_cta(
             uint32_t a_m1 = cvta_to_shared_u32(a_packed_stage[stage] + TileKPacked);
             uint32_t b_k1 = cvta_to_shared_u32(b_packed_stage[stage] + 1);
             uint32_t b_n1 = cvta_to_shared_u32(b_packed_stage[stage] + TileKPacked);
-            auto a_shape = shape(smem_layout_a);
-            auto b_shape = shape(smem_layout_b);
-            auto a_stride = stride(smem_layout_a);
-            auto b_stride = stride(smem_layout_b);
             printf("a_smem_base=0x%08x a_k1=0x%08x a_m1=0x%08x\n", a_base, a_k1, a_m1);
             printf("b_smem_base=0x%08x b_k1=0x%08x b_n1=0x%08x\n", b_base, b_k1, b_n1);
             printf("a_stride_k=%u a_stride_m=%u\n", a_k1 - a_base, a_m1 - a_base);
             printf("b_stride_k=%u b_stride_n=%u\n", b_k1 - b_base, b_n1 - b_base);
-            printf("smem_layout_a shape=(%d,%d) stride=(%d,%d)\n",
-                   int(get<0>(a_shape)), int(get<1>(a_shape)),
-                   int(get<0>(a_stride)), int(get<1>(a_stride)));
-            printf("smem_layout_b shape=(%d,%d) stride=(%d,%d)\n",
-                   int(get<0>(b_shape)), int(get<1>(b_shape)),
-                   int(get<0>(b_stride)), int(get<1>(b_stride)));
             printf("ElementAB bits=%d TileKPacked=%d\n",
                    int(cute::sizeof_bits<ElementAB>::value), TileKPacked);
             printf("a_packed_stage[0..3]: %02x %02x %02x %02x\n",
