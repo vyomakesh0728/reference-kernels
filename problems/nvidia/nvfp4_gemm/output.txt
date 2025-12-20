@@ -211,4 +211,178 @@ No symbol "tmem_addr" in current context.
 No symbol "gm" in current context.
 (cuda-gdb) print gn
 No symbol "gn" in current context.
-(cuda-gdb) 
+(cuda-gdb) run
+Starting program: /usr/bin/python3 test_correctness.py --only 1 --debug-umma
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/usr/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7fff439ff640 (LWP 14493)]
+[New Thread 0x7fff431fe640 (LWP 14494)]
+[New Thread 0x7fff409fd640 (LWP 14495)]
+[New Thread 0x7fff3c1fc640 (LWP 14496)]
+[New Thread 0x7fff3b9fb640 (LWP 14497)]
+[New Thread 0x7fff391fa640 (LWP 14498)]
+[New Thread 0x7fff369f9640 (LWP 14499)]
+[New Thread 0x7fff341f8640 (LWP 14500)]
+[New Thread 0x7fff339f7640 (LWP 14501)]
+[New Thread 0x7fff2f1f6640 (LWP 14502)]
+[New Thread 0x7fff2c9f5640 (LWP 14503)]
+[New Thread 0x7fff2a1f4640 (LWP 14504)]
+[New Thread 0x7fff279f3640 (LWP 14505)]
+[New Thread 0x7fff251f2640 (LWP 14506)]
+[New Thread 0x7fff229f1640 (LWP 14507)]
+[New Thread 0x7fff201f0640 (LWP 14508)]
+[New Thread 0x7fff1d9ef640 (LWP 14509)]
+[New Thread 0x7fff1b1ee640 (LWP 14510)]
+[New Thread 0x7fff189ed640 (LWP 14511)]
+[New Thread 0x7fff161ec640 (LWP 14512)]
+[New Thread 0x7fff139eb640 (LWP 14513)]
+[New Thread 0x7fff111ea640 (LWP 14514)]
+[New Thread 0x7fff0e9e9640 (LWP 14515)]
+[New Thread 0x7fff0c1e8640 (LWP 14516)]
+[New Thread 0x7fff099e7640 (LWP 14517)]
+[New Thread 0x7fff071e6640 (LWP 14518)]
+[New Thread 0x7fff049e5640 (LWP 14519)]
+[New Thread 0x7fff021e4640 (LWP 14520)]
+[New Thread 0x7ffeff9e3640 (LWP 14521)]
+[New Thread 0x7ffef85dc640 (LWP 14522)]
+[New Thread 0x7ffef730b640 (LWP 14523)]
+[Thread 0x7fff201f0640 (LWP 14508) exited]
+[Thread 0x7fff409fd640 (LWP 14495) exited]
+[Thread 0x7fff339f7640 (LWP 14501) exited]
+[Thread 0x7fff071e6640 (LWP 14518) exited]
+[Thread 0x7ffeff9e3640 (LWP 14521) exited]
+[Thread 0x7fff049e5640 (LWP 14519) exited]
+[Thread 0x7fff021e4640 (LWP 14520) exited]
+[Thread 0x7fff099e7640 (LWP 14517) exited]
+[Thread 0x7fff0c1e8640 (LWP 14516) exited]
+[Thread 0x7fff0e9e9640 (LWP 14515) exited]
+[Thread 0x7fff111ea640 (LWP 14514) exited]
+[Thread 0x7fff139eb640 (LWP 14513) exited]
+[Thread 0x7fff161ec640 (LWP 14512) exited]
+[Thread 0x7fff189ed640 (LWP 14511) exited]
+[Thread 0x7fff1b1ee640 (LWP 14510) exited]
+[Thread 0x7fff1d9ef640 (LWP 14509) exited]
+[Thread 0x7fff229f1640 (LWP 14507) exited]
+[Thread 0x7fff251f2640 (LWP 14506) exited]
+[Thread 0x7fff279f3640 (LWP 14505) exited]
+[Thread 0x7fff2a1f4640 (LWP 14504) exited]
+[Thread 0x7fff2c9f5640 (LWP 14503) exited]
+[Thread 0x7fff2f1f6640 (LWP 14502) exited]
+[Thread 0x7fff341f8640 (LWP 14500) exited]
+[Thread 0x7fff369f9640 (LWP 14499) exited]
+[Thread 0x7fff391fa640 (LWP 14498) exited]
+[Thread 0x7fff3b9fb640 (LWP 14497) exited]
+[Thread 0x7fff3c1fc640 (LWP 14496) exited]
+[Thread 0x7fff431fe640 (LWP 14494) exited]
+[Thread 0x7fff439ff640 (LWP 14493) exited]
+[Detaching after fork from child process 14524]
+================================================================================
+NVFP4 GEMM Correctness Validation
+================================================================================
+
+Running 1 test cases...
+Tolerance: rtol=1e-03, atol=1e-03
+
+
+[Test 1/1] M=128, N=256, K=256, L=1
+------------------------------------------------------------
+  Generating input data...
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Corrupted shared library list: 0x55555c4b5340 != 0x55555c486d90
+whimsical-wealthy-chipmunk: CUDA coredump is not supported with other CUDA debugging tools. Disabling coredump.
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+[New Thread 0x7ffeff9e3640 (LWP 14532)]
+  to_blocked(sfa_ref_cpu)[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
+  to_blocked(sfb_ref_cpu)[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
+  a_ref packed bytes[0..31]: b3 78 6c e7 89 52 29 d3 c0 5f fb f5 a8 d3 ce 36 70 a3 ca 84 bb 87 fa bf 8d da 72 28 c2 00 19 51
+  b_ref packed bytes[0..31]: 76 7d a9 a8 a6 25 10 1b 88 00 ef a6 7d 6c 20 73 8b c6 74 e4 ba b9 ac ce 09 ef 5f 7e 8e a4 68 c1
+  Running custom kernel...
+[Detaching after vfork from child process 14533]
+[Detaching after vfork from child process 14534]
+[Detaching after vfork from child process 14535]
+  ✗ ERROR: Error building extension 'nvfp4_gemm_sm100_ptx_dbg': [1/2] /usr/local/cuda-13.0/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx_dbg -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -DNVFP4_DEBUG_DUMP=1 -c /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu -o cuda.cuda.o 
+FAILED: [code=1] cuda.cuda.o 
+/usr/local/cuda-13.0/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=nvfp4_gemm_sm100_ptx_dbg -DTORCH_API_INCLUDE_EXTENSION_H -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.10 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -DNDEBUG --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false --fmad=true -std=c++17 -gencode=arch=compute_100a,code=sm_100a --expt-relaxed-constexpr --expt-extended-lambda -Xcudafe --diag_suppress=20012 -maxrregcount=128 --ptxas-options=-v,-warn-lmem-usage -lineinfo -I/usr/local/cutlass/include -DNVFP4_DEBUG_DUMP=1 -c /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu -o cuda.cuda.o 
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(898): error: identifier "K_packed" is undefined
+                 m_tile, n_tile, batch, K, K_scales, K_packed);
+                                                     ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1608): warning #177-D: variable "LAYOUT_AD_M" was declared but never referenced
+          constexpr uint32_t LAYOUT_AD_M = 128;
+                             ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(1616): warning #177-D: variable "kHasShortcut" was declared but never referenced
+          constexpr bool kHasShortcut = (kSwizzleCDMode / kNumBankGroupBytes) == 8;
+                         ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(877): warning #177-D: variable "SfaBoxK" was declared but never referenced
+      constexpr int SfaBoxK = 128;
+                    ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(879): warning #177-D: variable "a_stride" was declared but never referenced
+      constexpr int a_stride = TileK + 8;
+                    ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(880): warning #177-D: variable "b_stride" was declared but never referenced
+      constexpr int b_stride = TileK + 8;
+                    ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(886): warning #177-D: variable "is_consumer" was declared but never referenced
+      const bool is_consumer = true;
+                 ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(904): warning #177-D: variable "tile_rows" was declared but never referenced
+      const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
+                ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(905): warning #177-D: variable "tile_cols" was declared but never referenced
+      const int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
+                ^
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(517): warning #177-D: variable "c_k_scales" was declared but never referenced
+              uint32_t c_k_scales = static_cast<uint32_t>(k_tile_base >> 4);
+                       ^
+          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
+
+/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu(509): warning #177-D: variable "SfaBoxK" was declared but never referenced
+      constexpr int SfaBoxK = 128;
+                    ^
+          detected during instantiation of "void fp4_gemm_rank2_cta<TileM,TileK,Threads>(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, const CUtensorMap *, half *, int, int, int, int, int) [with TileM=128, TileK=256, Threads=128]" 
+
+1 error detected in the compilation of "/root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu".
+ninja: build stopped: subcommand failed.
+
+
+================================================================================
+SUMMARY
+================================================================================
+Total tests: 1
+Passed:      0 (0%)
+Failed:      1 (100%)
+
+✗ 1 test(s) failed
+[Thread 0x7ffef730b640 (LWP 14523) exited]
+[Thread 0x7ffef85dc640 (LWP 14522) exited]
+[Thread 0x7ffff7c5d480 (LWP 14491) exited]
+[Thread 0x7ffeff9e3640 (LWP 14532) exited]
+[New process 14491]
+[Inferior 1 (process 14491) exited with code 01]
+(cuda-gdb) quit

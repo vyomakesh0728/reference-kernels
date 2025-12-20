@@ -905,6 +905,7 @@ fp4_gemm_rank2_cta(
     
     if (batch >= L || m_tile >= M || n_tile >= N) return;
 
+    const int K_packed = K >> 1;
 #if NVFP4_DEBUG_DUMP
     if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && tid == 0) {
         printf("brkpt at CTA(0,0,0): m_tile=%d n_tile=%d batch=%d K=%d K_scales=%d K_packed=%d\n",
@@ -912,8 +913,6 @@ fp4_gemm_rank2_cta(
         asm volatile("brkpt;");
     }
 #endif
-
-    const int K_packed = K >> 1;
     const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
     const int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
 
@@ -1207,7 +1206,7 @@ fp4_gemm_rank2_cta(
         float, cutlass::float_ue4m3_t,
         TileM, TileN, 16, UMMA::Major::K, UMMA::Major::K
     >;
-    constexpr int kScaleVec = 16;
+    constexpr int kScaleVec = 4;
     auto tiled_mma = make_tiled_mma(MmaOp{});
 
     // CTA-wide accumulator tensor in TMEM (MMA-partitioned), matching CUTLASS' partition_shape_C flow.
@@ -1296,7 +1295,7 @@ fp4_gemm_rank2_cta(
 
 #if NVFP4_DEBUG_DUMP
     if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        printf("mma_scale_vec=%d opcode=block16\n", kScaleVec);
+            printf("mma_scale_vec=%d opcode=scale_vec4x\n", kScaleVec);
     }
 #endif
 
@@ -1554,7 +1553,7 @@ fp4_gemm_rank2_cta(
                     "{\n\t"
                     ".reg .pred p;\n\t"
                     "setp.ne.b32 p, 1, 0;\n\t"
-                    "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
+                    "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X "
                     "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
                     "}\n"
                     :
@@ -1567,7 +1566,7 @@ fp4_gemm_rank2_cta(
                     "{\n\t"
                     ".reg .pred p;\n\t"
                     "setp.ne.b32 p, 0, 0;\n\t"
-                    "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
+                    "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X "
                     "[%0], %1, %2, %3, [%4], [%5], p;\n\t"
                     "}\n"
                     :
