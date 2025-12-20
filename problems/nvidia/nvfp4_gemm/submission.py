@@ -217,7 +217,7 @@ __device__ unsigned int g_debug_thread_error_counts[1024];
 
 // Enable advanced tcgen05-based mainloop when non-zero.
 #ifndef USE_tcgen05_MAINLOOP
-#define USE_tcgen05_MAINLOOP 0
+#define USE_tcgen05_MAINLOOP 1
 #endif
 
 #if __CUDA_ARCH__ >= 900
@@ -1498,14 +1498,13 @@ fp4_gemm_rank2_cta(
 #endif
 
 
-        constexpr int kKBlockPacked = kKBlock / 2;  // 64 elems => 32 bytes packed
         if (warp_id == 0 && lane_id == 0) {
             #pragma unroll
             for (int kb = 0; kb < kNumKBlocks; ++kb) {
-                uint32_t a_base = cvta_to_shared_u32(a_packed_stage[stage]) + uint32_t(kb * kKBlockPacked);
-                uint32_t b_base = cvta_to_shared_u32(b_packed_stage[stage]) + uint32_t(kb * kKBlockPacked);
-                desc_a_smem_sh[kb] = make_umma_smem_desc_addr(a_base, TileKPacked, 1, 2);
-                desc_b_smem_sh[kb] = make_umma_smem_desc_addr(b_base, TileKPacked, 1, 2);
+                auto sA_kb = local_tile(sA_full, make_shape(Int<TileM>{}, Int<kKBlock>{}), make_coord(Int<0>{}, kb));
+                auto sB_kb = local_tile(sB_full, make_shape(Int<TileN>{}, Int<kKBlock>{}), make_coord(Int<0>{}, kb));
+                desc_a_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sA_kb));
+                desc_b_smem_sh[kb] = uint64_t(UMMA::make_umma_desc<UMMA::Major::K>(sB_kb));
             }
         }
         __syncthreads();

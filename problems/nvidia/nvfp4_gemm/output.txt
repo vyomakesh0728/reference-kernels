@@ -1,5 +1,3 @@
-cuda-gdb
-NVIDIA (R) cuda-gdb 13.0
 Portions Copyright (C) 2007-2025 NVIDIA Corporation
 Based on GNU gdb 14.2
 Copyright (C) 2023 Free Software Foundation, Inc.
@@ -16,27 +14,27 @@ Find the CUDA-GDB manual and other documentation resources online at:
 
 For help, type "help".
 Type "apropos word" to search for commands related to "word".
-(cuda-gdb) target cudacore /tmp/cuda_coredump_whimsical-wealthy-chipmunk.16163.1766237458
-Opening GPU coredump: /tmp/cuda_coredump_whimsical-wealthy-chipmunk.16163.1766237458
+(cuda-gdb) target cudacore /tmp/cuda_coredump_whimsical-wealthy-chipmunk.16576.1766237801
+Opening GPU coredump: /tmp/cuda_coredump_whimsical-wealthy-chipmunk.16576.1766237801
 [Current focus set to CUDA kernel 0, grid 52, block (0,0,0), thread (192,0,0), device 0, sm 142, warp 7, lane 0]
 
 CUDA Exception: Warp Out-of-range Address
-The exception was triggered at PC 0x7fd8ed807aa0  void fp4_gemm_rank2_cta<128, 256, 256>(unsigned char const*, unsigned char const*, unsigned char const*, unsigned char const*, CUtensorMap_st const*, CUtensorMap_st const*, CUtensorMap_st const*, CUtensorMap_st const*, __half*, int, int, int, int, int)  (cuda.cu:706 in _Z12process_tileILi128ELi128ELi256ELi256EEviiiiiiPPhS1_S1_S1_PKhS3_S3_S3_P6__halfS5_iiiiiiibbPA4_f inlined from cuda.cu:1061)
+The exception was triggered at PC 0x7f3a49807ad0  void fp4_gemm_rank2_cta<128, 256, 256>(unsigned char const*, unsigned char const*, unsigned char const*, unsigned char const*, CUtensorMap_st const*, CUtensorMap_st const*, CUtensorMap_st const*, CUtensorMap_st const*, __half*, int, int, int, int, int)  (cuda.cu:709 in _Z12process_tileILi128ELi128ELi256ELi256EEviiiiiiPPhS1_S1_S1_PKhS3_S3_S3_P6__halfS5_iiiiiiibbPA4_f inlined from cuda.cu:1067)
 #0  fp4_gemm_rank2_cta<128, 256, 256><<<(1,2,1),(256,1,1)>>> ()
-    at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu:692 in _Z12process_tileILi128ELi128ELi256ELi256EEviiiiiiPPhS1_S1_S1_PKhS3_S3_S3_P6__halfS5_iiiiiiibbPA4_f inlined from cuda.cu:1061
-692	                int k_packed_global = (k_base >> 1);
+    at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu:695 in _Z12process_tileILi128ELi128ELi256ELi256EEviiiiiiPPhS1_S1_S1_PKhS3_S3_S3_P6__halfS5_iiiiiiibbPA4_f inlined from cuda.cu:1067
+695	                int k_packed_global = (k_base >> 1);
 (cuda-gdb) where
 #0  fp4_gemm_rank2_cta<128, 256, 256><<<(1,2,1),(256,1,1)>>> ()
-    at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu:692 in _Z12process_tileILi128ELi128ELi256ELi256EEviiiiiiPPhS1_S1_S1_PKhS3_S3_S3_P6__halfS5_iiiiiiibbPA4_f inlined from cuda.cu:1061
+    at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu:695 in _Z12process_tileILi128ELi128ELi256ELi256EEviiiiiiPPhS1_S1_S1_PKhS3_S3_S3_P6__halfS5_iiiiiiibbPA4_f inlined from cuda.cu:1067
 (cuda-gdb) list
-687	            int   k_base_block = k_tile + (col_packed_start << 1);
-688	            half* a_dst        = a_f16_smem + row * a_stride;
-689	
-690	            for (int col_packed = col_packed_start; col_packed < col_packed_end; ++col_packed) {
-691	                int k_base          = k_base_block + ((col_packed - col_packed_start) << 1);
-692	                int k_packed_global = (k_base >> 1);
-693	
-694	                uint8_t packed = 0;
-695	                if (m_global < M && k_packed_global < K_packed) {
-696	                    int a_tile_idx = row * TileKPacked + col_packed;
+690	            int   k_base_block = k_tile + (col_packed_start << 1);
+691	            half* a_dst        = a_f16_smem + row * a_stride;
+692	
+693	            for (int col_packed = col_packed_start; col_packed < col_packed_end; ++col_packed) {
+694	                int k_base          = k_base_block + ((col_packed - col_packed_start) << 1);
+695	                int k_packed_global = (k_base >> 1);
+696	
+697	                uint8_t packed = 0;
+698	                int a_tile_idx = row * TileKPacked + col_packed;
+699	                if (m_global < M && k_packed_global < K_packed && col_packed < TileKPacked) {
 (cuda-gdb) 

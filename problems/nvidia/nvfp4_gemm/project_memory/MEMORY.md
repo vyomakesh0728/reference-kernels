@@ -46,7 +46,7 @@ trigger: auto
 - Latest patch: added NVFP4_DEBUG_DUMP decode of UMMA A/B SMEM descriptors (start/lbo/sbo/layout) and printed tmem_c base.
 - Latest patch: removed smem_layout_a/b shape+stride prints (cute::stride/shape deleted for composed layouts); kept ElementAB bits print.
 - Latest patch: added debug prints for expected UMMA descriptor lbo/sbo derived from raw SMEM strides.
-- Latest patch: UMMA A/B SMEM descriptors now built manually from raw SMEM base + TileKPacked stride (lbo=TileKPacked, sbo=1, swizzle=128B).
+- Latest patch: UMMA A/B SMEM descriptors reverted to UMMA::make_umma_desc on Layout_K_SW128_Atom with kKBlock element tiles.
 - Latest patch: removed NVFP4_DEBUG_DUMP brkpt/print from fp4_gemm_rank2_cta.
 - Latest patch: switched tcgen05.mma to scale_vec::4X (kScaleVec=4) for K=64 blockscale handling.
 - Latest patch: non-tcgen05 decode now clamps col_packed_end to TileKPacked and guards tile index to prevent OOB.
