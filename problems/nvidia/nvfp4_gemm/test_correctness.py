@@ -4,6 +4,7 @@ Correctness validation test for NVFP4 GEMM kernel.
 Runs custom kernel against reference implementation for all test cases.
 """
 import sys
+import argparse
 import torch
 from pathlib import Path
 
@@ -30,19 +31,30 @@ TEST_CASES = [
 
 def run_correctness_tests():
     """Run correctness validation for all test cases."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--only", type=int, default=None, help="Run only the Nth test case (1-based).")
+    args = parser.parse_args()
+
+    test_cases = TEST_CASES
+    if args.only is not None:
+        if args.only < 1 or args.only > len(TEST_CASES):
+            print(f"--only must be in [1, {len(TEST_CASES)}]")
+            return 1
+        test_cases = [TEST_CASES[args.only - 1]]
+
     print("=" * 80)
     print("NVFP4 GEMM Correctness Validation")
     print("=" * 80)
-    print(f"\nRunning {len(TEST_CASES)} test cases...")
+    print(f"\nRunning {len(test_cases)} test cases...")
     print(f"Tolerance: rtol=1e-03, atol=1e-03\n")
     
     passed = 0
     failed = 0
     
-    for idx, test_spec in enumerate(TEST_CASES):
+    for idx, test_spec in enumerate(test_cases):
         m, n, k, l, seed = test_spec["m"], test_spec["n"], test_spec["k"], test_spec["l"], test_spec["seed"]
         
-        print(f"\n[Test {idx+1}/{len(TEST_CASES)}] M={m}, N={n}, K={k}, L={l}")
+        print(f"\n[Test {idx+1}/{len(test_cases)}] M={m}, N={n}, K={k}, L={l}")
         print("-" * 60)
         
         try:
@@ -81,9 +93,9 @@ def run_correctness_tests():
     print("\n" + "=" * 80)
     print("SUMMARY")
     print("=" * 80)
-    print(f"Total tests: {len(TEST_CASES)}")
-    print(f"Passed:      {passed} ({100*passed//len(TEST_CASES)}%)")
-    print(f"Failed:      {failed} ({100*failed//len(TEST_CASES)}%)")
+    print(f"Total tests: {len(test_cases)}")
+    print(f"Passed:      {passed} ({100*passed//len(test_cases)}%)")
+    print(f"Failed:      {failed} ({100*failed//len(test_cases)}%)")
     
     if failed == 0:
         print("\n✓ All tests passed!")
