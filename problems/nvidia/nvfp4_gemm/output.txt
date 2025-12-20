@@ -45,4 +45,4 @@ Total tests: 1
 Passed:      0 (0%)
 Failed:      1 (100%)
 
-✗ 1 test(s) faileds
+✗ 1 test(s) failed

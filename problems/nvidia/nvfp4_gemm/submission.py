@@ -1206,6 +1206,7 @@ fp4_gemm_rank2_cta(
         float, cutlass::float_ue4m3_t,
         TileM, TileN, 16, UMMA::Major::K, UMMA::Major::K
     >;
+    constexpr int kScaleVec = 16;
     auto tiled_mma = make_tiled_mma(MmaOp{});
 
     // CTA-wide accumulator tensor in TMEM (MMA-partitioned), matching CUTLASS' partition_shape_C flow.
@@ -1291,6 +1292,12 @@ fp4_gemm_rank2_cta(
 #endif
     __syncthreads();
     #endif
+
+#if NVFP4_DEBUG_DUMP
+    if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        printf("mma_scale_vec=%d opcode=block16\n", kScaleVec);
+    }
+#endif
 
     int num_k_tiles = (K + TileK - 1) / TileK;
     int last_tile_iter = num_k_tiles - 1;
@@ -1504,6 +1511,16 @@ fp4_gemm_rank2_cta(
         if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
             printf("desc_a_smem[0]=0x%016llx\n", (unsigned long long)desc_a_smem_sh[0]);
             printf("desc_b_smem[0]=0x%016llx\n", (unsigned long long)desc_b_smem_sh[0]);
+            uint32_t tmem_sfa0 = tmem_sfa_kb_sh[0];
+            uint32_t tmem_sfb0 = tmem_sfb_kb_sh[0];
+            printf("tmem_sfa0_addr=0x%08x tmem_sfb0_addr=0x%08x\n", tmem_sfa0, tmem_sfb0);
+            uint32_t tsfa0 = 0, tsfa1 = 0;
+            uint32_t tsfb0 = 0, tsfb1 = 0;
+            cute::SM100_TMEM_LOAD_32dp32b2x::copy(tmem_sfa0, tsfa0, tsfa1);
+            cute::SM100_TMEM_LOAD_32dp32b2x::copy(tmem_sfb0, tsfb0, tsfb1);
+            cutlass::arch::fence_view_async_tmem_load();
+            printf("tmem_sfa0_b32[0..1]: 0x%08x 0x%08x\n", tsfa0, tsfa1);
+            printf("tmem_sfb0_b32[0..1]: 0x%08x 0x%08x\n", tsfb0, tsfb1);
         }
 #endif
 
