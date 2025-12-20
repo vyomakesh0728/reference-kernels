@@ -1505,9 +1505,20 @@ fp4_gemm_rank2_cta(
         if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
             printf("desc_a_smem[0]=0x%016llx\n", (unsigned long long)desc_a_smem_sh[0]);
             printf("desc_b_smem[0]=0x%016llx\n", (unsigned long long)desc_b_smem_sh[0]);
+            auto decode_desc = [](uint64_t desc, const char* tag) {
+                uint32_t start = (uint32_t)(desc & 0x3FFFu);
+                uint32_t lbo   = (uint32_t)((desc >> 16) & 0x3FFFu);
+                uint32_t sbo   = (uint32_t)((desc >> 32) & 0x3FFFu);
+                uint32_t layout = (uint32_t)((desc >> 61) & 0x7u);
+                printf("%s start=0x%04x lbo=0x%04x sbo=0x%04x layout=%u\n",
+                       tag, start, lbo, sbo, layout);
+            };
+            decode_desc(desc_a_smem_sh[0], "desc_a_smem");
+            decode_desc(desc_b_smem_sh[0], "desc_b_smem");
             uint32_t tmem_sfa0 = tmem_sfa_kb_sh[0];
             uint32_t tmem_sfb0 = tmem_sfb_kb_sh[0];
             printf("tmem_sfa0_addr=0x%08x tmem_sfb0_addr=0x%08x\n", tmem_sfa0, tmem_sfb0);
+            printf("tmem_c_base=0x%08x\n", tmem_c);
         }
 #endif
 

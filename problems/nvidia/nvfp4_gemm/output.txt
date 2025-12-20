@@ -15,6 +15,10 @@ Tolerance: rtol=1e-03, atol=1e-03
   a_ref packed bytes[0..31]: b3 78 6c e7 89 52 29 d3 c0 5f fb f5 a8 d3 ce 36 70 a3 ca 84 bb 87 fa bf 8d da 72 28 c2 00 19 51
   b_ref packed bytes[0..31]: 76 7d a9 a8 a6 25 10 1b 88 00 ef a6 7d 6c 20 73 8b c6 74 e4 ba b9 ac ce 09 ef 5f 7e 8e a4 68 c1
   Running custom kernel...
+SFA size=[32,4,1,4,4] stride=[16,4,2048,1,512] K_scales=16
+SFA kScaleChunksPerTile=4
+SFB size=[32,4,2,4,4] stride=[16,4,2048,1,512] K_scales=16
+SFB kScaleChunksPerTile=4
 idescE_kb0=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000080 tmem_sfb=0x00000090
 idescE_kb1=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000084 tmem_sfb=0x00000094
 idescE_kb2=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000088 tmem_sfb=0x00000098
@@ -36,189 +40,15 @@ desc_b_smem[0]=0x4000404000010880
 tmem_sfa0_addr=0x00000080 tmem_sfb0_addr=0x00000090
 map gm=0 gn=0 tmem_addr=0 v=7321.750000 17588.500000 -10227.250000 8000.500000
 D[0..7]: 7320.000 17584.000 -10224.000 8000.000 12256.000 13328.000 -13080.000 -5056.000
-[11:19:06.064148] coredump: Starting GPU coredump generation
-[11:19:06.064258] coredump: SM 1/148 has finished state collection
-[11:19:06.064263] coredump: SM 2/148 has finished state collection
-[11:19:06.064266] coredump: SM 3/148 has finished state collection
-[11:19:06.064267] coredump: SM 4/148 has finished state collection
-[11:19:06.064269] coredump: SM 5/148 has finished state collection
-[11:19:06.064271] coredump: SM 6/148 has finished state collection
-[11:19:06.064273] coredump: SM 7/148 has finished state collection
-[11:19:06.064275] coredump: SM 8/148 has finished state collection
-[11:19:06.064277] coredump: SM 9/148 has finished state collection
-[11:19:06.064279] coredump: SM 10/148 has finished state collection
-[11:19:06.064281] coredump: SM 11/148 has finished state collection
-[11:19:06.064283] coredump: SM 12/148 has finished state collection
-[11:19:06.064285] coredump: SM 13/148 has finished state collection
-[11:19:06.064287] coredump: SM 14/148 has finished state collection
-[11:19:06.064289] coredump: SM 15/148 has finished state collection
-[11:19:06.064291] coredump: SM 16/148 has finished state collection
-[11:19:06.064293] coredump: SM 17/148 has finished state collection
-[11:19:06.064295] coredump: SM 18/148 has finished state collection
-[11:19:06.064297] coredump: SM 19/148 has finished state collection
-[11:19:06.064299] coredump: SM 20/148 has finished state collection
-[11:19:06.064301] coredump: SM 21/148 has finished state collection
-[11:19:06.064303] coredump: SM 22/148 has finished state collection
-[11:19:06.064305] coredump: SM 23/148 has finished state collection
-[11:19:06.064307] coredump: SM 24/148 has finished state collection
-[11:19:06.064309] coredump: SM 25/148 has finished state collection
-[11:19:06.064311] coredump: SM 26/148 has finished state collection
-[11:19:06.064313] coredump: SM 27/148 has finished state collection
-[11:19:06.064315] coredump: SM 28/148 has finished state collection
-[11:19:06.064317] coredump: SM 29/148 has finished state collection
-[11:19:06.064320] coredump: SM 30/148 has finished state collection
-[11:19:06.064322] coredump: SM 31/148 has finished state collection
-[11:19:06.064323] coredump: SM 32/148 has finished state collection
-[11:19:06.064325] coredump: SM 33/148 has finished state collection
-[11:19:06.064327] coredump: SM 34/148 has finished state collection
-[11:19:06.064329] coredump: SM 35/148 has finished state collection
-[11:19:06.064331] coredump: SM 36/148 has finished state collection
-[11:19:06.064333] coredump: SM 37/148 has finished state collection
-[11:19:06.064335] coredump: SM 38/148 has finished state collection
-[11:19:06.064337] coredump: SM 39/148 has finished state collection
-[11:19:06.064338] coredump: SM 40/148 has finished state collection
-[11:19:06.064340] coredump: SM 41/148 has finished state collection
-[11:19:06.064342] coredump: SM 42/148 has finished state collection
-[11:19:06.064344] coredump: SM 43/148 has finished state collection
-[11:19:06.064345] coredump: SM 44/148 has finished state collection
-[11:19:06.064347] coredump: SM 45/148 has finished state collection
-[11:19:06.064349] coredump: SM 46/148 has finished state collection
-[11:19:06.064351] coredump: SM 47/148 has finished state collection
-[11:19:06.064352] coredump: SM 48/148 has finished state collection
-[11:19:06.064354] coredump: SM 49/148 has finished state collection
-[11:19:06.064356] coredump: SM 50/148 has finished state collection
-[11:19:06.064358] coredump: SM 51/148 has finished state collection
-[11:19:06.064360] coredump: SM 52/148 has finished state collection
-[11:19:06.064362] coredump: SM 53/148 has finished state collection
-[11:19:06.064364] coredump: SM 54/148 has finished state collection
-[11:19:06.064366] coredump: SM 55/148 has finished state collection
-[11:19:06.064368] coredump: SM 56/148 has finished state collection
-[11:19:06.064370] coredump: SM 57/148 has finished state collection
-[11:19:06.064372] coredump: SM 58/148 has finished state collection
-[11:19:06.064374] coredump: SM 59/148 has finished state collection
-[11:19:06.064375] coredump: SM 60/148 has finished state collection
-[11:19:06.064378] coredump: SM 61/148 has finished state collection
-[11:19:06.064382] coredump: SM 62/148 has finished state collection
-[11:19:06.064384] coredump: SM 63/148 has finished state collection
-[11:19:06.064387] coredump: SM 64/148 has finished state collection
-[11:19:06.064390] coredump: SM 65/148 has finished state collection
-[11:19:06.064393] coredump: SM 66/148 has finished state collection
-[11:19:06.064396] coredump: SM 67/148 has finished state collection
-[11:19:06.064398] coredump: SM 68/148 has finished state collection
-[11:19:06.064402] coredump: SM 69/148 has finished state collection
-[11:19:06.064403] coredump: SM 70/148 has finished state collection
-[11:19:06.064405] coredump: SM 71/148 has finished state collection
-[11:19:06.064407] coredump: SM 72/148 has finished state collection
-[11:19:06.064409] coredump: SM 73/148 has finished state collection
-[11:19:06.064412] coredump: SM 74/148 has finished state collection
-[11:19:06.064414] coredump: SM 75/148 has finished state collection
-[11:19:06.064415] coredump: SM 76/148 has finished state collection
-[11:19:06.064419] coredump: SM 77/148 has finished state collection
-[11:19:06.064420] coredump: SM 78/148 has finished state collection
-[11:19:06.064422] coredump: SM 79/148 has finished state collection
-[11:19:06.064425] coredump: SM 80/148 has finished state collection
-[11:19:06.064427] coredump: SM 81/148 has finished state collection
-[11:19:06.064429] coredump: SM 82/148 has finished state collection
-[11:19:06.064432] coredump: SM 83/148 has finished state collection
-[11:19:06.064435] coredump: SM 84/148 has finished state collection
-[11:19:06.064438] coredump: SM 85/148 has finished state collection
-[11:19:06.064440] coredump: SM 86/148 has finished state collection
-[11:19:06.064442] coredump: SM 87/148 has finished state collection
-[11:19:06.064446] coredump: SM 88/148 has finished state collection
-[11:19:06.064448] coredump: SM 89/148 has finished state collection
-[11:19:06.064449] coredump: SM 90/148 has finished state collection
-[11:19:06.064451] coredump: SM 91/148 has finished state collection
-[11:19:06.064455] coredump: SM 92/148 has finished state collection
-[11:19:06.064457] coredump: SM 93/148 has finished state collection
-[11:19:06.064459] coredump: SM 94/148 has finished state collection
-[11:19:06.064461] coredump: SM 95/148 has finished state collection
-[11:19:06.064464] coredump: SM 96/148 has finished state collection
-[11:19:06.064466] coredump: SM 97/148 has finished state collection
-[11:19:06.064468] coredump: SM 98/148 has finished state collection
-[11:19:06.064470] coredump: SM 99/148 has finished state collection
-[11:19:06.064473] coredump: SM 100/148 has finished state collection
-[11:19:06.064475] coredump: SM 101/148 has finished state collection
-[11:19:06.064476] coredump: SM 102/148 has finished state collection
-[11:19:06.064480] coredump: SM 103/148 has finished state collection
-[11:19:06.064481] coredump: SM 104/148 has finished state collection
-[11:19:06.064483] coredump: SM 105/148 has finished state collection
-[11:19:06.064487] coredump: SM 106/148 has finished state collection
-[11:19:06.064489] coredump: SM 107/148 has finished state collection
-[11:19:06.064493] coredump: SM 108/148 has finished state collection
-[11:19:06.064498] coredump: SM 109/148 has finished state collection
-[11:19:06.064501] coredump: SM 110/148 has finished state collection
-[11:19:06.064503] coredump: SM 111/148 has finished state collection
-[11:19:06.064508] coredump: SM 112/148 has finished state collection
-[11:19:06.064510] coredump: SM 113/148 has finished state collection
-[11:19:06.064514] coredump: SM 114/148 has finished state collection
-[11:19:06.064518] coredump: SM 115/148 has finished state collection
-[11:19:06.064520] coredump: SM 116/148 has finished state collection
-[11:19:06.064526] coredump: SM 117/148 has finished state collection
-[11:19:06.064530] coredump: SM 118/148 has finished state collection
-[11:19:06.064532] coredump: SM 119/148 has finished state collection
-[11:19:06.064535] coredump: SM 120/148 has finished state collection
-[11:19:06.064539] coredump: SM 121/148 has finished state collection
-[11:19:06.064541] coredump: SM 122/148 has finished state collection
-[11:19:06.064545] coredump: SM 123/148 has finished state collection
-[11:19:06.064548] coredump: SM 124/148 has finished state collection
-[11:19:06.064552] coredump: SM 125/148 has finished state collection
-[11:19:06.064554] coredump: SM 126/148 has finished state collection
-[11:19:06.064559] coredump: SM 127/148 has finished state collection
-[11:19:06.064562] coredump: SM 128/148 has finished state collection
-[11:19:06.064566] coredump: SM 129/148 has finished state collection
-[11:19:06.064569] coredump: SM 130/148 has finished state collection
-[11:19:06.064574] coredump: SM 131/148 has finished state collection
-[11:19:06.064576] coredump: SM 132/148 has finished state collection
-[11:19:06.064580] coredump: SM 133/148 has finished state collection
-[11:19:06.064584] coredump: SM 134/148 has finished state collection
-[11:19:06.064588] coredump: SM 135/148 has finished state collection
-[11:19:06.064591] coredump: SM 136/148 has finished state collection
-[11:19:06.064595] coredump: SM 137/148 has finished state collection
-[11:19:06.064598] coredump: SM 138/148 has finished state collection
-[11:19:06.064600] coredump: SM 139/148 has finished state collection
-[11:19:06.064605] coredump: SM 140/148 has finished state collection
-[11:19:06.064608] coredump: SM 141/148 has finished state collection
-[11:19:06.064611] coredump: SM 142/148 has finished state collection
-[11:19:06.064615] coredump: SM 143/148 has finished state collection
-[11:19:06.069650] coredump: SM 144/148 has finished state collection
-[11:19:06.069662] coredump: SM 145/148 has finished state collection
-[11:19:06.069665] coredump: SM 146/148 has finished state collection
-[11:19:06.069667] coredump: SM 147/148 has finished state collection
-[11:19:06.069670] coredump: SM 148/148 has finished state collection
-[11:19:06.069679] coredump: Device 1/1 has finished state collection
-[11:19:06.069749] coredump: Calculating ELF file layout
-[11:19:06.069926] coredump: ELF file layout calculated
-[11:19:06.069930] coredump: Writing ELF file to /tmp/cuda_coredump_whimsical-wealthy-chipmunk.9618.1766229450
-[11:19:06.069946] coredump: Current working directory is /root/reference-kernels/problems/nvidia/nvfp4_gemm
-[11:19:06.070026] coredump: Writing out global memory (0 bytes)
-[11:19:06.070029] coredump: Writing out device table
-[11:19:06.104035] coredump: Writing out metadata
-[11:19:06.104059] coredump: Finalizing
-[11:19:06.104108] coredump: Writing done
-[11:19:06.104113] coredump: All done (took 00s)
-Killed
+  ref D[0,0..3]: 932.000 -1.000 -531.000 266.500
+  Validating against reference...
+  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32768 ERROR AT (0, 0, 0): 7320.0 932.0 ERROR AT (0, 1, 0): 17584.0 -1.0 ERROR AT (0, 2, 0): -10224.0 -531.0 ERROR AT (0, 3, 0): 8000.0 266.5 ERROR AT (0, 4, 0): 12256.0 -712.0 ... and 32763 more mismatched elements.
 
+================================================================================
+SUMMARY
+================================================================================
+Total tests: 1
+Passed:      0 (0%)
+Failed:      1 (100%)
 
-For help, type "help".
-Type "apropos word" to search for commands related to "word".
-(cuda-gdb) target cudacore /tmp/cuda_coredump_whimsical-wealthy-chipmunk.9618.1766229450
-Opening GPU coredump: /tmp/cuda_coredump_whimsical-wealthy-chipmunk.9618.1766229450
-[Current focus set to CUDA kernel 0, grid 52, block (0,1,0), thread (96,0,0), device 0, sm 143, warp 0, lane 0]
-#0  0x00007feba78090b0 in fp4_gemm_rank2_cta<128, 256, 128><<<(1,2,1),(128,1,1)>>> ()
-    at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu:106 in _Z22load_sf_tile_byte_2048ILi256EEhPKhii inlined from cuda.cu:1348
-106	    return sf_tile[rest_k * 512 + mm32 * 16 + packed16];
-(cuda-gdb) where
-#0  0x00007feba78090b0 in fp4_gemm_rank2_cta<128, 256, 128><<<(1,2,1),(128,1,1)>>> ()
-    at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu:106 in _Z22load_sf_tile_byte_2048ILi256EEhPKhii inlined from cuda.cu:1348
-(cuda-gdb) list
-101	    // scale_col: 0..15 => rest_k in [0,3], kk4 in [0,3]
-102	    int rest_k = scale_col >> 2;
-103	    int kk4    = scale_col & 3;
-104	    int packed16 = (mm4 << 2) | kk4;
-105	    // 512B chunk per rest_k, 16B per mm32 row
-106	    return sf_tile[rest_k * 512 + mm32 * 16 + packed16];
-107	}
-108	
-109	// Hardware FP4 decode helper using cvt.rn.f16x2.e2m1x2, adapted from gau.py.
-110	// Decodes a byte containing two FP4 values (float4_e2m1fn_x2) into a half2.
-(cuda-gdb) 
+✗ 1 test(s) failed
