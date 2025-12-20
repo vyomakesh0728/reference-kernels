@@ -25,14 +25,14 @@ a_stride_k=1 a_stride_m=128
 b_stride_k=1 b_stride_n=128
 a_packed_stage[0..3]: b3 78 6c e7
 b_packed_stage[0..3]: 76 7d a9 a8
-sA_full k[0..7], m0: 03 0f 07 0e 05 0c 00 0d
-sB_full k[0..7], n0: 06 08 09 00 07 05 00 09
-desc_a_smem[0]=0x8000402000010080
-desc_b_smem[0]=0x8000402000010880
-tmem_addr=0 tmem_vals=-9718.250000 -1074.000000 7221.000000 2587.750000
-D[0..7]: -9720.000 -1074.000 7220.000 2588.000 12984.000 38720.000 -1096.000 5368.000
+sA_full k[0..7], m0: 03 0b 08 07 0c 06 07 0e
+sB_full k[0..7], n0: 06 07 0d 07 09 0a 08 0a
+desc_a_smem[0]=0x8000404000010080
+desc_b_smem[0]=0x8000404000010880
+tmem_addr=0 tmem_vals=-4030.250000 -12794.000000 5541.000000 9507.750000
+D[0..7]: -4030.000 -12792.000 5540.000 9504.000 3470.000 496.000 -656.000 -48928.000
   Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32768 ERROR AT (0, 0, 0): -9720.0 932.0 ERROR AT (0, 1, 0): -1074.0 -1.0 ERROR AT (0, 2, 0): 7220.0 -531.0 ERROR AT (0, 3, 0): 2588.0 266.5 ERROR AT (0, 4, 0): 12984.0 -712.0 ... and 32763 more mismatched elements.
+  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32768 ERROR AT (0, 0, 0): -4030.0 932.0 ERROR AT (0, 1, 0): -12792.0 -1.0 ERROR AT (0, 2, 0): 5540.0 -531.0 ERROR AT (0, 3, 0): 9504.0 266.5 ERROR AT (0, 4, 0): 3470.0 -712.0 ... and 32763 more mismatched elements.
 
 ================================================================================
 SUMMARY
