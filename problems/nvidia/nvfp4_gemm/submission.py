@@ -1603,21 +1603,21 @@ fp4_gemm_rank2_cta(
                         uint32_t v0, v1, v2, v3;
                         cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_c + tmem_addr, v0, v1, v2, v3);
                         cutlass::arch::fence_view_async_tmem_load();
-#if NVFP4_DEBUG_DUMP
-                        if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 &&
-                            w == 0 && s == 0 && i == 0) {
-                            printf("tmem_addr=%u tmem_vals=%f %f %f %f\n",
-                                   tmem_addr,
-                                   __uint_as_float(v0), __uint_as_float(v1),
-                                   __uint_as_float(v2), __uint_as_float(v3));
-                        }
-#endif
 
                         // Global memory N coordinate (row-major):
                         // This must match the mathematical output layout used by reference.py.
                         // NOTE: the lane/bank-group swizzle in sm100_bf16_gemm.cuh is for SMEM/TMA layout;
                         // when writing directly to global memory we use the logical N coordinate.
                         int gn = n_tile + int(w * BLOCK_N + s * STORE_BLOCK_N + i * kNumElemsPerBankGroup);
+#if NVFP4_DEBUG_DUMP
+                        if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 &&
+                            w == 0 && s == 0 && i == 0) {
+                            printf("map gm=%d gn=%d tmem_addr=%u v=%f %f %f %f\n",
+                                   gm, gn, tmem_addr,
+                                   __uint_as_float(v0), __uint_as_float(v1),
+                                   __uint_as_float(v2), __uint_as_float(v3));
+                        }
+#endif
 
                         // Write to global memory
                         if (full_tile) {

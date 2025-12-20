@@ -25,8 +25,8 @@ a_stride_k=1 a_stride_m=128
 b_stride_k=1 b_stride_n=128
 a_packed_stage[0..3]: b3 78 6c e7
 b_packed_stage[0..3]: 76 7d a9 a8
-sA_full k[0..7], m0: 03 0b 08 07 0c 06 07 0e
-sB_full k[0..7], n0: 06 07 0d 07 09 0a 08 0a
+sA_full kbyte[0..7], m0: b3 78 6c e7 89 52 29 d3
+sB_full kbyte[0..7], n0: 76 7d a9 a8 a6 25 10 1b
 desc_a_smem[0]=0x4000404000010080
 desc_b_smem[0]=0x4000404000010880
 tmem_addr=0 tmem_vals=8697.750000 -6123.500000 -283.250000 17688.500000

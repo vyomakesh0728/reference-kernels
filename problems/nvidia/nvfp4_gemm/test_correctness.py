@@ -12,7 +12,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from reference import generate_input, check_implementation, to_blocked
+from reference import generate_input, check_implementation, to_blocked, ref_kernel
 from submission import custom_kernel
 from utils import set_seed
 
@@ -88,6 +88,10 @@ def run_correctness_tests():
             torch.cuda.synchronize()
             output = custom_kernel(data_copy)
             torch.cuda.synchronize()
+            if args.debug_umma:
+                ref_out = ref_kernel(data)
+                ref_vals = ref_out[0, 0:4, 0].detach().cpu().tolist()
+                print("  ref D[0,0..3]:", " ".join(f"{v:.3f}" for v in ref_vals))
             
             # Check against reference
             print("  Validating against reference...")
