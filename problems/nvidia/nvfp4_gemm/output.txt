@@ -44,7 +44,15 @@ Tolerance: rtol=1e-03, atol=1e-03
   Generating input data...
   to_blocked(sfa_ref_cpu)[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
   to_blocked(sfb_ref_cpu)[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
-  ✗ ERROR: unsupported format string passed to list.__format__
+  a_ref packed bytes[0..31]: b3 78 6c e7 89 52 29 d3 c0 5f fb f5 a8 d3 ce 36 70 a3 ca 84 bb 87 fa bf 8d da 72 28 c2 00 19 51
+  b_ref packed bytes[0..31]: 76 7d a9 a8 a6 25 10 1b 88 00 ef a6 7d 6c 20 73 8b c6 74 e4 ba b9 ac ce 09 ef 5f 7e 8e a4 68 c1
+  Running custom kernel...
+idescE=0x0820048000000000
+sfa_stage[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
+sfa_compact[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
+sfb_compact[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
+  Validating against reference...
+  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32766 ERROR AT (0, 0, 0): -40928.0 932.0 ERROR AT (0, 1, 0): -28480.0 -1.0 ERROR AT (0, 2, 0): inf -531.0 ERROR AT (0, 3, 0): -7560.0 266.5 ERROR AT (0, 4, 0): -44128.0 -712.0 ... and 32761 more mismatched elements.
 
 ================================================================================
 SUMMARY

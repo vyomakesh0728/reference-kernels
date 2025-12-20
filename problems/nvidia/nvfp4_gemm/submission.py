@@ -1445,6 +1445,12 @@ fp4_gemm_rank2_cta(
             }
         }
         __syncthreads();
+#if NVFP4_DEBUG_DUMP
+        if (warp_id == 0 && lane_id == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+            printf("desc_a_smem[0]=0x%016llx\n", (unsigned long long)desc_a_smem_sh[0]);
+            printf("desc_b_smem[0]=0x%016llx\n", (unsigned long long)desc_b_smem_sh[0]);
+        }
+#endif
 
         auto mma_kb = [&](int kb, bool accum) {
             uint64_t desc_a_smem = desc_a_smem_sh[kb];
