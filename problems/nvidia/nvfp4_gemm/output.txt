@@ -18,8 +18,197 @@ For help, type "help".
 Type "apropos word" to search for commands related to "word"...
 Reading symbols from python3...
 (No debugging symbols found in python3)
-(cuda-gdb) set cuda break_on_launch kernel
-Undefined item: "kernel".
-(cuda-gdb) set cuda kernel_name_regex fp4_gemm_rank2_cta
-Undefined set cuda command: "kernel_name_regex fp4_gemm_rank2_cta".  Try "help set cuda".
+(cuda-gdb) run
+Starting program: /usr/bin/python3 test_correctness.py --only 1 --debug-umma
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/usr/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7fff439ff640 (LWP 14029)]
+[New Thread 0x7fff431fe640 (LWP 14030)]
+[New Thread 0x7fff409fd640 (LWP 14031)]
+[New Thread 0x7fff3e1fc640 (LWP 14032)]
+[New Thread 0x7fff3b9fb640 (LWP 14033)]
+[New Thread 0x7fff391fa640 (LWP 14034)]
+[New Thread 0x7fff369f9640 (LWP 14035)]
+[New Thread 0x7fff361f8640 (LWP 14036)]
+[New Thread 0x7fff319f7640 (LWP 14037)]
+[New Thread 0x7fff2f1f6640 (LWP 14038)]
+[New Thread 0x7fff2c9f5640 (LWP 14039)]
+[New Thread 0x7fff2a1f4640 (LWP 14040)]
+[New Thread 0x7fff279f3640 (LWP 14041)]
+[New Thread 0x7fff251f2640 (LWP 14042)]
+[New Thread 0x7fff229f1640 (LWP 14043)]
+[New Thread 0x7fff201f0640 (LWP 14044)]
+[New Thread 0x7fff1d9ef640 (LWP 14045)]
+[New Thread 0x7fff1b1ee640 (LWP 14046)]
+[New Thread 0x7fff189ed640 (LWP 14047)]
+[New Thread 0x7fff161ec640 (LWP 14048)]
+[New Thread 0x7fff139eb640 (LWP 14049)]
+[New Thread 0x7fff111ea640 (LWP 14050)]
+[New Thread 0x7fff0e9e9640 (LWP 14051)]
+[New Thread 0x7fff0c1e8640 (LWP 14052)]
+[New Thread 0x7fff099e7640 (LWP 14053)]
+[New Thread 0x7fff071e6640 (LWP 14054)]
+[New Thread 0x7fff049e5640 (LWP 14055)]
+[New Thread 0x7fff021e4640 (LWP 14056)]
+[New Thread 0x7ffeff9e3640 (LWP 14057)]
+[New Thread 0x7ffef85dc640 (LWP 14058)]
+[New Thread 0x7ffef730b640 (LWP 14059)]
+[Thread 0x7fff1b1ee640 (LWP 14046) exited]
+[Thread 0x7ffeff9e3640 (LWP 14057) exited]
+[Thread 0x7fff021e4640 (LWP 14056) exited]
+[Thread 0x7fff049e5640 (LWP 14055) exited]
+[Thread 0x7fff071e6640 (LWP 14054) exited]
+[Thread 0x7fff099e7640 (LWP 14053) exited]
+[Thread 0x7fff0c1e8640 (LWP 14052) exited]
+[Thread 0x7fff0e9e9640 (LWP 14051) exited]
+[Thread 0x7fff111ea640 (LWP 14050) exited]
+[Thread 0x7fff139eb640 (LWP 14049) exited]
+[Thread 0x7fff161ec640 (LWP 14048) exited]
+[Thread 0x7fff189ed640 (LWP 14047) exited]
+[Thread 0x7fff1d9ef640 (LWP 14045) exited]
+[Thread 0x7fff201f0640 (LWP 14044) exited]
+[Thread 0x7fff229f1640 (LWP 14043) exited]
+[Thread 0x7fff251f2640 (LWP 14042) exited]
+[Thread 0x7fff279f3640 (LWP 14041) exited]
+[Thread 0x7fff2a1f4640 (LWP 14040) exited]
+[Thread 0x7fff2c9f5640 (LWP 14039) exited]
+[Thread 0x7fff2f1f6640 (LWP 14038) exited]
+[Thread 0x7fff319f7640 (LWP 14037) exited]
+[Thread 0x7fff361f8640 (LWP 14036) exited]
+[Thread 0x7fff369f9640 (LWP 14035) exited]
+[Thread 0x7fff391fa640 (LWP 14034) exited]
+[Thread 0x7fff3b9fb640 (LWP 14033) exited]
+[Thread 0x7fff3e1fc640 (LWP 14032) exited]
+[Thread 0x7fff409fd640 (LWP 14031) exited]
+[Thread 0x7fff431fe640 (LWP 14030) exited]
+[Thread 0x7fff439ff640 (LWP 14029) exited]
+[Detaching after fork from child process 14060]
+================================================================================
+NVFP4 GEMM Correctness Validation
+================================================================================
+
+Running 1 test cases...
+Tolerance: rtol=1e-03, atol=1e-03
+
+
+[Test 1/1] M=128, N=256, K=256, L=1
+------------------------------------------------------------
+  Generating input data...
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+whimsical-wealthy-chipmunk: CUDA coredump is not supported with other CUDA debugging tools. Disabling coredump.
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+warning: Cuda Driver error detected: No CUDA context is current to the calling thread
+warning: Cuda Driver error detected: Returning 201 (CUDA_ERROR_INVALID_CONTEXT) from cuCtxGetDevice_v2
+[New Thread 0x7ffeff9e3640 (LWP 14068)]
+  to_blocked(sfa_ref_cpu)[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
+  to_blocked(sfb_ref_cpu)[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
+  a_ref packed bytes[0..31]: b3 78 6c e7 89 52 29 d3 c0 5f fb f5 a8 d3 ce 36 70 a3 ca 84 bb 87 fa bf 8d da 72 28 c2 00 19 51
+  b_ref packed bytes[0..31]: 76 7d a9 a8 a6 25 10 1b 88 00 ef a6 7d 6c 20 73 8b c6 74 e4 ba b9 ac ce 09 ef 5f 7e 8e a4 68 c1
+  Running custom kernel...
+[Detaching after vfork from child process 14069]
+[Detaching after vfork from child process 14070]
+[Detaching after vfork from child process 14071]
+SFA size=[32,4,1,4,4] stride=[16,4,2048,1,512] K_scales=16
+SFA kScaleChunksPerTile=4
+SFB size=[32,4,2,4,4] stride=[16,4,2048,1,512] K_scales=16
+SFB kScaleChunksPerTile=4
+
+Thread 1 "python3" received signal SIGTRAP, Trace/breakpoint trap.
+[Switching focus to CUDA kernel 0, grid 52, block (0,0,0), thread (0,0,0), device 0, sm 142, warp 1, lane 0]
+0x00007ffcb9805d60 in fp4_gemm_rank2_cta<128, 256, 128><<<(1,2,1),(128,1,1)>>> () at /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu:897
+897	        asm volatile("brkpt;");
+(cuda-gdb) info cuda threads
+  BlockIdx ThreadIdx To BlockIdx ThreadIdx Count                 PC                                                                   Filename  Line 
+Kernel 0
+*  (0,0,0)   (0,0,0)     (0,0,0)  (31,0,0)    32 0x00007ffcb9805d60 /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu   897 
+   (0,0,0)  (32,0,0)     (0,0,0)  (63,0,0)    32 0x00007ffcb9806380 /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu   975 
+   (0,0,0)  (64,0,0)     (0,0,0)  (95,0,0)    32 0x00007ffcb98063c0 /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu   982 
+   (0,0,0)  (96,0,0)     (0,0,0) (127,0,0)    32 0x00007ffcb9806390 /root/.cache/torch_extensions/py310_cu130/nvfp4_gemm_sm100_ptx_dbg/cuda.cu   975 
+(cuda-gdb) print blockIdx 
+$1 = {x = 0, y = 0, z = 0}
+(cuda-gdb) print threadIdx
+$2 = {x = 0, y = 0, z = 0}
+(cuda-gdb) print m_tile print n_tile print k_tile print stage
+No symbol "m_tile" in current context.
+(cuda-gdb) print m_tile
+No symbol "m_tile" in current context.
+(cuda-gdb) print n_tile
+No symbol "n_tile" in current context.
+(cuda-gdb) print k_tile
+No symbol "k_tile" in current context.
+(cuda-gdb) print stage
+No symbol "stage" in current context.
+(cuda-gdb) print tmem_c
+No symbol "tmem_c" in current context.
+(cuda-gdb) print desc_a_smem_sh[0
+No symbol "desc_a_smem_sh" in current context.
+(cuda-gdb) print desc_b_smem_sh[0]
+No symbol "desc_b_smem_sh" in current context.
+(cuda-gdb) continue
+Continuing.
+idescE_kb0=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000080 tmem_sfb=0x00000090
+idescE_kb1=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000084 tmem_sfb=0x00000094
+idescE_kb2=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000088 tmem_sfb=0x00000098
+idescE_kb3=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x0000008c tmem_sfb=0x0000009c
+mma_scale_vec=16 opcode=block16
+sfa_stage[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
+sfa_compact[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
+sfb_compact[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
+a_smem_base=0x00000800 a_k1=0x00000801 a_m1=0x00000880
+b_smem_base=0x00008800 b_k1=0x00008801 b_n1=0x00008880
+a_stride_k=1 a_stride_m=128
+b_stride_k=1 b_stride_n=128
+ElementAB bits=4 TileKPacked=128
+a_packed_stage[0..3]: b3 78 6c e7
+b_packed_stage[0..3]: 76 7d a9 a8
+sA_full k[0..7], m0: 03 0b 08 07 0c 06 07 0e
+sB_full k[0..7], n0: 06 07 0d 07 09 0a 08 0a
+desc_a_smem[0]=0x4000400000080080
+desc_b_smem[0]=0x4000400000080880
+desc_a_smem start=0x0080 lbo=0x0008 sbo=0x0000 layout=2
+desc_b_smem start=0x0880 lbo=0x0008 sbo=0x0000 layout=2
+desc_expected_a lbo=0x0008 sbo=0x0000
+desc_expected_b lbo=0x0008 sbo=0x0000
+tmem_sfa0_addr=0x00000080 tmem_sfb0_addr=0x00000090
+tmem_c_base=0x00000000
+map gm=0 gn=0 tmem_addr=0 v=8697.750000 -6123.500000 -283.250000 17688.500000
+D[0..7]: 8696.000 -6124.000 -283.250 17696.000 -13000.000 -10336.000 -7964.000 -24640.000
+  ref D[0,0..3]: 932.000 -1.000 -531.000 266.500
+  Validating against reference...
+  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32767 ERROR AT (0, 0, 0): 8696.0 932.0 ERROR AT (0, 1, 0): -6124.0 -1.0 ERROR AT (0, 2, 0): -283.25 -531.0 ERROR AT (0, 3, 0): 17696.0 266.5 ERROR AT (0, 4, 0): -13000.0 -712.0 ... and 32762 more mismatched elements.
+
+================================================================================
+SUMMARY
+================================================================================
+Total tests: 1
+Passed:      0 (0%)
+Failed:      1 (100%)
+
+✗ 1 test(s) failed
+[Thread 0x7ffef730b640 (LWP 14059) exited]
+[Thread 0x7ffeff9e3640 (LWP 14068) exited]
+[Thread 0x7ffff7c5d480 (LWP 14025) exited]
+[Thread 0x7ffef85dc640 (LWP 14058) exited]
+[New process 14025]
+[Inferior 1 (process 14025) exited with code 01]
+(cuda-gdb) print tmem_addr
+No symbol "tmem_addr" in current context.
+(cuda-gdb) print gm
+No symbol "gm" in current context.
+(cuda-gdb) print gn
+No symbol "gn" in current context.
 (cuda-gdb) 
