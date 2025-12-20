@@ -217,7 +217,7 @@ __device__ unsigned int g_debug_thread_error_counts[1024];
 
 // Enable advanced tcgen05-based mainloop when non-zero.
 #ifndef USE_tcgen05_MAINLOOP
-#define USE_tcgen05_MAINLOOP 1
+#define USE_tcgen05_MAINLOOP 0
 #endif
 
 #if __CUDA_ARCH__ >= 900
