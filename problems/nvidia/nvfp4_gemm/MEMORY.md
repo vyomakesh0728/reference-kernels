@@ -1,0 +1,2 @@
+Split‑K is implemented with a float buffer + reduction, and correctness is still 10/10. Current geom mean is 23.992 µs (still far from target).
+   Do you want me to go all‑in and mirror top.py’s kernel selection (SWAP_AB, N‑major, BLOCK_N=64, split‑K, and their launch structure) even if it means a larger rewrite?
