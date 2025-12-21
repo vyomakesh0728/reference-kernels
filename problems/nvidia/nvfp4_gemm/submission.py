@@ -249,6 +249,7 @@ struct SHAPE {
 
 struct NUM {
     static constexpr char x16[] = ".x16";
+    static constexpr char x8[] = ".x8";
 };
 
 template <const char *Shape, const char *Num>
@@ -273,8 +274,26 @@ __device__ __forceinline__ void tcgen05_ld_64regs(float *tmp, int row, int col) 
                 : "r"((row << 16) | col), "C"(Shape), "C"(Num));
 }
 
+template <const char *Shape, const char *Num>
+__device__ __forceinline__ void tcgen05_ld_32regs(float *tmp, int row, int col) {
+    asm volatile("tcgen05.ld.sync.aligned%33%34.b32 "
+                "{ %0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
+                "  %8,  %9, %10, %11, %12, %13, %14, %15, "
+                " %16, %17, %18, %19, %20, %21, %22, %23, "
+                " %24, %25, %26, %27, %28, %29, %30, %31}, [%32];"
+                : "=f"(tmp[ 0]), "=f"(tmp[ 1]), "=f"(tmp[ 2]), "=f"(tmp[ 3]), "=f"(tmp[ 4]), "=f"(tmp[ 5]), "=f"(tmp[ 6]), "=f"(tmp[ 7]),
+                  "=f"(tmp[ 8]), "=f"(tmp[ 9]), "=f"(tmp[10]), "=f"(tmp[11]), "=f"(tmp[12]), "=f"(tmp[13]), "=f"(tmp[14]), "=f"(tmp[15]),
+                  "=f"(tmp[16]), "=f"(tmp[17]), "=f"(tmp[18]), "=f"(tmp[19]), "=f"(tmp[20]), "=f"(tmp[21]), "=f"(tmp[22]), "=f"(tmp[23]),
+                  "=f"(tmp[24]), "=f"(tmp[25]), "=f"(tmp[26]), "=f"(tmp[27]), "=f"(tmp[28]), "=f"(tmp[29]), "=f"(tmp[30]), "=f"(tmp[31])
+                : "r"((row << 16) | col), "C"(Shape), "C"(Num));
+}
+
 __device__ __forceinline__ void tcgen05_ld_16x256bx16(float *tmp, int row, int col) {
     tcgen05_ld_64regs<SHAPE::_16x256b, NUM::x16>(tmp, row, col);
+}
+
+__device__ __forceinline__ void tcgen05_ld_16x256bx8(float *tmp, int row, int col) {
+    tcgen05_ld_32regs<SHAPE::_16x256b, NUM::x8>(tmp, row, col);
 }
 
 #ifndef NDEBUG
@@ -471,6 +490,26 @@ __device__ __forceinline__ void tma_load_3d_cta_no_arrive_cache(void* smem_ptr,
           "r"(coord0),
           "r"(coord1),
           "r"(coord2),
+          "l"(cache_policy)
+        : "memory"
+    );
+}
+
+__device__ __forceinline__ void cp_async_bulk_shared(void* smem_ptr,
+                                                     const void* gmem_ptr,
+                                                     uint32_t bytes,
+                                                     uint64_t* mbar,
+                                                     uint64_t cache_policy) {
+    uint32_t smem_addr = cvta_to_shared_u32(smem_ptr);
+    uint32_t mbar_addr = cvta_to_shared_u32(mbar);
+    asm volatile(
+        "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint "
+        "[%0], [%1], %2, [%3], %4;\n"
+        :
+        : "r"(smem_addr),
+          "l"(gmem_ptr),
+          "r"(bytes),
+          "r"(mbar_addr),
           "l"(cache_policy)
         : "memory"
     );
@@ -682,7 +721,10 @@ __device__ __forceinline__ void prefetch_tile(
     uint64_t* mbar,
     const CUtensorMap* desc_A, const CUtensorMap* desc_B,
     const CUtensorMap* desc_SFA, const CUtensorMap* desc_SFB,
-    uint64_t cache_A, uint64_t cache_B
+    uint64_t cache_A, uint64_t cache_B,
+    const uint8_t* __restrict__ SFA_packed,
+    const uint8_t* __restrict__ SFB_packed,
+    int K
 ) {
     constexpr int TileKPacked = TileK / 2;
     // SfaBoxK is 128 for SWIZZLE_128B (Rank-2 GEMM now uses SWIZZLE_128B)
@@ -727,20 +769,17 @@ __device__ __forceinline__ void prefetch_tile(
                 );
             }
             if (valid_sfa) {
-                // SFA comes in as the permuted physical layout (32, 4, rest_m, 4, rest_k).
-                // The TMA descriptor exposes the natural contiguous 512B panel as (packed16, mm32).
-                #pragma unroll
-                for (int t = 0; t < 4; ++t) {
-                    int rest_k_idx = k_tile_idx_sfa * 4 + t;
-                    tma_load_4d_cta_no_arrive(
-                        sfa_stage[stage] + t * 512,
-                        desc_SFA,
-                        0, 0,
-                        static_cast<uint32_t>(m_block_sfa),
-                        static_cast<uint32_t>(rest_k_idx),
-                        mbar_stage(mbar, stage)
-                    );
-                }
+                int rest_k = K / 16 / 4;
+                int off_k = k_tile_base;
+                const uint8_t* sfa_src = SFA_packed +
+                    (m_block_sfa * rest_k + (off_k / (16 * 4))) * 512;
+                cp_async_bulk_shared(
+                    sfa_stage[stage],
+                    sfa_src,
+                    2048,
+                    mbar_stage(mbar, stage),
+                    cache_A
+                );
             }
 
             // --- TMA Load B (N x K) ---
@@ -768,20 +807,17 @@ __device__ __forceinline__ void prefetch_tile(
                 );
             }
             if (valid_sfb) {
-                // SFB comes in as the permuted physical layout (32, 4, rest_n, 4, rest_k).
-                // Use the same packed16×mm32 512B box as SFA.
-                #pragma unroll
-                for (int t = 0; t < 4; ++t) {
-                    int rest_k_idx = k_tile_idx_sfb * 4 + t;
-                    tma_load_4d_cta_no_arrive(
-                        sfb_stage[stage] + t * 512,
-                        desc_SFB,
-                        0, 0,
-                        static_cast<uint32_t>(n_block_sfb),
-                        static_cast<uint32_t>(rest_k_idx),
-                        mbar_stage(mbar, stage)
-                    );
-                }
+                int rest_k = K / 16 / 4;
+                int off_k = k_tile_base;
+                const uint8_t* sfb_src = SFB_packed +
+                    (n_block_sfb * rest_k + (off_k / (16 * 4))) * 512;
+                cp_async_bulk_shared(
+                    sfb_stage[stage],
+                    sfb_src,
+                    2048,
+                    mbar_stage(mbar, stage),
+                    cache_B
+                );
             }
 
             // Arrive handled before issuing bulk tensor copies.
@@ -1056,11 +1092,12 @@ fp4_gemm_rank2_cta(
     const __grid_constant__ CUtensorMap desc_B,
     const __grid_constant__ CUtensorMap desc_SFB,
     half* __restrict__ D,
+    float* __restrict__ buf,
     const int M, const int N, const int K, const int L, const int K_scales
 ) {
 #if __CUDA_ARCH__ >= 900
     constexpr int TileKPacked = TileK / 2;
-    constexpr int TileN = 128; // Fixed TileN matching TileM
+    constexpr int TileN = 128; // Fixed TileN
     constexpr int SfaBoxK = 128;  // Rank-2 GEMM: SWIZZLE_128B
     constexpr int StageCount = 3; 
     constexpr int a_stride = TileK + 8;
@@ -1076,13 +1113,17 @@ fp4_gemm_rank2_cta(
     const bool is_consumer = true; // All warps compute (non-tcgen05 path)
 
     // Grid: x=M_tile, y=N_tile, z=Batch(L)
-    const int batch = blockIdx.z;
+    const int split_k = gridDim.z / L;
+    const int split_idx = blockIdx.z - (blockIdx.z / split_k) * split_k;
+    const int batch = blockIdx.z / split_k;
     const int m_tile = blockIdx.x * TileM;
     const int n_tile = blockIdx.y * TileN;
     
     if (batch >= L || m_tile >= M || n_tile >= N) return;
 
     const int K_packed = K >> 1;
+    const int k_per_split = K / split_k;
+    const int k_base = split_idx * k_per_split;
     const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
     const int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
 
@@ -1214,7 +1255,8 @@ fp4_gemm_rank2_cta(
                 a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
                 mbar,
                 &desc_A, &desc_B, &desc_SFA, &desc_SFB,
-                cache_A, cache_B
+                cache_A, cache_B,
+                SFA_packed, SFB_packed, K
             );
         }
     }
@@ -1231,7 +1273,8 @@ fp4_gemm_rank2_cta(
                 a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
                 mbar,
                 &desc_A, &desc_B, &desc_SFA, &desc_SFB,
-                cache_A, cache_B
+                cache_A, cache_B,
+                SFA_packed, SFB_packed, K
             );
         }
 
@@ -1362,31 +1405,33 @@ fp4_gemm_rank2_cta(
         ((uint32_t)BLOCK_N >> 3U << 17U) |
         ((uint32_t)128U >> 7U << 27U);
 
-    const int num_iters = K / TileK;
+    const int num_iters = k_per_split / TileK;
     if (is_tma_lane) {
         for (int iter_k = 0; iter_k < StageCount && iter_k < num_iters; ++iter_k) {
-            int k_tile = iter_k * TileK;
+            int k_tile = k_base + iter_k * TileK;
             prefetch_tile<TileM, TileK>(
                 iter_k, k_tile, use_tma_a, is_producer, warp_id, lane_id,
                 m_tile, n_tile, K_packed, K_scales, M, N,
                 a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
                 mbar,
                 &desc_A, &desc_B, &desc_SFA, &desc_SFB,
-                cache_A, cache_B
+                cache_A, cache_B,
+                SFA_packed, SFB_packed, K
             );
         }
         for (int iter_k = StageCount; iter_k < num_iters; ++iter_k) {
             int stage_id = iter_k % StageCount;
             uint32_t mma_phase = uint32_t((iter_k / StageCount - 1) & 1);
             mbarrier_wait_parity(mbar_stage(mbar_mma, stage_id), mma_phase);
-            int k_tile = iter_k * TileK;
+            int k_tile = k_base + iter_k * TileK;
             prefetch_tile<TileM, TileK>(
                 stage_id, k_tile, use_tma_a, is_producer, warp_id, lane_id,
                 m_tile, n_tile, K_packed, K_scales, M, N,
                 a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
                 mbar,
                 &desc_A, &desc_B, &desc_SFA, &desc_SFB,
-                cache_A, cache_B
+                cache_A, cache_B,
+                SFA_packed, SFB_packed, K
             );
         }
     }
@@ -1439,6 +1484,7 @@ fp4_gemm_rank2_cta(
     // ========================================================================
     // EPILOGUE: TMEM -> register -> global D (row-major)
     // ========================================================================
+    const bool use_buf = split_k > 1;
     if (tid < BLOCK_M) {
         mbarrier_wait_parity(mbar_stage(mbar_cp, 0), 0);
         asm volatile("tcgen05.fence::after_thread_sync;");
@@ -1447,6 +1493,8 @@ fp4_gemm_rank2_cta(
             float tmp[BLOCK_N / 2];
             if constexpr (BLOCK_N == 128) {
                 tcgen05_ld_16x256bx16(tmp, warp_id * 32 + m * 16, 0);
+            } else if constexpr (BLOCK_N == 64) {
+                tcgen05_ld_16x256bx8(tmp, warp_id * 32 + m * 16, 0);
             }
             asm volatile("tcgen05.wait::ld.sync.aligned;");
 
@@ -1455,12 +1503,22 @@ fp4_gemm_rank2_cta(
                 int row = m_tile + warp_id * 32 + m * 16 + lane_id / 4;
                 int col = n_tile + i * 8 + (lane_id % 4) * 2;
                 if (row < M && col + 1 < N) {
-                    reinterpret_cast<half2*>(D + row * N + col)[0] =
-                        __float22half2_rn({tmp[i * 4 + 0], tmp[i * 4 + 1]});
+                    if (use_buf) {
+                        atomicAdd(buf + row * N + col + 0, tmp[i * 4 + 0]);
+                        atomicAdd(buf + row * N + col + 1, tmp[i * 4 + 1]);
+                    } else {
+                        reinterpret_cast<half2*>(D + row * N + col)[0] =
+                            __float22half2_rn({tmp[i * 4 + 0], tmp[i * 4 + 1]});
+                    }
                 }
                 if (row + 8 < M && col + 1 < N) {
-                    reinterpret_cast<half2*>(D + (row + 8) * N + col)[0] =
-                        __float22half2_rn({tmp[i * 4 + 2], tmp[i * 4 + 3]});
+                    if (use_buf) {
+                        atomicAdd(buf + (row + 8) * N + col + 0, tmp[i * 4 + 2]);
+                        atomicAdd(buf + (row + 8) * N + col + 1, tmp[i * 4 + 3]);
+                    } else {
+                        reinterpret_cast<half2*>(D + (row + 8) * N + col)[0] =
+                            __float22half2_rn({tmp[i * 4 + 2], tmp[i * 4 + 3]});
+                    }
                 }
             }
         }
@@ -1484,11 +1542,19 @@ fp4_gemm_rank2_cta(
 #endif
 }
 
+__global__ void reduce_fp32_to_fp16(const float* __restrict__ buf, half* __restrict__ out, int M, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = M * N;
+    if (idx < total) {
+        out[idx] = __float2half_rn(buf[idx]);
+    }
+}
+
 // launch_fp4_gemm_optimized starts from here 
 void launch_fp4_gemm_optimized(
     torch::Tensor A, torch::Tensor B,
     torch::Tensor SFA, torch::Tensor SFB,
-    torch::Tensor D,
+    torch::Tensor D, torch::Tensor BUF,
     int64_t M, int64_t N, int64_t K, int64_t L, int64_t K_scales
 ) {
     const uint8_t* A_ptr = A.data_ptr<uint8_t>();
@@ -1496,6 +1562,7 @@ void launch_fp4_gemm_optimized(
     const uint8_t* SFA_ptr = SFA.data_ptr<uint8_t>();
     const uint8_t* SFB_ptr = SFB.data_ptr<uint8_t>();
     half* D_ptr = reinterpret_cast<half*>(D.data_ptr<at::Half>());
+    float* BUF_ptr = BUF.data_ptr<float>();
 
     constexpr int kTileM = 128;
     constexpr int kTileN = 128; // GEMM tiling
@@ -1580,7 +1647,7 @@ void launch_fp4_gemm_optimized(
             static_cast<cuuint64_t>(SFA.stride(2)), // rest_m
             static_cast<cuuint64_t>(SFA.stride(4)), // rest_k
         };
-        cuuint32_t box_SFA[4] = {16, 32, 1, 1};      // 16B x 32 rows = 512B
+        cuuint32_t box_SFA[4] = {16, 32, 1, 4};      // 16B x 32 rows x 4 = 2048B
 
         CUresult resSFA = encode_tma_matrix(map_SFA_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      4, const_cast<void*>(static_cast<const void*>(SFA_ptr)),
@@ -1617,7 +1684,7 @@ void launch_fp4_gemm_optimized(
             static_cast<cuuint64_t>(SFB.stride(2)), // rest_n
             static_cast<cuuint64_t>(SFB.stride(4)), // rest_k
         };
-        cuuint32_t box_SFB[4] = {16, 32, 1, 1};
+        cuuint32_t box_SFB[4] = {16, 32, 1, 4};
 
         CUresult resSFB = encode_tma_matrix(map_SFB_ptr, CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                      4, const_cast<void*>(static_cast<const void*>(SFB_ptr)),
@@ -1641,6 +1708,12 @@ void launch_fp4_gemm_optimized(
         msg += std::to_string(tma_fail_code);
         msg += ")";
         throw std::runtime_error(msg);
+    }
+
+    int split_k = (K == 16384) ? 2 : 1;
+    if (split_k > 1) {
+        size_t bytes = static_cast<size_t>(M) * static_cast<size_t>(N) * sizeof(float);
+        check_cuda(cudaMemset(BUF_ptr, 0, bytes), "cudaMemset");
     }
 
     // Kernel Launch
@@ -1685,7 +1758,7 @@ void launch_fp4_gemm_optimized(
 
     int grid_x = (M + kTileM - 1) / kTileM;
     int grid_y = (N + kTileN - 1) / kTileN;
-    dim3 grid(grid_x, grid_y, L);
+    dim3 grid(grid_x, grid_y, L * split_k);
     dim3 block(kThreads);
 
     int M_int = static_cast<int>(M);
@@ -1698,6 +1771,7 @@ void launch_fp4_gemm_optimized(
     const uint8_t* B_ptr_arg = B_ptr;
     const uint8_t* SFA_ptr_arg = SFA_ptr;
     const uint8_t* SFB_ptr_arg = SFB_ptr;
+    float* BUF_ptr_arg = BUF_ptr;
     void* kernel_args[] = {
         const_cast<const uint8_t**>(&A_ptr_arg),
         const_cast<const uint8_t**>(&B_ptr_arg),
@@ -1708,6 +1782,7 @@ void launch_fp4_gemm_optimized(
         &map_B,
         &map_SFB,
         &D_ptr,
+        &BUF_ptr_arg,
         &M_int,
         &N_int,
         &K_int,
@@ -1716,6 +1791,12 @@ void launch_fp4_gemm_optimized(
     };
 
     check_cuda(cudaLaunchKernel(kernel_ptr, grid, block, kernel_args, shared_bytes, 0), "cudaLaunchKernel");
+    if (split_k > 1) {
+        int total = M_int * N_int;
+        int threads = 256;
+        int blocks = (total + threads - 1) / threads;
+        reduce_fp32_to_fp16<<<blocks, threads>>>(BUF_ptr, D_ptr, M_int, N_int);
+    }
 } 
 
 template<int TileM, int TileK, int Threads>
@@ -1820,7 +1901,7 @@ cpp_source = """
 void launch_fp4_gemm_optimized(
     torch::Tensor A, torch::Tensor B,
     torch::Tensor SFA, torch::Tensor SFB,
-    torch::Tensor D,
+    torch::Tensor D, torch::Tensor BUF,
     int64_t M, int64_t N, int64_t K, int64_t L, int64_t K_scales_padded
 );
 
@@ -1904,9 +1985,16 @@ def custom_kernel(data: input_t) -> output_t:
     sfa_bytes = _u8_strided_view(sfa_permuted[..., 0])
     sfb_bytes = _u8_strided_view(sfb_permuted[..., 0])
     
+    split_k = 2 if K == 16384 else 1
+
+    if split_k > 1:
+        buf = torch.empty((M, N), device=c.device, dtype=torch.float32)
+    else:
+        buf = torch.empty((1,), device=c.device, dtype=torch.float32)
+
     mod = get_module()
     mod.launch_fp4_gemm_optimized(
-        a_bytes, b_bytes, sfa_bytes, sfb_bytes, c[:, :, 0],
+        a_bytes, b_bytes, sfa_bytes, sfb_bytes, c[:, :, 0], buf,
         M, N, K, L, K_scales
     )
 
