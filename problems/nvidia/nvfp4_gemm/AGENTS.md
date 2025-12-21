@@ -79,6 +79,7 @@ Global SF (FP8, atom-tiled) → TMA → SMEM
 - ❌ No PyTorch stream references (c10::cuda::getCurrentCUDAStream, etc.)
 - ❌ No cross-run caching beyond compilation/autotune
 - ❌ Code containing word "stream" anywhere
+- ❌ No cuda graph replay 
 
 **IMPORTANT** Do not keep on searching for more context beyond what is provided in the problem statement, reference implementation and existing codebase.
 
@@ -157,4 +158,3 @@ Global SF (FP8, atom-tiled) → TMA → SMEM
 2. ✅ Achieve geometric mean ≤ 3.04μs on 3 benchmark shapes
 3. ✅ Memory bandwidth utilization > 95% of theoretical peak
 4. ✅ Zero competition rule violations
-

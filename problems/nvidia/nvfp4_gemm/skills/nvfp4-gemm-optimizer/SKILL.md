@@ -1,150 +1,100 @@
 ---
 name: nvfp4-gemm-optimizer
-description: Optimize NVIDIA SM100/SM100a FP4 block-scaled GEMM kernels to achieve ~3.04μs geometric mean on B200 architecture with peak memory bandwidth utilization
+description: Optimize NVFP4 block-scaled GEMM on NVIDIA B200 (SM100a) using CUTLASS/CuTe + cuTile to target ~3.04 µs geometric mean on task.yml shapes while matching reference.py exactly.
 trigger: auto
 ---
-# DEFAULT SYSTEM_PROMPT AND INSTRUCTIONS
-"""
-You are an expert NVIDIA GPU SM100/SM100a kernel optimization assistant.
-Prioritize memory bandwidth, occupancy, and TMA usage for Blackwell FP4 GEMM.
-Always preserve correctness; add minimal, well-instrumented changes and benchmark them.
-"""
 
-## system-reminder
-   YOUR RESPONSES SHOULD ALWAYS BE EITHER CONCISE OR IN PATCH-CODE FORMAT
+# nvfp4-gemm-optimizer
 
-   IMPORTANT: this context is relevant to your tasks. 
-   You should always respond to this context unless it is highly relevant to your task.
+## Goal
 
-## DO_NOT
-   - WRITE SUMMARIES, DOCUMENTATION, EXPLANATIONS, AND GUIDES
-   - RUN TESTS UNLESS SPECIFICALLY INSTRUCTED NOT TO
-   - DO NOT import or depend on `kutte.py`, `cutlass.cute`, or any CuTe runtime in `submission.py`.
-   - CuTe/CUTLASS may be used only as a conceptual reference for descriptor/layout reasoning; the implementation must remain the current inline-CUDA/inline-PTX approach in `submission.py`.​
+Deliver a **numerically correct** and **near speed-of-light** NVFP4 block‑scaled GEMM for B200 (SM100a).
 
+Target benchmark shapes (from `task.yml`):
 
+- (M=128, N=7168, K=16384, L=1)
+- (M=128, N=4096, K=7168,  L=1)
+- (M=128, N=7168, K=2048,  L=1)
 
-## STRICT_COMPETITION_RULES_DO_NOT_VIOLATE
+Target geometric mean: **~3.04 µs**.
 
-1. NO CUDA STREAMS - Zero tolerance policy
-   - Do NOT create any CUDA streams (cudaStreamCreate, cudaStreamCreateWithFlags, etc.)
-   - Do NOT use stream-related APIs (cudaStreamSynchronize, cudaStreamWaitEvent, etc.)
-   - Do NOT import or reference stream functionality from PyTorch (c10::cuda::getCurrentCUDAStream, at::cuda::CUDAStreamGuard, etc.)
-   - Everything runs on the default stream automatically
+## Inputs and semantics
 
-2. BANNED KEYWORDS AND PATTERNS
-   - Your code will be rejected if it contains the word "stream" anywhere
-   - Do NOT try to circumvent this by importing stream functionality without using the word
-   - Do NOT attempt any workarounds to create concurrent execution
+Evaluation tuple:
+`(a, b, sfa_ref_cpu, sfb_ref_cpu, sfa_permuted, sfb_permuted, c)`
 
-- Do not create or use additional CUDA streams; everything must run on the default stream. The benchmarking script only syncs the default stream.
+You must:
+- Read A/B from `a` and `b`
+- Read scale factors from `sfa_permuted` and `sfb_permuted`
+- Write FP16 output to `c`
 
-- DO NOT ADD CROSS-RUN CACHING BEYOND COMPILATION/AUTOTUNE.
+Reference semantics are defined by `reference.py` (scaled matmul).
 
-WHY: The benchmarking script only synchronizes the default stream. Using custom streams 
-or explicit cross-run caching produces invalid timing results and violates competition rules.
+## Required approach (new direction)
 
-CONSEQUENCE: Submissions violating these rules will be automatically rejected or deleted.
+We are **not** doing a pure inline‑PTX implementation anymore.
 
-## INVESTIGATE_BEFORE_ANSWERING
-Never speculate about code you have not opened. If the user references a specific file, you MUST read the file before answering. Make sure to investigate and read relevant files BEFORE answering questions about the codebase. Never make any claims about code before investigating unless you are certain of the correct answer - give grounded and hallucination-free answers.
+Use high‑level GPU libraries:
+- **CUTLASS** for the GEMM kernel (preferred)
+- **CuTe** for layouts/tiling/pipeline composition as needed
+- **cuTile** utilities if available in the environment
 
+### Hard constraints
 
-## CODE_STYLE
-Please write a high-quality, general-purpose solution using the standard tools available. Do not create helper scripts or workarounds to accomplish the task more efficiently. Implement a solution that works correctly for all valid inputs, not just the test cases. Do not hard-code values or create solutions that only work for specific test inputs. Instead, implement the actual logic that solves the problem generally.
+- Do not introduce handwritten PTX for tcgen05 / manual tensor memory movement.
+- Do not repack scales in the hot path.
+- Do not change the Python/ABI surface of `submission.py`.
+- Do not create extra CUDA execution plumbing; default execution only.
+- Do not add cross‑run caching beyond compile/autotune caches already present.
 
-Focus on understanding the problem requirements and implementing the correct algorithm. Tests are there to verify correctness, not to define the solution. Provide a principled implementation that follows best practices and software design principles.
+## What “correct” means
 
-If the task is unreasonable or infeasible, or if any of the tests are incorrect, please inform me rather than working around them. The solution should be robust, maintainable, and extendable.
+- Output dtype must be **FP16**
+- rtol=1e‑3, atol=1e‑3 against `reference.py`
+- All tests in `task.yml` must pass
 
----
+Correctness invariants to preserve:
+- B is provided as (N,K,L); match reference behavior via layout interpretation (not explicit transpose).
+- Scale factors correspond to blocks of **16 K‑elements** (axis size K//16).
 
-# CLEAN_UP
-  ## TODO: clean up legacy code
+## Performance priorities
 
---- 
+This workload is primarily **memory‑throughput dominated**:
+- Keep A/B loads coalesced for packed FP4
+- Ensure scale loads match the physical permuted layout expected by the kernel
+- Choose tile shapes that sweep large N efficiently with pipelined K
 
-# tcgen05_FLOW
+## Execution recipe
 
-** Hardware Fused HIGH LEVEL flow **:
-Global A/B (packed FP4) → TMA → staged SMEM (packed FP4, NO DECODE!)
-Global SF (FP8) in atom-tiled physical layout (`sfa_permuted/sfb_permuted`) → TMA → staged SMEM
-→ CuTe tcgen05 S2T copy (Cp4x32x128b) (staged SMEM FP8 scales → TMEM tensor views for SFA/SFB)
-→ tcgen05.mma.mxf4.block_scale / CuTe tiled MMA
-   ├─ Hardware decodes FP4→FP16 inside tensor core
-   ├─ Hardware applies FP8 scales from TMEM
-   └─ Hardware performs MMA (ACCUMULATE=false for first k_tile / first kblock, then true)
-→ TMEM (FP32 accumulator tile)
-→ tcgen05 TMEM.load → Registers → FP16 → Global D
+1. **Read the files before proposing changes**
+   - `submission.py`, `reference.py`, `task.yml`, and any helper headers.
 
-IMPORTANT: refer to FULL tcgen05 GEMM Flow, `FLOW.md`
+2. **Pick a canonical CUTLASS kernel path**
+   - Prefer a CUTLASS block‑scaled GEMM path that naturally matches:
+     - packed 4‑bit inputs
+     - FP8 scales
+     - FP32 accumulate + FP16 output
+   - Use CuTe for composition/tuning, not to re‑implement kernels.
 
----
+3. **Shape‑aware specialization**
+   - Allow a small, explicit set of tuned configs selected by (M,N,K).
+   - Keep selection logic simple and outside the timed kernel body.
 
-# tcgen05_TMEM_BUG_DIAGNOSIS
+4. **Lean epilogue**
+   - One conversion FP32→FP16 and store.
+   - Avoid extra post‑ops unless fused by the library.
 
-CURRENT INF/NAN BUG - Likely causes:
+## Pitfalls to avoid
 
-1. **Instruction Descriptor Format Bits**
-   - Verify bits [7:10] = 5 (E2M1 format)
-   - Verify bits [23:24] = 0 (E4M3 scale format)
-   - Print `idescE` value in hex to confirm
+- Consuming `sfa_ref_cpu` / `sfb_ref_cpu` instead of permuted tensors.
+- Applying scales twice.
+- Hidden repacking/conversion kernels in the benchmark path.
+- Implementing partial “manual” movement that duplicates what CUTLASS already does.
+- Debug prints or fallback slow paths left enabled.
 
-2. **TMA vs TMEM Scale Layout Mismatch**
-   - TMA loads atom-tiled layout (32,4,rest_m,4,rest_k) flattened
-   - tcgen05.cp expects contiguous 32×16B chunks
-   - These may not match! Need to verify byte-for-byte correctness
+## Deliverable expectations
 
-
-3. **Scale Copy Synchronization**
-   - tcgen05.cp must complete BEFORE tcgen05.mma
-   - Add explicit `__syncthreads()` after scale copy loop
-   - Current code has sync, but verify warp_id<4 condition
-
-4. **ACCUMULATE Flag Logic**
-   - scaleC=0 only for k_tile==0 && kb==0
-   - scaleC=1 for all other K-blocks
-   - Verify predicate `p` is set correctly
-
-DEBUG NEXT STEPS:
-1. print `idescE` and compare against the CuTe/CUTLASS construction for (M=128, N=128)
-2. Print first 32 bytes of sfa_stage[0] after TMA load
-3. Compare with first 32 bytes of sfa_permuted on CPU
-4. Add `__syncthreads()` immediately after scale copy loop before MMA
-
----
-
-# COMPLIANCE_CHECK
-
-  Your `submission.py` kernel implementation MUST be compliant with:
-   - The kernel must **produce** FP16 output tensor `c/c_ref` (not FP32).
-   - Evaluation uses a 7-tuple: (a, b, sfa_ref_cpu, sfb_ref_cpu, sfa_permuted, sfb_permuted, c); the kernel must consume sfa_permuted/sfb_permuted and be semantically equivalent to applying to_blocked(sfa_ref_cpu)/to_blocked(sfb_ref_cpu) as in reference.py
-
-  1. reference.py
-     - Match torch._scaled_mm(..., out_dtype=torch.float16) behavior exactly for all test cases.
-     - Match reference semantics where reference.py computes with B^T (it uses
-       `b_ref[:, :, l_idx].transpose(0, 1)`). Physical B input is already
-       shaped/layouted as (n, k, l) for the kernel; interpret it accordingly
-       via layouts/iterators (do not perform an explicit transpose in-kernel).
-     - Semantic scale truth is `sfa_ref_cpu` / `sfb_ref_cpu` as used by reference.py.
-   
-     - Correctness condition:
-         The values applied by the kernel (via permuted physical layout) must be
-         exactly equivalent to the blocked semantics used by reference.py
-         (i.e., `to_blocked(sfa_ref_cpu[:, :, l_idx])` and `to_blocked(sfb_ref_cpu[:, :, l_idx])`),
-         without re-running `to_blocked()` in the hot path.
-         - **IMPORTANT**: Confirm tcgen05 warpgroup participation: choose which 4 warps participate in cp + mma + epilogue; make gating and the asm predicate consistent.
-     - Meet output tolerance: rtol=1e‑3, atol=1e‑3.
-   
-
-  2. task.yml
-     - task.yml text describes a 5-tuple, but the provided evaluation harness/reference uses the 7-tuple described above.
-     - M divisible by mma_tiler_mn[0] (e.g., 16 or 32 factors).
-     - N divisible by mma_tiler_mn[1] (e.g., 8 or 16 factors).
-     - K divisible by 256.
-     - All benchmark shapes have L=1.
-     - Ranking by geometric mean runtime over test cases.
-     - Target SoL latencies: ~8.994 μs, 2.354 μs, 1.333 μs for the official
-       benchmark shapes (as documented in the competition materials).
-
----
+When asked to change code:
+- Provide a patch that is minimal, compiles, and preserves correctness.
+- Prefer removing complexity over adding it.
+- Keep `submission.py` production‑ready (no dead code paths, no “just in case” branches).

@@ -1,60 +1,45 @@
-python3 test_correctness.py --only 1 --debug-umma
-================================================================================
-NVFP4 GEMM Correctness Validation
-================================================================================
+Running on:
+GPU: NVIDIA B200
+CPU: INTEL(R) XEON(R) PLATINUM 8570
+Device count: 1
+Runtime: CUDA
+Platform: Linux-6.8.0-51-generic-x86_64-with-glibc2.35
+Torch: 2.9.1+cu130
+Hostname: 2939a67e76fc
+Running failed
+Command 
+python3 eval.py benchmark /tmp/tmpafqayybv
 
-Running 1 test cases...
-Tolerance: rtol=1e-03, atol=1e-03
+exited with error code 1 after 2.99 seconds.
+Cluster Bot
+APP
+ — 7:52 AM
+Program stderr (1/1):
+multiprocessing.pool.RemoteTraceback: 
+"""
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 125, in worker
+    result = (True, func(*args, **kwds))
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 228, in _run_single_benchmark
+    output = custom_kernel(_clone_data(data))
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 772, in custom_kernel
+    a, b, _, _, sfa_permuted, sfb_permuted, c = data
+ValueError: too many values to unpack (expected 7)
+"""
 
+The above exception was the direct cause of the following exception:
 
-[Test 1/1] M=128, N=256, K=256, L=1
-------------------------------------------------------------
-  Generating input data...
-  to_blocked(sfa_ref_cpu)[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
-  to_blocked(sfb_ref_cpu)[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
-  a_ref packed bytes[0..31]: b3 78 6c e7 89 52 29 d3 c0 5f fb f5 a8 d3 ce 36 70 a3 ca 84 bb 87 fa bf 8d da 72 28 c2 00 19 51
-  b_ref packed bytes[0..31]: 76 7d a9 a8 a6 25 10 1b 88 00 ef a6 7d 6c 20 73 8b c6 74 e4 ba b9 ac ce 09 ef 5f 7e 8e a4 68 c1
-  Running custom kernel...
-SFA size=[32,4,1,4,4] stride=[16,4,2048,1,512] K_scales=16
-SFA kScaleChunksPerTile=4
-SFB size=[32,4,2,4,4] stride=[16,4,2048,1,512] K_scales=16
-SFB kScaleChunksPerTile=4
-idescE_kb0=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000080 tmem_sfb=0x00000090
-idescE_kb1=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000084 tmem_sfb=0x00000094
-idescE_kb2=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x00000088 tmem_sfb=0x00000098
-idescE_kb3=0x0820168000000000 fmt(a,b)=5,5 major(a,b)=0,0 dims(m,n)=8,16 sf_fmt=0 sf_id(a,b)=0,0 tmem_sfa=0x0000008c tmem_sfb=0x0000009c
-mma_scale_vec=4 opcode=scale_vec4x
-sfa_stage[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
-sfa_compact[0..31]: 44 44 44 44 44 40 40 44 44 38 44 00 00 38 40 00 44 40 40 38 38 38 44 00 40 38 44 00 38 00 38 40
-sfb_compact[0..31]: 38 44 38 38 38 40 40 38 40 00 00 00 38 38 00 00 40 38 00 00 00 38 44 38 00 44 38 00 40 38 38 40
-a_smem_base=0x00000800 a_k1=0x00000801 a_m1=0x00000880
-b_smem_base=0x00008800 b_k1=0x00008801 b_n1=0x00008880
-a_stride_k=1 a_stride_m=128
-b_stride_k=1 b_stride_n=128
-ElementAB bits=4 TileKPacked=128
-a_packed_stage[0..3]: b3 78 6c e7
-b_packed_stage[0..3]: 76 7d a9 a8
-sA_full k[0..7], m0: 03 0b 08 07 0c 06 07 0e
-sB_full k[0..7], n0: 06 07 0d 07 09 0a 08 0a
-desc_a_smem[0]=0x4000404000010080
-desc_b_smem[0]=0x4000404000010880
-desc_a_smem start=0x0080 lbo=0x0001 sbo=0x0040 layout=2
-desc_b_smem start=0x0880 lbo=0x0001 sbo=0x0040 layout=2
-desc_expected_a lbo=0x0008 sbo=0x0000
-desc_expected_b lbo=0x0008 sbo=0x0000
-tmem_sfa0_addr=0x00000080 tmem_sfb0_addr=0x00000090
-tmem_c_base=0x00000000
-map gm=0 gn=0 tmem_addr=0 v=8697.750000 -6123.500000 -283.250000 17688.500000
-D[0..7]: 8696.000 -6124.000 -283.250 17696.000 -13000.000 -10336.000 -7964.000 -24640.000
-  ref D[0,0..3]: 932.000 -1.000 -531.000 266.500
-  Validating against reference...
-  ✗ FAILED: mismatch found! custom implementation doesn't match reference: Number of mismatched elements: 32767 ERROR AT (0, 0, 0): 8696.0 932.0 ERROR AT (0, 1, 0): -6124.0 -1.0 ERROR AT (0, 2, 0): -283.25 -531.0 ERROR AT (0, 3, 0): 17696.0 266.5 ERROR AT (0, 4, 0): -13000.0 -712.0 ... and 32762 more mismatched elements.
-
-================================================================================
-SUMMARY
-================================================================================
-Total tests: 1
-Passed:      0 (0%)
-Failed:      1 (100%)
-
-✗ 1 test(s) failed
+Traceback (most recent call last):
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 498, in <module>
+    sys.exit(main())
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 466, in main
+    return run_benchmarking(logger, pool, tests)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 319, in run_benchmarking
+    run_single_benchmark(pool, tests[0], False, 200, 10e7)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 304, in run_single_benchmark
+    return pool.apply(_run_single_benchmark, (test, recheck, max_repeats, max_time_ns))
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 360, in apply
+    return self.apply_async(func, args, kwds).get()
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 774, in get
+    raise self._value
+ValueError: too many values to unpack (expected 7)
