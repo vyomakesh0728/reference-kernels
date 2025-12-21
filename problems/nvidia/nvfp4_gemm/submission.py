@@ -1329,7 +1329,7 @@ def _candidate_configs(n: int, k: int, m: int):
     cluster_shapes = [(1, 1), (2, 1), (1, 2), (2, 2), (4, 1), (1, 4)]
     swizzle_sizes = [1, 2, 4]
     raster_flags = [True, False]
-    occupancies = [1, 2]
+    occupancies = [1]
 
     for mma_tiler_mn in mma_tilers:
         for cluster_shape_mn in cluster_shapes:
@@ -1500,7 +1500,11 @@ def custom_kernel(data: input_t) -> output_t:
     k = k * 2
 
     cfg = _select_or_tune_config(a, b, sfa_permuted, sfb_permuted, c, m, n, k, l)
-    compiled_func = compile_kernel(cfg)
+    try:
+        compiled_func = compile_kernel(cfg)
+    except Exception:
+        cfg = select_config(m, n, k)
+        compiled_func = compile_kernel(cfg)
 
     a_ptr = make_ptr(ab_dtype, a.data_ptr(), cute.AddressSpace.gmem, assumed_align=16)
     b_ptr = make_ptr(ab_dtype, b.data_ptr(), cute.AddressSpace.gmem, assumed_align=16)
