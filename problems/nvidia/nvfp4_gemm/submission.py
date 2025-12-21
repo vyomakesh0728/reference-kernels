@@ -1302,10 +1302,29 @@ def _candidate_configs(n: int, k: int, m: int):
 
     candidates = []
     if n == 7168:
-        mma_tilers = [(128, 192), (128, 256), (128, 128)]
+        mma_tilers = [
+            (128, 192),
+            (128, 256),
+            (128, 128),
+            (128, 320),
+            (128, 384),
+            (256, 128),
+            (256, 256),
+            (64, 64),
+            (64, 128),
+            (64, 192),
+            (64, 256),
+        ]
     else:
-        mma_tilers = [(128, 128), (128, 192), (128, 256)]
-    cluster_shapes = [(1, 1), (2, 1), (1, 2), (2, 2)]
+        mma_tilers = [
+            (128, 128),
+            (128, 192),
+            (128, 256),
+            (256, 128),
+            (64, 64),
+            (64, 128),
+        ]
+    cluster_shapes = [(1, 1), (2, 1), (1, 2), (2, 2), (4, 1), (1, 4)]
     swizzle_sizes = [1, 2, 4]
     raster_flags = [True, False]
 
@@ -1334,7 +1353,7 @@ def _time_kernel(compiled_func, a_ptr, b_ptr, sfa_ptr, sfb_ptr, c_ptr, m, n, k, 
     compiled_func(a_ptr, b_ptr, sfa_ptr, sfb_ptr, c_ptr, (m, n, k, l))
     torch.cuda.synchronize()
     timings = []
-    for _ in range(2):
+    for _ in range(3):
         evt_start = torch.cuda.Event(enable_timing=True)
         evt_end = torch.cuda.Event(enable_timing=True)
         evt_start.record()
@@ -1342,7 +1361,7 @@ def _time_kernel(compiled_func, a_ptr, b_ptr, sfa_ptr, sfb_ptr, c_ptr, m, n, k, 
         evt_end.record()
         torch.cuda.synchronize()
         timings.append(evt_start.elapsed_time(evt_end) * 1000.0)
-    return sum(timings) / len(timings)
+    return min(timings)
 
 
 def _select_or_tune_config(a, b, sfa_permuted, sfb_permuted, c, m, n, k, l):
@@ -1366,13 +1385,16 @@ def _select_or_tune_config(a, b, sfa_permuted, sfb_permuted, c, m, n, k, l):
     )
 
     for cfg in candidates:
-        compiled_func = compile_kernel(cfg)
-        elapsed = _time_kernel(
-            compiled_func, a_ptr, b_ptr, sfa_ptr, sfb_ptr, c_ptr, m, n, k, l
-        )
-        if best_time is None or elapsed < best_time:
-            best_time = elapsed
-            best_cfg = cfg
+        try:
+            compiled_func = compile_kernel(cfg)
+            elapsed = _time_kernel(
+                compiled_func, a_ptr, b_ptr, sfa_ptr, sfb_ptr, c_ptr, m, n, k, l
+            )
+            if best_time is None or elapsed < best_time:
+                best_time = elapsed
+                best_cfg = cfg
+        except Exception:
+            continue
 
     if best_cfg is None:
         best_cfg = select_config(m, n, k)
