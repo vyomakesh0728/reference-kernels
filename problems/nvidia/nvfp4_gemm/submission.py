@@ -1281,14 +1281,16 @@ def select_config(m: int, n: int, k: int) -> KernelConfig:
     return CONFIGS["default"]
 
 
-def _make_cfg(name_suffix, mma_tiler_mn, cluster_shape_mn, swizzle_size, raster_along_m):
+def _make_cfg(
+    name_suffix, mma_tiler_mn, cluster_shape_mn, swizzle_size, raster_along_m, occupancy
+):
     return KernelConfig(
         name=f"tune_{name_suffix}",
         mma_tiler_mn=mma_tiler_mn,
         cluster_shape_mn=cluster_shape_mn,
         swizzle_size=swizzle_size,
         raster_along_m=raster_along_m,
-        occupancy=1,
+        occupancy=occupancy,
     )
 
 
@@ -1327,25 +1329,29 @@ def _candidate_configs(n: int, k: int, m: int):
     cluster_shapes = [(1, 1), (2, 1), (1, 2), (2, 2), (4, 1), (1, 4)]
     swizzle_sizes = [1, 2, 4]
     raster_flags = [True, False]
+    occupancies = [1, 2]
 
     for mma_tiler_mn in mma_tilers:
         for cluster_shape_mn in cluster_shapes:
             for swizzle_size in swizzle_sizes:
                 for raster_along_m in raster_flags:
-                    name_suffix = (
-                        f"n{n}_k{k}_mn{mma_tiler_mn[0]}x{mma_tiler_mn[1]}"
-                        f"_c{cluster_shape_mn[0]}x{cluster_shape_mn[1]}"
-                        f"_sw{swizzle_size}_rm{1 if raster_along_m else 0}"
-                    )
-                    candidates.append(
-                        _make_cfg(
-                            name_suffix,
-                            mma_tiler_mn,
-                            cluster_shape_mn,
-                            swizzle_size,
-                            raster_along_m,
+                    for occupancy in occupancies:
+                        name_suffix = (
+                            f"n{n}_k{k}_mn{mma_tiler_mn[0]}x{mma_tiler_mn[1]}"
+                            f"_c{cluster_shape_mn[0]}x{cluster_shape_mn[1]}"
+                            f"_sw{swizzle_size}_rm{1 if raster_along_m else 0}"
+                            f"_occ{occupancy}"
                         )
-                    )
+                        candidates.append(
+                            _make_cfg(
+                                name_suffix,
+                                mma_tiler_mn,
+                                cluster_shape_mn,
+                                swizzle_size,
+                                raster_along_m,
+                                occupancy,
+                            )
+                        )
     return candidates
 
 
