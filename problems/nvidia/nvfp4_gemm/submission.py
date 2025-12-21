@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-import os
 
 import torch
 
@@ -14,7 +13,6 @@ import cutlass.utils.blockscaled_layout as blockscaled_utils
 from cutlass.cute.runtime import make_ptr
 
 from task import input_t, output_t
-from torch.utils.cpp_extension import load_inline
 
 
 @dataclass(frozen=True)
@@ -68,201 +66,6 @@ sf_dtype = cutlass.Float8E4M3FN
 c_dtype = cutlass.Float16
 sf_vec_size = 16
 
-_cutlass_ext = None
-_cutlass_src = r"""
-#include <torch/extension.h>
-
-#include "cutlass/cutlass.h"
-
-#include "cute/tensor.hpp"
-#include "cutlass/detail/sm100_blockscaled_layout.hpp"
-#include "cutlass/epilogue/collective/collective_builder.hpp"
-#include "cutlass/epilogue/fusion/operations.hpp"
-#include "cutlass/gemm/collective/collective_builder.hpp"
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/kernel/gemm_universal.hpp"
-#include "cutlass/util/packed_stride.hpp"
-
-using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
-using ElementB = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
-using ElementC = cutlass::half_t;
-using ElementD = cutlass::half_t;
-using ElementAccumulator = float;
-using ElementCompute = float;
-
-using LayoutATag = cutlass::layout::RowMajor;
-using LayoutBTag = cutlass::layout::ColumnMajor;
-using LayoutCTag = cutlass::layout::RowMajor;
-using LayoutDTag = cutlass::layout::RowMajor;
-
-constexpr int AlignmentA = 32;
-constexpr int AlignmentB = 32;
-constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
-constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
-
-using ArchTag = cutlass::arch::Sm100;
-using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
-
-using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
-
-using FusionOp = cutlass::epilogue::fusion::LinearCombination<
-    ElementD,
-    ElementCompute,
-    ElementC,
-    ElementCompute>;
-
-template <class MmaTileShape>
-struct GemmDef {
-  using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-      ArchTag,
-      OperatorClass,
-      MmaTileShape,
-      ClusterShape,
-      cutlass::epilogue::collective::EpilogueTileAuto,
-      ElementAccumulator,
-      ElementAccumulator,
-      ElementC,
-      LayoutCTag,
-      AlignmentC,
-      ElementD,
-      LayoutDTag,
-      AlignmentD,
-      cutlass::epilogue::collective::EpilogueScheduleAuto,
-      FusionOp>::CollectiveOp;
-
-  using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-      ArchTag,
-      OperatorClass,
-      ElementA,
-      LayoutATag,
-      AlignmentA,
-      ElementB,
-      LayoutBTag,
-      AlignmentB,
-      ElementAccumulator,
-      MmaTileShape,
-      ClusterShape,
-      cutlass::gemm::collective::StageCountAutoCarveout<
-          static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-      cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
-
-  using Kernel = cutlass::gemm::kernel::GemmUniversal<
-      cute::Shape<int, int, int, int>,
-      CollectiveMainloop,
-      CollectiveEpilogue,
-      void>;
-
-  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<Kernel>;
-};
-
-using Gemm128x128 = GemmDef<cute::Shape<cute::_128, cute::_128, cute::_256>>::Gemm;
-using Gemm128x256 = GemmDef<cute::Shape<cute::_128, cute::_256, cute::_256>>::Gemm;
-using Gemm256x128 = GemmDef<cute::Shape<cute::_256, cute::_128, cute::_256>>::Gemm;
-
-template <class Gemm>
-torch::Tensor run_gemm(
-    torch::Tensor a,
-    torch::Tensor b,
-    torch::Tensor sfa,
-    torch::Tensor sfb,
-    torch::Tensor c) {
-  using StrideA = typename Gemm::GemmKernel::StrideA;
-  using StrideB = typename Gemm::GemmKernel::StrideB;
-  using StrideC = typename Gemm::GemmKernel::StrideC;
-  using StrideD = typename Gemm::GemmKernel::StrideD;
-  using LayoutSFA = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFA;
-  using LayoutSFB = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFB;
-
-  const int64_t m = a.size(0);
-  const int64_t k2 = a.size(1);
-  const int64_t n = b.size(0);
-  const int64_t k = k2 * 2;
-
-  auto stride_a = StrideA{a.stride(0), a.stride(1), a.stride(2)};
-  auto stride_b = StrideB{b.stride(0), b.stride(1), b.stride(2)};
-  auto stride_c = StrideC{c.stride(0), c.stride(1), c.stride(2)};
-  auto stride_d = StrideD{c.stride(0), c.stride(1), c.stride(2)};
-
-  auto layout_sfa = typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig::
-      tile_atom_to_shape_SFA(cute::make_shape(m, n, k, 1));
-  auto layout_sfb = typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig::
-      tile_atom_to_shape_SFB(cute::make_shape(m, n, k, 1));
-
-  typename Gemm::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGemm,
-      {int(m), int(n), int(k), 1},
-      {reinterpret_cast<ElementA*>(a.data_ptr()),
-       stride_a,
-       reinterpret_cast<ElementB*>(b.data_ptr()),
-       stride_b,
-       reinterpret_cast<typename LayoutSFA::Element*>(sfa.data_ptr()),
-       layout_sfa,
-       reinterpret_cast<typename LayoutSFB::Element*>(sfb.data_ptr()),
-       layout_sfb},
-      {{ElementCompute(1.0f), ElementCompute(0.0f)},
-       reinterpret_cast<ElementC*>(c.data_ptr()),
-       stride_c,
-       reinterpret_cast<ElementD*>(c.data_ptr()),
-       stride_d}};
-
-  args.scheduler.max_swizzle_size = 4;
-
-  size_t workspace_bytes = Gemm::get_workspace_size(args);
-  void* workspace_ptr = nullptr;
-  if (workspace_bytes > 0) {
-    cudaMalloc(&workspace_ptr, workspace_bytes);
-  }
-
-  Gemm gemm;
-  auto status = gemm.can_implement(args);
-  if (status != cutlass::Status::kSuccess) {
-    if (workspace_ptr) {
-      cudaFree(workspace_ptr);
-    }
-    return c;
-  }
-
-  status = gemm.initialize(args, workspace_ptr);
-  if (status != cutlass::Status::kSuccess) {
-    if (workspace_ptr) {
-      cudaFree(workspace_ptr);
-    }
-    return c;
-  }
-
-  status = gemm.run();
-  if (workspace_ptr) {
-    cudaFree(workspace_ptr);
-  }
-  return c;
-}
-
-torch::Tensor nvfp4_cutlass_gemm(
-    torch::Tensor a,
-    torch::Tensor b,
-    torch::Tensor sfa,
-    torch::Tensor sfb,
-    torch::Tensor c) {
-  const int64_t n = b.size(0);
-  const int64_t k2 = a.size(1);
-  const int64_t k = k2 * 2;
-
-  if (n == 4096 && k >= 7168) {
-    return run_gemm<Gemm128x128>(a, b, sfa, sfb, c);
-  }
-  if (n == 7168 && k >= 16384) {
-    return run_gemm<Gemm128x256>(a, b, sfa, sfb, c);
-  }
-  if (n == 7168 && k <= 2048) {
-    return run_gemm<Gemm256x128>(a, b, sfa, sfb, c);
-  }
-  return run_gemm<Gemm128x128>(a, b, sfa, sfb, c);
-}
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("nvfp4_cutlass_gemm", &nvfp4_cutlass_gemm);
-}
-"""
 
 
 class PersistentNvfp4Gemm:
@@ -1482,37 +1285,6 @@ def select_config(m: int, n: int, k: int) -> KernelConfig:
 _compiled_kernel_cache = {}
 
 
-def _get_cutlass_ext():
-    global _cutlass_ext
-    if _cutlass_ext is not None:
-        return _cutlass_ext
-    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "10.0a")
-    cuda_lib = "/usr/local/cuda-13.0/lib64"
-    ld_path = os.environ.get("LD_LIBRARY_PATH", "")
-    if cuda_lib not in ld_path.split(":"):
-        os.environ["LD_LIBRARY_PATH"] = (
-            f"{cuda_lib}:{ld_path}" if ld_path else cuda_lib
-        )
-    build_root = os.path.join(os.path.dirname(__file__), ".cutlass_ext_build")
-    _cutlass_ext = load_inline(
-        name="nvfp4_cutlass_ext",
-        cpp_sources="",
-        cuda_sources=_cutlass_src,
-        extra_include_paths=[
-            "/usr/local/cutlass/include",
-            "/usr/local/cutlass/tools/util/include",
-        ],
-        extra_cuda_cflags=[
-            "-O3",
-            "-std=c++17",
-            "-gencode=arch=compute_100a,code=sm_100a",
-        ],
-        extra_cflags=["-O3", "-std=c++17"],
-        with_cuda=True,
-        build_directory=build_root,
-        verbose=False,
-    )
-    return _cutlass_ext
 
 
 def compile_kernel(cfg: KernelConfig):
@@ -1602,15 +1374,6 @@ def custom_kernel(data: input_t) -> output_t:
     m, k, l = a.shape
     n, _, _ = b.shape
     k = k * 2
-
-    use_cutlass = os.getenv("NVFP4_USE_CUTLASS", "0") == "1"
-    if use_cutlass:
-        try:
-            ext = _get_cutlass_ext()
-            ext.nvfp4_cutlass_gemm(a, b, sfa_permuted, sfb_permuted, c)
-            return c
-        except Exception:
-            pass
 
     cfg = select_config(m, n, k)
     try:
