@@ -1292,14 +1292,21 @@ def _make_cfg(name_suffix, mma_tiler_mn, cluster_shape_mn, swizzle_size, raster_
     )
 
 
-def _candidate_configs(n: int, k: int):
+def _candidate_configs(n: int, k: int, m: int):
+    if m != 128:
+        return [select_config(m, n, k)]
+    if n == 7168 and not (k >= 16384 or k <= 2048):
+        return [select_config(m, n, k)]
+    if n == 4096 and k < 7168:
+        return [select_config(m, n, k)]
+
     candidates = []
     if n == 7168:
-        mma_tilers = [(128, 128), (128, 192), (128, 256)]
+        mma_tilers = [(128, 192), (128, 256), (128, 128)]
     else:
-        mma_tilers = [(128, 128), (128, 192)]
-    cluster_shapes = [(1, 1), (2, 1)]
-    swizzle_sizes = [1, 2]
+        mma_tilers = [(128, 128), (128, 192), (128, 256)]
+    cluster_shapes = [(1, 1), (2, 1), (1, 2), (2, 2)]
+    swizzle_sizes = [1, 2, 4]
     raster_flags = [True, False]
 
     for mma_tiler_mn in mma_tilers:
@@ -1327,7 +1334,7 @@ def _time_kernel(compiled_func, a_ptr, b_ptr, sfa_ptr, sfb_ptr, c_ptr, m, n, k, 
     compiled_func(a_ptr, b_ptr, sfa_ptr, sfb_ptr, c_ptr, (m, n, k, l))
     torch.cuda.synchronize()
     timings = []
-    for _ in range(3):
+    for _ in range(2):
         evt_start = torch.cuda.Event(enable_timing=True)
         evt_end = torch.cuda.Event(enable_timing=True)
         evt_start.record()
@@ -1344,7 +1351,7 @@ def _select_or_tune_config(a, b, sfa_permuted, sfb_permuted, c, m, n, k, l):
     if cached is not None:
         return cached
 
-    candidates = _candidate_configs(n, k)
+    candidates = _candidate_configs(n, k, m)
     best_cfg = None
     best_time = None
 
