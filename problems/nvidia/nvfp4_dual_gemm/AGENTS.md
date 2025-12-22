@@ -19,10 +19,13 @@ Optimize block-scaled dual matrix multiplication kernels for NVIDIA B200 (SM100/
 ## Target Performance
 
 Speed-of-light analysis (1.5GHz clock):
-- Shape (128, 7168, 16384): 8.994μs
-- Shape (128, 4096, 7168): 2.354μs  
-- Shape (128, 7168, 2048): 1.333μs
-- **Target geometric mean: ~3.04μs**
+  M   N   K   L time[us]
+256 4096 7168 1 4.708
+512 4096 7168 1 8.714
+256 3072 4096 1 2.125
+512 3072 7168 1 6.535
+
+Geometric mean of those four times ≈ 4.89 µs.
 
 ## Optimization Strategy
 
@@ -41,27 +44,29 @@ The kernel is **memory bandwidth bound**, not compute bound. Focus optimization 
 
 ### Data Flow (tcgen05_FLOW)
 ```
-Global A/B (packed FP4) → TMA → SMEM (packed FP4)
+Global A/B1/B2 (packed FP4) → TMA → SMEM (packed FP4)
 Global SF (FP8, atom-tiled) → TMA → SMEM
-→ tcgen05 S2T copy (SMEM FP8 → TMEM SFA/SFB)
-→ tcgen05.mma.mxf4.block_scale
+→ tcgen05 S2T copy (SMEM FP8 → TMEM SFA/SFB1/SFB2)
+→ tcgen05.mma.mxf4.block_scale (run twice: A@B1 and A@B2)
   ├─ Hardware FP4→FP16 decode
   ├─ Hardware FP8 scale application
   └─ MMA (ACCUMULATE=false first k_tile, then true)
-→ TMEM (FP32 accum) → Registers → FP16 → Global D
+→ TMEM (FP32 accum) → Registers → silu+mul → FP16 → Global D
 ```
 
 ## Correctness Requirements
 
 ### Reference Semantics
-- Match `torch._scaled_mm(..., out_dtype=torch.float16)` behavior exactly
-- B matrix is already shaped as (n, k, l); interpret via layouts (no explicit transpose)
-- Scale factors use `sfa_permuted/sfb_permuted` (atom-tiled physical layout)
-- Must be equivalent to `to_blocked(sfa_ref_cpu)` semantics from reference.py
+- The evaluation entrypoint uses a 10-tuple input like `reference.py` / `70.py`:
+  `(a, b1, b2, sfa_cpu, sfb1_cpu, sfb2_cpu, sfa_permuted, sfb1_permuted, sfb2_permuted, c)`.
+- Compute semantics: `C = silu(A @ B1) * (A @ B2)`.
+- Per `reference.py`, the reference math uses `torch._scaled_mm(..., out_dtype=torch.float32)` for each GEMM path, then applies `silu` and multiply, then casts to FP16.
+- Physical B1/B2 inputs are already shaped/layouted as `(n, k, l)` for the kernel; interpret accordingly via layouts/iterators (do not explicit-transpose in-kernel).
+- Scale factors for the kernel must use the permuted physical layout: `sfa_permuted/sfb1_permuted/sfb2_permuted`.
 
 ### Numerical Tolerance
 - rtol=1e-3, atol=1e-3
-- Output must be FP16, not FP32
+- Output tensor `c` must be FP16 (internal accumulation/compute may be FP32)
 - All 10 test cases must pass correctness checks
 
 ### Input Constraints
@@ -85,7 +90,7 @@ Global SF (FP8, atom-tiled) → TMA → SMEM
 ## Optimization Checklist
 
 ### NOTE:
-- No micro-optimization work is allowed until the user specified that all 10 correctness tests and 3 benchmark shape tests pass (rtol/atol)
+- No micro-optimization work is allowed until the user specified that all 10 correctness tests and 4 benchmark shape tests pass (rtol/atol)
 - Prefer 128-thread CTAs for tcgen05 path unless there is a proven need for extra warps; extra warps otherwise waste occupancy/bandwidth headroom
 
 ### Kernel Launch Configuration
@@ -147,12 +152,11 @@ Global SF (FP8, atom-tiled) → TMA → SMEM
 | Using sfa_ref_cpu directly | Wrong physical layout; must use sfa_permuted |
 | FP32 output | Task requires FP16 output dtype |
 | Custom stream management | Violates competition rules; invalid timing |
-| Porting/embedding CuTe reference kernel (kutte.py) into submission.py | violates the intended PTX kernel path |
+| Porting/embedding CuTe reference kernel (70.py) into submission.py | violates the intended PTX kernel path |
 
 ## Success Criteria
 
 1. ✅ Pass all 10 correctness tests (rtol=1e-3, atol=1e-3)
-2. ✅ Achieve geometric mean ≤ 3.04μs on 3 benchmark shapes
+2. ✅ Achieve strong geometric mean performance on the 4 benchmark shapes in `task.yml`
 3. ✅ Memory bandwidth utilization > 95% of theoretical peak
 4. ✅ Zero competition rule violations
-

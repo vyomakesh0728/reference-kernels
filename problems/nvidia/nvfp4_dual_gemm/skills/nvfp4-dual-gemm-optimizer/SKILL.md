@@ -139,13 +139,17 @@ DEBUG NEXT STEPS:
    
 
   2. task.yml
-     - task.yml text describes a 5-tuple, but the provided evaluation harness/reference uses the 7-tuple described above.
+     - task.yml text describes a 7-tuple, but the evaluation harness/reference code uses a 10-tuple input:
+       `(a, b1, b2, sfa_cpu, sfb1_cpu, sfb2_cpu, sfa_permuted, sfb1_permuted, sfb2_permuted, c)`.
      - M divisible by mma_tiler_mn[0] (e.g., 16 or 32 factors).
      - N divisible by mma_tiler_mn[1] (e.g., 8 or 16 factors).
      - K divisible by 256.
      - All benchmark shapes have L=1.
      - Ranking by geometric mean runtime over test cases.
-     - Target SoL latencies: ~8.994 μs, 2.354 μs, 1.333 μs for the official
-       benchmark shapes (as documented in the competition materials).
+     - Target SoL latencies (1.5Ghz):
+       - (256, 4096, 7168, 1): 4.708 us
+       - (512, 4096, 7168, 1): 8.714 us
+       - (256, 3072, 4096, 1): 2.125 us
+       - (512, 3072, 7168, 1): 6.535 us
 
 ---

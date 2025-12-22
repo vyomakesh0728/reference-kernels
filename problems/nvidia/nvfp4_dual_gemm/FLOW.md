@@ -15,9 +15,9 @@ cute.copy(TMA atoms):
   A GMEM → sA SMEM (staged layout, num_ab_stage)
   B1 GMEM → sB1 SMEM (staged layout, num_ab_stage)
   B2 GMEM → sB2 SMEM (staged layout, num_ab_stage)
-  SFA GMEM → sSFA SMEM (staged layout, num_ab_stage; (optional) filter_zeros/compact view to match tcgen05 Cp4x32x128b expectations)
-  SFB1 GMEM → sSFB1 SMEM (staged layout, num_ab_stage; (optional) filter_zeros/compact view to match tcgen05 Cp4x32x128b expectations)
-  SFB2 GMEM → sSFB2 SMEM (staged layout, num_ab_stage; (optional) filter_zeros/compact view to match tcgen05 Cp4x32x128b expectations)
+  SFA GMEM → sSFA SMEM (staged layout, num_ab_stage; 
+  SFB1 GMEM → sSFB1 SMEM (staged layout, num_ab_stage; 
+  SFB2 GMEM → sSFB2 SMEM (staged layout, num_ab_stage; 
 Synchronization via PipelineTmaUmma (ab_producer/ab_consumer barriers)
 
 2. TMEM Allocate + Scale Placement (SMEM → TMEM)
