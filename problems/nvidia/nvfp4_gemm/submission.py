@@ -37,12 +37,6 @@ cuda_source = r"""
 
 using cutlass::half_t;
 
-// Debug-only: targeted dump to localize mismatches around TMEM->reg epilogue.
-// Default off; enable by compiling with -DNVFP4_DEBUG_DUMP=1.
-#ifndef NVFP4_DEBUG_DUMP
-#define NVFP4_DEBUG_DUMP 0
-#endif
-
 // ===== HELPER FUNCTIONS =====
 
 inline void check_cuda(cudaError_t code, const char* msg) {
@@ -86,66 +80,6 @@ CUresult encode_tma_matrix(
 
 // ===== END HELPER FUNCTIONS =====
 
-__device__ __forceinline__ float decode_fp8_e4m3(uint8_t val) {
-    cutlass::float_e4m3_t fp8_val = *reinterpret_cast<cutlass::float_e4m3_t*>(&val);
-    return __half2float(__float2half_rn(fp8_val));
-}
-
-// Scale factors come from the permuted (atom-tiled) layout:
-//   (mm32=32, mm4=4, rest_mn, kk4=4, rest_k)
-// For a CTA tile (128 rows, TileK=256 => 16 scale columns), we TMA-load 2048B:
-//   4 chunks × 512B, where each 512B chunk is a 32×16 panel:
-//     rows = mm32 (0..31)
-//     cols = packed16 = (mm4*4 + kk4) (0..15)
-// This helper fetches the correct byte for a logical row (0..127) and local
-// scale column (0..15) from that 2048B tile.
-template<int TileK>
-__device__ __forceinline__ uint8_t load_sf_tile_byte_2048(const uint8_t* __restrict__ sf_tile,
-                                                          int row, int scale_col) {
-    static_assert(TileK % 256 == 0 || TileK == 256, "Expected TileK=256 for current kernel");
-    constexpr int SF_STRIDE = TileK / 16;  // 16 scale columns for TileK=256
-    (void)SF_STRIDE;
-    // row: 0..127 => mm32 in [0,31], mm4 in [0,3]
-    int mm32 = row & 31;
-    int mm4  = row >> 5;
-    // scale_col: 0..15 => rest_k in [0,3], kk4 in [0,3]
-    int rest_k = scale_col >> 2;
-    int kk4    = scale_col & 3;
-    int packed16 = (mm4 << 2) | kk4;
-    // 512B chunk per rest_k, 16B per mm32 row
-    return sf_tile[rest_k * 512 + mm32 * 16 + packed16];
-}
-
-// Hardware FP4 decode helper using cvt.rn.f16x2.e2m1x2, adapted from gau.py.
-// Decodes a byte containing two FP4 values (float4_e2m1fn_x2) into a half2.
-__device__ __forceinline__ void fp4x8_to_fp16x2x4(int *out, int in) {
-    asm volatile(
-        "{\n\t"
-        ".reg .b8 tmp0, tmp1, tmp2, tmp3;\n\t"
-        "mov.b32 {tmp0, tmp1, tmp2, tmp3}, %4;\n\t" // unpack 32-bit to 4x fp4x2
-        "cvt.rn.f16x2.e2m1x2 %0, tmp0;\n\t"
-        "cvt.rn.f16x2.e2m1x2 %1, tmp1;\n\t"
-        "cvt.rn.f16x2.e2m1x2 %2, tmp2;\n\t"
-        "cvt.rn.f16x2.e2m1x2 %3, tmp3;\n\t"
-        "}"
-        : "=r"(out[0]), "=r"(out[1]), "=r"(out[2]), "=r"(out[3])
-        : "r"(in)
-    );
-}
-
-__device__ __forceinline__ void decode_fp4x2_hw(uint8_t packed, half &h0, half &h1) {
-    // Hardware cvt.rn.f16x2.e2m1x2 decodes: low nibble first, high nibble second
-    // But Python does: hi = byte >> 4, lo = byte & 0xF (hi first, lo second)
-    // So we need to swap: h0 = hi nibble (>>4), h1 = lo nibble (&0xF)
-    int out_i32[4];
-    int in32 = static_cast<int>(packed);
-    fp4x8_to_fp16x2x4(out_i32, in32);
-    half2 pair = *reinterpret_cast<half2*>(&out_i32[0]);
-    // Swap order to match Python: hi nibble -> h0, lo nibble -> h1
-    h0 = __high2half(pair);  // was __low2half - this is the hi nibble (>>4)
-    h1 = __low2half(pair);   // was __high2half - this is the lo nibble (&0xF)
-}
-
 __device__ __forceinline__ uint32_t cvta_to_shared_u32(const void* ptr) {
     uint32_t addr32;
     asm volatile(
@@ -160,62 +94,7 @@ __device__ __forceinline__ uint32_t cvta_to_shared_u32(const void* ptr) {
     return addr32;
 }
 
-#ifndef NDEBUG
-// Global debug caps: overall and per-thread (flattened grid thread id, hashed).
-__device__ unsigned int g_debug_error_count = 0;
-__device__ unsigned int g_debug_thread_error_counts[1024];
-#define DEBUG_MAX_ERRORS 64u
-#define DEBUG_MAX_ERRORS_PER_THREAD 2u
-
-#define DEBUG_PRINT_ERROR(fmt, ...)                                                        \
-    do {                                                                                   \
-        unsigned int _tid_flat =                                                           \
-            threadIdx.x + blockDim.x *                                                     \
-            (blockIdx.x + gridDim.x * (blockIdx.y + gridDim.y * blockIdx.z));             \
-        unsigned int _slot = _tid_flat & 1023u;                                            \
-        unsigned int _t = atomicAdd(&g_debug_thread_error_counts[_slot], 1u);              \
-        if (_t < DEBUG_MAX_ERRORS_PER_THREAD) {                                            \
-            unsigned int _g = atomicAdd(&g_debug_error_count, 1u);                         \
-            if (_g < DEBUG_MAX_ERRORS) {                                                   \
-                // printf(fmt, __VA_ARGS__);                                                  \
-            }                                                                              \
-        }                                                                                  \
-    } while (0)
-
-#define DEBUG_OOB_GLOBAL_1D(name, idx, size, base_ptr)                                     \
-    do {                                                                                   \
-        long long _i = static_cast<long long>(idx);                                        \
-        long long _n = static_cast<long long>(size);                                       \
-        if (_i < 0 || _i >= _n) {                                                          \
-            DEBUG_PRINT_ERROR("OOB GLOBAL %s idx=%lld size=%lld base=%p at %s:%d\n",       \
-                              name, _i, _n, (const void*)(base_ptr), __FILE__, __LINE__);  \
-        }                                                                                  \
-    } while (0)
-
-#define DEBUG_OOB_SMEM_1D(name, idx, size, base_ptr)                                       \
-    do {                                                                                   \
-        long long _i = static_cast<long long>(idx);                                        \
-        long long _n = static_cast<long long>(size);                                       \
-        if (_i < 0 || _i >= _n) {                                                          \
-            uint32_t _addr = cvta_to_shared_u32(base_ptr);                                 \
-            DEBUG_PRINT_ERROR("OOB SMEM %s idx=%lld size=%lld base_smem_addr=%u at %s:%d\n",\
-                              name, _i, _n, _addr, __FILE__, __LINE__);                    \
-        }                                                                                  \
-    } while (0)
-
-#else
-#define DEBUG_PRINT_ERROR(fmt, ...) do { } while (0)
-#define DEBUG_OOB_GLOBAL_1D(name, idx, size, base_ptr) do { } while (0)
-#define DEBUG_OOB_SMEM_1D(name, idx, size, base_ptr) do { } while (0)
-#define DEBUG_MAX_ERRORS 0u
-#endif
-
-
-
-// Enable advanced tcgen05-based mainloop when non-zero.
-#ifndef USE_tcgen05_MAINLOOP
-#define USE_tcgen05_MAINLOOP 1
-#endif
+// tcgen05 mainloop only.
 
 #if __CUDA_ARCH__ >= 900
 __device__ __forceinline__ void mbarrier_init(uint64_t* mbar) {
@@ -529,24 +408,19 @@ template<int TileM, int TileK>
 __device__ __forceinline__ void prefetch_tile(
     int stage, int k_tile_base,
     bool use_tma_a, bool is_producer, int warp_id, int lane_id,
-    int m_tile, int n_tile, int K_packed, int K_scales, int M, int N,
+    int m_tile, int n_tile, int K_packed, int M, int N,
     uint8_t** a_packed_stage, uint8_t** b_packed_stage, uint8_t** sfa_stage, uint8_t** sfb_stage,
     uint64_t* mbar,
     const CUtensorMap* desc_A, const CUtensorMap* desc_B,
     const CUtensorMap* desc_SFA, const CUtensorMap* desc_SFB
 ) {
     constexpr int TileKPacked = TileK / 2;
-    // SfaBoxK is 128 for SWIZZLE_128B (Rank-2 GEMM now uses SWIZZLE_128B)
-    constexpr int SfaBoxK = 128; 
-
     if (use_tma_a && is_producer) {
         if (warp_id == 0 && lane_id == 0) {
             // Element-space coordinates
             uint32_t c_m = static_cast<uint32_t>(m_tile);
             uint32_t c_n = static_cast<uint32_t>(n_tile);
             uint32_t c_k_packed = static_cast<uint32_t>(k_tile_base >> 1);
-            uint32_t c_k_scales = static_cast<uint32_t>(k_tile_base >> 4);
-
             // Relaxed guards: Allow partial tiles
             // TMA handles OOB by zero-filling (if configured) or we rely on padding.
             // Since we padded the tensors in Python, we can safely load full tiles.
@@ -641,267 +515,10 @@ __device__ __forceinline__ void prefetch_tile(
 }
 #endif
 
-// Minimal per-tile helper: decode + MMA only (no K-loop, no prefetch, no wait/sync)
-// Lifted directly from sahasra_copy.py lines 1117-1347
-// Minimal per-tile helper: decode + MMA
-template<int TileM, int TileN, int TileK, int Threads>
-__device__ __forceinline__ void process_tile(
-    int k_tile, int stage, int tile_rows, int tile_cols,
-    int m_tile, int n_tile,
-    uint8_t** a_packed_stage, uint8_t** b_packed_stage,
-    uint8_t** sfa_stage, uint8_t** sfb_stage,
-    const uint8_t* __restrict__ A_packed,
-    const uint8_t* __restrict__ B_packed,
-    const uint8_t* __restrict__ SFA_packed,
-    const uint8_t* __restrict__ SFB_packed,
-    half* a_f16_smem, half* b_f16_smem,
-    const int M, const int N, const int K, const int K_scales,
-    const int tid, const int warp_id, const int lane_id,
-    const bool is_producer, const bool is_consumer,
-    float c_accum[16][4]
-) {
-    constexpr int TileKPacked = TileK / 2;
-    constexpr int a_stride = TileK + 8;
-    constexpr int b_stride = TileK + 8;
-    // Use a simple [TileK, TileN] K-major layout for decoded B so each K-row
-    // has TileN contiguous columns. This gives a per-row pitch of TileN * 2
-    // bytes, which is a multiple of 16 bytes (TileN=128), satisfying
-    // ldmatrix alignment requirements.
-    constexpr int b_k_stride = TileN;
-    constexpr int SfaBoxK = 128;
-    // Correct stride for scale factor tiles: 2048 bytes = 128 rows × 16 cols
-    constexpr int SF_STRIDE = TileK / 16;  // 16 scales per row (256/16=16)
-
-    const int K_packed = K >> 1;
-    // K_scales is already passed as parameter
-
-    // Base K indices for this tile
-    const int k_packed_base = k_tile >> 1;
-    const int k_scales_base = k_tile >> 4;
-    // This stage's scale tile corresponds exactly to global scale columns
-    // [k_scales_base, k_scales_base + SF_STRIDE).
-
-    // TMA stage tiles interpreted as row-major
-    uint8_t* a_tile  = a_packed_stage[stage];   // [TileM, TileKPacked]
-    uint8_t* b_tile  = b_packed_stage[stage];   // [TileN, TileKPacked]
-    uint8_t* sfa_tile = sfa_stage[stage];       // [TileM, SF_STRIDE] = [128, 16]
-    uint8_t* sfb_tile = sfb_stage[stage];       // [TileN, SF_STRIDE] = [128, 16]
-
-    int curr_k = (K - k_tile) < TileK ? (K - k_tile) : TileK;
-    int curr_cols_a = (curr_k + 1) >> 1;
-    int curr_cols_b = (curr_k + 1) >> 1;
-    int scale_count = (curr_k + 15) >> 4;
- 
-     // --- DECODE A (M x K) into row-major [TileM, TileK] ---
-    {
-        // Each thread processes groups of 8 packed bytes (one FP8 scale block) per row
-        int total_blocks_a = tile_rows * scale_count;
-        for (int idx = tid; idx < total_blocks_a; idx += Threads) {
-            int row       = idx / scale_count;
-            int scale_col = idx - row * scale_count;   // K-block within the tile
-
-            int m_global        = m_tile + row;
-            int global_k_scale  = k_scales_base + scale_col;
-
-            // Load FP8 scale once per 16 FP4 values (8 packed bytes)
-            half scale_h = __float2half(0.0f);
-            if (m_global < M && global_k_scale < K_scales) {
-                // scale_col is the *local* scale column within this TileK slice (0..SF_STRIDE-1)
-                // NOTE: sf_tile is in packed16×mm32 chunks (not a simple row-major [128,16]).
-                uint8_t sfa_byte = load_sf_tile_byte_2048<TileK>(sfa_tile, row, scale_col);
-                scale_h = __float2half(decode_fp8_e4m3(sfa_byte));
-            }
-
-            // Columns of packed FP4 covered by this scale block
-            int col_packed_start = scale_col << 3;     // 8 packed bytes per 16 FP4
-            int col_packed_end   = col_packed_start + 8;
-            if (col_packed_start >= curr_cols_a) {
-                continue;
-            }
-            if (col_packed_end > curr_cols_a) {
-                col_packed_end = curr_cols_a;
-            }
-
-            int   k_base_block = k_tile + (col_packed_start << 1);
-            half* a_dst        = a_f16_smem + row * a_stride;
-
-            for (int col_packed = col_packed_start; col_packed < col_packed_end; ++col_packed) {
-                int k_base          = k_base_block + ((col_packed - col_packed_start) << 1);
-                int k_packed_global = (k_base >> 1);
-
-                uint8_t packed = 0;
-                if (m_global < M && k_packed_global < K_packed) {
-                    int a_tile_idx = row * TileKPacked + col_packed;
-                    packed = a_tile[a_tile_idx];
-                }
-
-                half v0, v1;
-                decode_fp4x2_hw(packed, v0, v1);
-                v0 = __hmul(v0, scale_h);
-                v1 = __hmul(v1, scale_h);
-
-                a_dst[col_packed * 2]     = v0;
-                a_dst[col_packed * 2 + 1] = v1;
-            }
-        }
-    }
-
-    // --- DECODE B (N x K) into K-major layout [TileK, TileN] ---
-    {
-        // Symmetric decode for B: reuse one FP8 scale across 8 packed bytes
-        int total_blocks_b = tile_cols * scale_count;
-        for (int idx = tid; idx < total_blocks_b; idx += Threads) {
-            int row       = idx / scale_count;          // N dimension within tile
-            int scale_col = idx - row * scale_count;    // K-block within tile
-
-            int n_global       = n_tile + row;
-            int global_k_scale = k_scales_base + scale_col;
-
-            half scale_h = __float2half(0.0f);
-            if (n_global < N && global_k_scale < K_scales) {
-                uint8_t sfb_byte = load_sf_tile_byte_2048<TileK>(sfb_tile, row, scale_col);
-                scale_h = __float2half(decode_fp8_e4m3(sfb_byte));
-            }
-
-            int col_packed_start = scale_col << 3;
-            int col_packed_end   = col_packed_start + 8;
-            if (col_packed_start >= curr_cols_b) {
-                continue;
-            }
-            if (col_packed_end > curr_cols_b) {
-                col_packed_end = curr_cols_b;
-            }
-
-            int k_base_block = k_tile + (col_packed_start << 1);
-
-            for (int col_packed = col_packed_start; col_packed < col_packed_end; ++col_packed) {
-                int k_base          = k_base_block + ((col_packed - col_packed_start) << 1);
-                int k_packed_global = (k_base >> 1);
-
-                uint8_t packed = 0;
-                if (n_global < N && k_packed_global < K_packed) {
-                    int b_tile_idx = row * TileKPacked + col_packed;
-                    packed = b_tile[b_tile_idx];
-                }
-
-                half v0, v1;
-                decode_fp4x2_hw(packed, v0, v1);
-                v0 = __hmul(v0, scale_h);
-                v1 = __hmul(v1, scale_h);
-
-                int k0 = col_packed * 2;
-                int k1 = k0 + 1;
-
-                if (row < tile_cols) {
-                    if (k0 < TileK) {
-                        half* b_row0 = b_f16_smem + k0 * b_k_stride;
-                        b_row0[row] = v0;
-                    }
-                    if (k1 < TileK) {
-                        half* b_row1 = b_f16_smem + k1 * b_k_stride;
-                        b_row1[row] = v1;
-                    }
-                }
-            }
-        }
-    }
-
-    __syncthreads();
-
-    // --- MMA LOOP: CUTLASS-style m16n8k16 layout ---
-    if (!is_consumer) {
-        return;
-    }
-
-    constexpr int MMA_M = 16;
-    constexpr int MMA_N = 8;
-    constexpr int MMA_K = 16;
-    constexpr int WARP_TILE_M = 4;  // 4x4 warp tiles -> 128x128 per CTA
-    constexpr int WARP_TILE_N = 4;
-
-    const int warp_m = warp_id % 2; // 0..1
-    const int warp_n = warp_id / 2; // 0..3
-
-    for (int kk = 0; kk < curr_k; kk += MMA_K) {
-        uint32_t RA[WARP_TILE_M][4];
-        uint32_t RB[WARP_TILE_N][2];
-
-        // Load A fragments: row-major [TileM, TileK]
-        #pragma unroll
-        for (int i = 0; i < WARP_TILE_M; ++i) {
-            int warp_smem_a_m = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M; // 0..127
-            int lane_smem_a_m = warp_smem_a_m + (lane_id % 16);            // 0..15 within tile
-            if (lane_smem_a_m < tile_rows) {
-                int lane_smem_a_k = kk + (lane_id / 16) * 8;               // 0 or 8 within this k-block
-                if (lane_smem_a_k < curr_k) {
-                    uint32_t a_base = cvta_to_shared_u32(
-                        a_f16_smem + lane_smem_a_m * a_stride + lane_smem_a_k);
-                    asm volatile(
-                        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 { %0, %1, %2, %3 }, [%4];\n"
-                        : "=r"(RA[i][0]), "=r"(RA[i][1]), "=r"(RA[i][2]), "=r"(RA[i][3])
-                        : "r"(a_base)
-                    );
-                } else {
-                    RA[i][0] = RA[i][1] = RA[i][2] = RA[i][3] = 0u;
-                }
-            } else {
-                RA[i][0] = RA[i][1] = RA[i][2] = RA[i][3] = 0u;
-            }
-        }
-
-        // Load B fragments: treat shared B as column-major [TileK, TileN]
-        #pragma unroll
-        for (int j = 0; j < WARP_TILE_N; ++j) {
-            int warp_smem_b_n = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N; // 0..127
-            int lane_smem_b_k = kk + (lane_id % 16);                        // 0..15 within k-block
-            if (lane_smem_b_k < curr_k && warp_smem_b_n < tile_cols) {
-                uint32_t b_base = cvta_to_shared_u32(
-                    b_f16_smem + lane_smem_b_k * b_k_stride + warp_smem_b_n);
-                asm volatile(
-                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 { %0, %1 }, [%2];\n"
-                    : "=r"(RB[j][0]), "=r"(RB[j][1])
-                    : "r"(b_base)
-                );
-            } else {
-                RB[j][0] = RB[j][1] = 0u;
-            }
-        }
-
-        // MMA compute: accumulate into c_accum flattened as [i * WARP_TILE_N + j][0..3]
-        #pragma unroll
-        for (int i = 0; i < WARP_TILE_M; ++i) {
-            int row_block = warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
-            if (row_block >= tile_rows) continue;
-            #pragma unroll
-            for (int j = 0; j < WARP_TILE_N; ++j) {
-                int col_block = warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
-                if (col_block >= tile_cols) continue;
-
-                int acc_idx = i * WARP_TILE_N + j; // 0..15
-                asm volatile(
-                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                    "{ %0, %1, %2, %3 }, "
-                    "{ %4, %5, %6, %7 }, "
-                    "{ %8, %9 }, "
-                    "{ %0, %1, %2, %3 };\n"
-                    : "+f"(c_accum[acc_idx][0]), "+f"(c_accum[acc_idx][1]),
-                      "+f"(c_accum[acc_idx][2]), "+f"(c_accum[acc_idx][3])
-                    : "r"(RA[i][0]), "r"(RA[i][1]), "r"(RA[i][2]), "r"(RA[i][3]),
-                      "r"(RB[j][0]), "r"(RB[j][1])
-                );
-            }
-        }
-    }
-}
-
 // RANK2 CTA + SWIZZLE_128B + BOX_K 128 BYTE (NO CLUSTER)
 template<int TileM, int TileK, int Threads>
 __global__ void __launch_bounds__(Threads)
 fp4_gemm_rank2_cta(
-    const uint8_t* __restrict__ A_packed,
-    const uint8_t* __restrict__ B_packed,
-    const uint8_t* __restrict__ SFA_packed,
-    const uint8_t* __restrict__ SFB_packed,
     const CUtensorMap* __restrict__ desc_A,
     const CUtensorMap* __restrict__ desc_SFA,
     const CUtensorMap* __restrict__ desc_B,
@@ -912,16 +529,12 @@ fp4_gemm_rank2_cta(
 #if __CUDA_ARCH__ >= 900
     constexpr int TileKPacked = TileK / 2;
     constexpr int TileN = 128; // Fixed TileN matching TileM
-    constexpr int SfaBoxK = 128;  // Rank-2 GEMM: SWIZZLE_128B
     constexpr int StageCount = 2; 
-    constexpr int a_stride = TileK + 8;
-    constexpr int b_stride = TileK + 8;
 
     const int tid = threadIdx.x;
     const int warp_id = tid >> 5;
     const int lane_id = tid & 31;
     const bool is_producer = warp_id == 0; // Warp 0 issues TMA
-    const bool is_consumer = true; // All warps compute (including warp 0 after barrier)
 
     // Grid: x=M_tile, y=N_tile, z=Batch(L)
     const int batch = blockIdx.z;
@@ -931,8 +544,6 @@ fp4_gemm_rank2_cta(
     if (batch >= L || m_tile >= M || n_tile >= N) return;
 
     const int K_packed = K >> 1;
-    const int tile_rows = (M - m_tile) < TileM ? (M - m_tile) : TileM;
-    const int tile_cols = (N - n_tile) < TileN ? (N - n_tile) : TileN;
 
     extern __shared__ uint8_t smem[];
 
@@ -956,12 +567,6 @@ fp4_gemm_rank2_cta(
         offset += static_cast<size_t>(aligned - addr);
     };
     
-    // Helper to align to 128 bytes
-    auto align_up_smem_128 = [&] __device__() {
-        uint32_t addr = cvta_to_shared_u32(smem + offset);
-        uint32_t aligned = (addr + 127u) & ~127u;
-        offset += static_cast<size_t>(aligned - addr);
-    };
 
     uint64_t* mbar = alloc_mbar_array(StageCount);
     uint64_t* mbar_cp = alloc_mbar_array(StageCount);
@@ -999,24 +604,6 @@ fp4_gemm_rank2_cta(
         offset += SF_TILE_BYTES;
     }
 
-    #if !USE_tcgen05_MAINLOOP
-    // =========================================================================
-    // FP16 decode buffers - ONLY needed for non-tcgen05 path
-    // tcgen05.mma consumes packed FP4 directly, no decode buffers needed!
-    // =========================================================================
-    align_up_smem_128();
-    half* a_f16_smem = reinterpret_cast<half*>(smem + offset);
-    offset += static_cast<size_t>(TileM) * a_stride * sizeof(half);
-    
-    align_up_smem_128();
-    half* b_f16_smem = reinterpret_cast<half*>(smem + offset);
-    offset += static_cast<size_t>(TileN) * b_stride * sizeof(half);
-    
-    align_up_smem_128();
-    float* c_smem_from_tmem = reinterpret_cast<float*>(smem + offset);
-    offset += static_cast<size_t>(TileM) * static_cast<size_t>(TileN) * sizeof(float);
-    #endif  // !USE_tcgen05_MAINLOOP
-
     (void)offset;
 
     const bool use_tma_a = (desc_A != nullptr);
@@ -1031,123 +618,6 @@ fp4_gemm_rank2_cta(
     }
     __syncthreads();
 
-    #if !USE_tcgen05_MAINLOOP
-    // Accumulators - ONLY for non-tcgen05 path (tcgen05 uses TMEM)
-    float c_accum[16][4]; // 16 steps of N=8, 4 floats each
-    #pragma unroll
-    for(int i=0; i<16; ++i) {
-        #pragma unroll
-        for(int j=0; j<4; ++j) c_accum[i][j] = 0.0f;
-    }
-    #endif  // !USE_tcgen05_MAINLOOP
-
-    #if !USE_tcgen05_MAINLOOP
-    // Main Loop
-    int phase = 0;
-    
-    // Prologue: Prefetch stages 0 to StageCount-2
-    for (int s = 0; s < StageCount - 1; ++s) {
-        int k_tile = s * TileK;
-        if (k_tile < K) {
-            prefetch_tile<TileM, TileK>(
-                s, k_tile, use_tma_a, is_producer, warp_id, lane_id,
-                m_tile, n_tile, K_packed, K_scales, M, N,
-                a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
-                mbar,
-                desc_A, desc_B, desc_SFA, desc_SFB
-            );
-        }
-    }
-
-    for (int k_tile = 0; k_tile < K; k_tile += TileK) {
-        int stage = (k_tile / TileK) % StageCount;
-        int next_k = k_tile + (StageCount - 1) * TileK;
-
-        // Issue prefetch for next_k
-        if (next_k < K) {
-            prefetch_tile<TileM, TileK>(
-                (stage + StageCount - 1) % StageCount, next_k, use_tma_a, is_producer, warp_id, lane_id,
-                m_tile, n_tile, K_packed, K_scales, M, N,
-                a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
-                mbar,
-                desc_A, desc_B, desc_SFA, desc_SFB
-            );
-        }
-
-        // Wait for current stage
-        mbarrier_wait_parity(mbar_stage(mbar, stage), phase);
-        __syncthreads(); // Ensure all threads see data
-
-        // Process tile
-        process_tile<TileM, TileN, TileK, Threads>(
-            k_tile, stage, tile_rows, tile_cols,
-            m_tile, n_tile,
-            a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
-            A_packed, B_packed, SFA_packed, SFB_packed,
-            a_f16_smem, b_f16_smem,
-            M, N, K, K_scales,
-            tid, warp_id, lane_id,
-            is_producer, is_consumer,
-            c_accum
-        );
-        
-        __syncthreads(); // Ensure consumers done before recycling stage?
-        
-        if ((k_tile / TileK) % StageCount == StageCount - 1) {
-            phase ^= 1;
-        }
-    }
-
-    // Epilogue: Writeback using canonical m16n8k16 lane mapping
-    {
-        constexpr int MMA_M = 16;
-        constexpr int MMA_N = 8;
-        constexpr int WARP_TILE_M = 4;
-        constexpr int WARP_TILE_N = 4;
-
-        int warp_m = warp_id % 2;
-        int warp_n = warp_id / 2;
-
-        int lane_row_group = lane_id / 4; // 0..7
-        int lane_col_group = lane_id % 4; // 0..3
-
-        int row0 = lane_row_group;
-        int row1 = lane_row_group + 8;
-        int col0 = lane_col_group * 2;
-        int col1 = col0 + 1;
-
-        for (int i = 0; i < WARP_TILE_M; ++i) {
-            for (int j = 0; j < WARP_TILE_N; ++j) {
-                int acc_idx = i * WARP_TILE_N + j; // 0..15
-
-                int tile_row_base = m_tile + warp_m * (MMA_M * WARP_TILE_M) + i * MMA_M;
-                int tile_col_base = n_tile + warp_n * (MMA_N * WARP_TILE_N) + j * MMA_N;
-
-                int global_row0 = tile_row_base + row0;
-                int global_row1 = tile_row_base + row1;
-                int global_col0 = tile_col_base + col0;
-                int global_col1 = tile_col_base + col1;
-
-                if (global_row0 < M) {
-                    if (global_col0 < N) {
-                        D[global_row0 * N + global_col0] = __float2half(c_accum[acc_idx][0]);
-                    }
-                    if (global_col1 < N) {
-                        D[global_row0 * N + global_col1] = __float2half(c_accum[acc_idx][1]);
-                    }
-                }
-                if (global_row1 < M) {
-                    if (global_col0 < N) {
-                        D[global_row1 * N + global_col0] = __float2half(c_accum[acc_idx][2]);
-                    }
-                    if (global_col1 < N) {
-                        D[global_row1 * N + global_col1] = __float2half(c_accum[acc_idx][3]);
-                    }
-                }
-            }
-        }
-    }
-    #else  // USE_tcgen05_MAINLOOP
     // ========================================================================
     // tcgen05.mma.kind::mxf4nvf4.block_scale MAINLOOP for NVFP4 GEMM
     // ========================================================================
@@ -1167,7 +637,7 @@ fp4_gemm_rank2_cta(
         if (k_tile < K) {
             prefetch_tile<TileM, TileK>(
                 s, k_tile, use_tma_a, is_producer, warp_id, lane_id,
-                m_tile, n_tile, K_packed, K_scales, M, N,
+                m_tile, n_tile, K_packed, M, N,
                 a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
                 mbar,
                 desc_A, desc_B, desc_SFA, desc_SFB
@@ -1278,7 +748,7 @@ fp4_gemm_rank2_cta(
             }
             prefetch_tile<TileM, TileK>(
                 (stage + StageCount - 1) % StageCount, next_k, use_tma_a, is_producer, warp_id, lane_id,
-                m_tile, n_tile, K_packed, K_scales, M, N,
+                m_tile, n_tile, K_packed, M, N,
                 a_packed_stage, b_packed_stage, sfa_stage, sfb_stage,
                 mbar,
                 desc_A, desc_B, desc_SFA, desc_SFB
@@ -1303,9 +773,8 @@ fp4_gemm_rank2_cta(
         // multiple warps in the CTA that can corrupt TMEM scale panels.
         uint32_t sfa_stage_smem = cvta_to_shared_u32(sfa_stage[stage]);
         uint32_t sfb_stage_smem = cvta_to_shared_u32(sfb_stage[stage]);
-        if (warp_id == 0 && lane_id == 0) {
-            // tcgen05.cp ... warpx4 is a broadcast op; do NOT manually replicate
-            // via DP shifts here. Issue exactly one UTCCP per 512B scale panel.
+        if (warp_id < 4) {
+            // tcgen05.cp ... warpx4 expects warpgroup participation.
             #pragma unroll
             for (int kb = 0; kb < kNumKBlocks; ++kb) {
                 uint64_t desc_sfa = make_umma_smem_desc_addr(
@@ -1330,7 +799,8 @@ fp4_gemm_rank2_cta(
                     : "memory"
                 );
             }
-            // ADD tcgen05.commit here
+        }
+        if (warp_id == 0 && lane_id == 0) {
             tcgen05_commit_mbarrier(mbar_stage(mbar_cp, stage));
         }
 
@@ -1374,10 +844,8 @@ fp4_gemm_rank2_cta(
             uint32_t tmem_sfa_kb = raw_pointer_cast(tCtSFA(_, _, kb).data());
             uint32_t tmem_sfb_kb = raw_pointer_cast(tCtSFB(_, _, kb).data());
 
-            // NOTE: Match kutte.py oracle issue scope: issue tcgen05.mma only from
-            // warp 0 lane 0. Issuing from multiple warps can deterministically
-            // over-accumulate and produce finite-but-wrong outputs.
-            if (warp_id == 0 && lane_id == 0) {
+            // NOTE: tcgen05.mma expects warpgroup participation.
+            if (warp_id < 4) {
                 if (accum) {
                     asm volatile(
                         "{\n\t"
@@ -1456,18 +924,9 @@ fp4_gemm_rank2_cta(
         Tensor gD = local_tile(mD, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
 
         auto tiled_t2r = make_tmem_copy(SM100_TMEM_LOAD_16dp256b1x{}, tensor<0>(tCtAcc));
-        // IMPORTANT: Do not modulo the slice id.
-        // Each slice corresponds to a distinct lane in the participating thread group.
-        // Modulo causes multiple threads to alias the same slice, producing races and
-        // deterministic corruption that often shows up at N=8 boundaries.
         int t2r_threads = int(size(tiled_t2r));
         if (tid < t2r_threads) {
             auto thread_t2r = tiled_t2r.get_slice(tid);
-
-            // IMPORTANT: tCtAcc is MMA-partitioned. Do NOT slice with (_0{}, _0{}),
-            // which can accidentally select only the first MMA subtile (often visible
-            // as correctness breaking at N=8). Use the same 2D accumulator view that
-            // the TMEM copy was constructed for.
             Tensor tAcc = tensor<0>(tCtAcc);
             Tensor tTR_tAcc = thread_t2r.partition_S(tAcc);
             Tensor tTR_gD = thread_t2r.partition_D(gD);
@@ -1475,52 +934,12 @@ fp4_gemm_rank2_cta(
 
             copy(tiled_t2r, tTR_tAcc, tTR_rAcc);
             #if __CUDA_ARCH__ >= 1000
-            // Ensure async TMEM loads are visible before consuming tTR_rAcc.
             asm volatile("tcgen05.wait::ld.sync.aligned;\n" ::: "memory");
             #endif
 
-            #if NVFP4_DEBUG_DUMP
-            if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-                if (tid == 0) {
-                    printf("DUMP tile=(%d,%d) block=%d t2r_size=%d\n",
-                           int(blockIdx.x), int(blockIdx.y), int(blockDim.x), int(size(tiled_t2r)));
-                }
-
-                Tensor coordMN = make_identity_tensor(make_shape(M, N));
-                Tensor cMN = local_tile(coordMN, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
-                Tensor tTR_cMN = thread_t2r.partition_D(cMN);
-                #pragma unroll
-                for (int i = 0; i < size(tTR_rAcc); ++i) {
-                    auto mn = tTR_cMN(i);
-                    int gm = int(get<0>(mn));
-                    int gn = int(get<1>(mn));
-                    if (gm == 0 && gn >= 0 && gn < 32) {
-                        float acc = tTR_rAcc(i);
-                        float out = __half2float(__float2half_rn(acc));
-                        printf("DUMP m=%d n=%d tid=%d i=%d acc=%f out=%f\n",
-                               gm, gn, int(tid), int(i), acc, out);
-                    }
-                }
-            }
-            #endif
-
-            bool full_tile = (m_tile + TileM <= M) && (n_tile + TileN <= N);
-            if (full_tile) {
-                #pragma unroll
-                for (int i = 0; i < size(tTR_rAcc); ++i) {
-                    tTR_gD(i) = cutlass::half_t(__float2half_rn(tTR_rAcc(i)));
-                }
-            } else {
-                Tensor coordMN = make_identity_tensor(make_shape(M, N));
-                Tensor cMN = local_tile(coordMN, make_shape(Int<TileM>{}, Int<TileN>{}), make_coord(blockIdx.x, blockIdx.y));
-                Tensor tTR_cMN = thread_t2r.partition_D(cMN);
-                #pragma unroll
-                for (int i = 0; i < size(tTR_rAcc); ++i) {
-                    auto mn = tTR_cMN(i);
-                    if (get<0>(mn) < M && get<1>(mn) < N) {
-                        tTR_gD(i) = cutlass::half_t(__float2half_rn(tTR_rAcc(i)));
-                    }
-                }
+            #pragma unroll
+            for (int i = 0; i < size(tTR_rAcc); ++i) {
+                tTR_gD(i) = cutlass::half_t(__float2half_rn(tTR_rAcc(i)));
             }
         }
     }
@@ -1539,7 +958,6 @@ fp4_gemm_rank2_cta(
                     :
                     : "memory");
     }
-    #endif  // !USE_tcgen05_MAINLOOP
 #endif
 }
 
@@ -1559,11 +977,7 @@ void launch_fp4_gemm_optimized(
     constexpr int kTileM = 128;
     constexpr int kTileN = 128; // GEMM tiling
     constexpr int kTileK = 256;  // Must be 256 to match CuTe mma_tiler_mnk and tcgen05.mma
-    #if USE_tcgen05_MAINLOOP
     constexpr int kThreads = 128; // 4 warps
-    #else
-    constexpr int kThreads = 256; // 8 warps
-    #endif
     constexpr int kTileKPacked = kTileK / 2;  // 128 bytes per tile row
     constexpr int StageCount = 2;
     
@@ -1765,13 +1179,6 @@ void launch_fp4_gemm_optimized(
     offset = align(offset, 1024);
     offset += StageCount * kTileN * 128;
     
-    // Decoded buffers (FP16) are NOT used in tcgen05 mainloop
-    // Removing them saves ~132KB of shared memory, avoiding MaxDynamicSharedMemorySize error
-    // offset = align(offset, 128);
-    // offset += kTileM * (kTileK + 8) * 2;
-    // offset = align(offset, 128);
-    // offset += kTileN * (kTileK + 8) * 2;
-    
     shared_bytes = offset;
 
     check_cuda(cudaFuncSetAttribute(kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shared_bytes)), "MaxDynamicSharedMemorySize");
@@ -1787,15 +1194,7 @@ void launch_fp4_gemm_optimized(
     int L_int = static_cast<int>(L);
     int K_scales_int = static_cast<int>(K_scales);
 
-    const uint8_t* A_ptr_arg = A_ptr;
-    const uint8_t* B_ptr_arg = B_ptr;
-    const uint8_t* SFA_ptr_arg = SFA_ptr;
-    const uint8_t* SFB_ptr_arg = SFB_ptr;
     void* kernel_args[] = {
-        const_cast<const uint8_t**>(&A_ptr_arg),
-        const_cast<const uint8_t**>(&B_ptr_arg),
-        const_cast<const uint8_t**>(&SFA_ptr_arg),
-        const_cast<const uint8_t**>(&SFB_ptr_arg),
         &d_map_A,
         &d_map_SFA,
         &d_map_B,
@@ -1810,102 +1209,6 @@ void launch_fp4_gemm_optimized(
 
     check_cuda(cudaLaunchKernel(kernel_ptr, grid, block, kernel_args, shared_bytes, 0), "cudaLaunchKernel");
 } 
-
-template<int TileM, int TileK, int Threads>
-__global__ void __launch_bounds__(Threads)
-fp4_scale_debug_rank2_cta(
-    const uint8_t* __restrict__ A_packed,
-    const uint8_t* __restrict__ B_packed,
-    const uint8_t* __restrict__ SFA_packed,
-    const uint8_t* __restrict__ SFB_packed,
-    uint8_t* __restrict__ OUT_SFA,
-    uint8_t* __restrict__ OUT_SFB,
-    half* __restrict__ OUT_A,
-    half* __restrict__ OUT_B,
-    const int M, const int N, const int K, const int L, const int K_scales_padded
-) {
-#if __CUDA_ARCH__ >= 900
-    constexpr int TileN = 128;
-    const int tid = threadIdx.x;
-
-    const int batch  = blockIdx.z;
-    const int m_tile = blockIdx.x * TileM;
-    const int n_tile = blockIdx.y * TileN;
-
-    if (batch >= L || m_tile >= M || n_tile >= N) return;
-
-    int tile_rows   = (M - m_tile) < TileM ? (M - m_tile) : TileM;
-    int tile_cols   = (N - n_tile) < TileN ? (N - n_tile) : TileN;
-    int K_scales    = K / 16;
-    int K_packed    = K / 2;
-
-    // --- Copy A-side scales: [M, K_scales_padded] ---
-    // Only CTAs with n_tile == 0 to avoid write races.
-    if (n_tile == 0) {
-        for (int idx = tid; idx < tile_rows * K_scales; idx += Threads) {
-            int row      = idx / K_scales;
-            int j        = idx - row * K_scales;
-            int m_global = m_tile + row;
-            if (m_global < M) {
-                int src_idx = m_global * K_scales_padded + j;
-                OUT_SFA[src_idx] = SFA_packed[src_idx];
-            }
-        }
-    }
-
-    // --- Copy B-side scales: [N, K_scales_padded] ---
-    // Only CTAs with m_tile == 0 to avoid write races.
-    if (m_tile == 0) {
-        for (int idx = tid; idx < tile_cols * K_scales; idx += Threads) {
-            int row      = idx / K_scales;
-            int j        = idx - row * K_scales;
-            int n_global = n_tile + row;
-            if (n_global < N) {
-                int src_idx = n_global * K_scales_padded + j;
-                OUT_SFB[src_idx] = SFB_packed[src_idx];
-            }
-        }
-    }
-
-    // --- Decode A: OUT_A [M, K] ---
-    // Only CTAs with n_tile == 0 write A rows.
-    if (n_tile == 0) {
-        for (int idx = tid; idx < tile_rows * K; idx += Threads) {
-            int row      = idx / K;
-            int k        = idx - row * K;
-            int m_global = m_tile + row;
-            if (m_global >= M) continue;
-
-            int  k_packed = k >> 1;               // K/2 index
-            uint8_t packed = A_packed[m_global * K_packed + k_packed];
-            half v0, v1;
-            decode_fp4x2_hw(packed, v0, v1);
-            half v = (k & 1) ? v1 : v0;
-
-            OUT_A[m_global * K + k] = v;
-        }
-    }
-
-    // --- Decode B: OUT_B [N, K] ---
-    // Only CTAs with m_tile == 0 write B rows.
-    if (m_tile == 0) {
-        for (int idx = tid; idx < tile_cols * K; idx += Threads) {
-            int row      = idx / K;
-            int k        = idx - row * K;
-            int n_global = n_tile + row;
-            if (n_global >= N) continue;
-
-            int  k_packed = k >> 1;
-            uint8_t packed = B_packed[n_global * K_packed + k_packed];
-            half v0, v1;
-            decode_fp4x2_hw(packed, v0, v1);
-            half v = (k & 1) ? v1 : v0;
-
-            OUT_B[n_global * K + k] = v;
-        }
-    }
-#endif
-}
 
 """
 
@@ -1925,8 +1228,7 @@ module = None
 def get_module():
     global module
     if module is None:
-        debug_dump = os.environ.get("NVFP4_DEBUG_DUMP", "0") not in ("", "0", "false", "False")
-        module_name = "nvfp4_gemm_sm100_ptx_dbg" if debug_dump else "nvfp4_gemm_sm100_ptx"
+        module_name = "nvfp4_gemm_sm100_ptx"
         extra_cuda_cflags = [
             "-O3",  # Enable optimizations to fix lambda stack issues
             "-DNDEBUG",  # Disable debug output for performance testing
@@ -1946,9 +1248,6 @@ def get_module():
             "-lineinfo",
             f"-I{cutlass_path}/include",
         ]
-        if debug_dump:
-            extra_cuda_cflags.append("-DNVFP4_DEBUG_DUMP=1")
-
         module = load_inline(
             name=module_name,
             cpp_sources=cpp_source,

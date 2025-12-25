@@ -4,6 +4,7 @@ Performance benchmarking test for NVFP4 GEMM kernel.
 Measures execution latency without correctness checks and calculates geometric mean.
 """
 import sys
+import argparse
 import time
 import math
 import torch
@@ -13,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from reference import generate_input
-from submission import custom_kernel
+from submission import custom_kernel as submission_custom_kernel
 from dsl import custom_kernel as dsl_custom_kernel
 
 from utils import set_seed, clear_l2_cache
@@ -31,7 +32,15 @@ SPEED_OF_LIGHT_TARGETS = [8.994, 2.354, 1.333]
 NUM_WARMUP_RUNS = 5
 NUM_BENCHMARK_RUNS = 50
 
-def benchmark_kernel(m, n, k, l, seed):
+def _select_kernel(name: str):
+    if name == "submission":
+        return submission_custom_kernel
+    if name == "dsl":
+        return dsl_custom_kernel
+    raise ValueError(f"Unknown custom kernel: {name}")
+
+
+def benchmark_kernel(m, n, k, l, seed, custom_kernel):
     """
     Benchmark a single kernel configuration.
     
@@ -45,7 +54,7 @@ def benchmark_kernel(m, n, k, l, seed):
     
     # Warmup runs
     for _ in range(NUM_WARMUP_RUNS):
-        _ = dsl_custom_kernel(data)
+        _ = custom_kernel(data)
     torch.cuda.synchronize()
     
     # Benchmark runs
@@ -57,7 +66,7 @@ def benchmark_kernel(m, n, k, l, seed):
         end_event = torch.cuda.Event(enable_timing=True)
         
         start_event.record()
-        _ = dsl_custom_kernel(data)
+        _ = custom_kernel(data)
         end_event.record()
         
         torch.cuda.synchronize()
@@ -76,11 +85,13 @@ def benchmark_kernel(m, n, k, l, seed):
     
     return mean_time, std_time, min_time, max_time
 
-def run_benchmarks():
+def run_benchmarks(custom_kernel_name: str):
     """Run performance benchmarks for all cases."""
+    custom_kernel = _select_kernel(custom_kernel_name)
     print("=" * 80)
     print("NVFP4 GEMM Performance Benchmark")
     print("=" * 80)
+    print(f"\nCustom kernel: {custom_kernel_name}")
     print(f"\nConfiguration:")
     print(f"  Warmup runs:    {NUM_WARMUP_RUNS}")
     print(f"  Benchmark runs: {NUM_BENCHMARK_RUNS}")
@@ -97,7 +108,9 @@ def run_benchmarks():
         print(f"  Speed of light target: {target_us:.3f} μs")
         
         try:
-            mean_time, std_time, min_time, max_time = benchmark_kernel(m, n, k, l, seed)
+            mean_time, std_time, min_time, max_time = benchmark_kernel(
+                m, n, k, l, seed, custom_kernel
+            )
             
             # Calculate performance metrics
             speedup = target_us / mean_time
@@ -158,4 +171,12 @@ def run_benchmarks():
         return 1
 
 if __name__ == "__main__":
-    sys.exit(run_benchmarks())
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--custom_kernel",
+        choices=["submission", "dsl"],
+        default="dsl",
+        help="Select which custom kernel to run.",
+    )
+    args = parser.parse_args()
+    sys.exit(run_benchmarks(args.custom_kernel))

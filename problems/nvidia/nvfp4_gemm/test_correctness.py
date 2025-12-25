@@ -4,6 +4,7 @@ Correctness validation test for NVFP4 GEMM kernel.
 Runs custom kernel against reference implementation for all test cases.
 """
 import sys
+import argparse
 import torch
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from reference import generate_input, check_implementation
-from submission import custom_kernel
+from submission import custom_kernel as submission_custom_kernel
 from dsl import custom_kernel as dsl_custom_kernel
 from utils import set_seed
 
@@ -29,11 +30,21 @@ TEST_CASES = [
     {"m": 512, "n": 1536, "k": 7168, "l": 1, "seed": 1111}
 ]
 
-def run_correctness_tests():
+def _select_kernel(name: str):
+    if name == "submission":
+        return submission_custom_kernel
+    if name == "dsl":
+        return dsl_custom_kernel
+    raise ValueError(f"Unknown custom kernel: {name}")
+
+
+def run_correctness_tests(custom_kernel_name: str):
     """Run correctness validation for all test cases."""
+    custom_kernel = _select_kernel(custom_kernel_name)
     print("=" * 80)
     print("NVFP4 GEMM Correctness Validation")
     print("=" * 80)
+    print(f"\nCustom kernel: {custom_kernel_name}")
     print(f"\nRunning {len(TEST_CASES)} test cases...")
     print(f"Tolerance: rtol=1e-03, atol=1e-03\n")
     
@@ -60,7 +71,7 @@ def run_correctness_tests():
             # Run custom kernel
             print("  Running custom kernel...")
             torch.cuda.synchronize()
-            output = dsl_custom_kernel(data_copy)
+            output = custom_kernel(data_copy)
             torch.cuda.synchronize()
             
             # Check against reference
@@ -94,4 +105,12 @@ def run_correctness_tests():
         return 1
 
 if __name__ == "__main__":
-    sys.exit(run_correctness_tests())
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--custom_kernel",
+        choices=["submission", "dsl"],
+        default="dsl",
+        help="Select which custom kernel to run.",
+    )
+    args = parser.parse_args()
+    sys.exit(run_correctness_tests(args.custom_kernel))
