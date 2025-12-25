@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from reference import generate_input, check_implementation
 from submission import custom_kernel
+from dsl import custom_kernel as dsl_custom_kernel
 from utils import set_seed
 
 # Test cases from task.yml
@@ -59,7 +60,7 @@ def run_correctness_tests():
             # Run custom kernel
             print("  Running custom kernel...")
             torch.cuda.synchronize()
-            output = custom_kernel(data_copy)
+            output = dsl_custom_kernel(data_copy)
             torch.cuda.synchronize()
             
             # Check against reference
