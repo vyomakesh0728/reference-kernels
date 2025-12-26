@@ -78,7 +78,7 @@ Global SF (FP8, atom-tiled) → TMA → SMEM
 
 ## Strict Competition Rules
 
-### BANNED - Zero Tolerance
+### **BANNED** - **Zero Tolerance**
 - ❌ No CUDA streams (cudaStreamCreate, etc.)
 - ❌ No stream APIs (cudaStreamSynchronize, etc.)
 - ❌ No PyTorch stream references (c10::cuda::getCurrentCUDAStream, etc.)

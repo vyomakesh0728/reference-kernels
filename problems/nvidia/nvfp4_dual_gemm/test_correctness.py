@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Correctness validation test for NVFP4 GEMM kernel.
+Correctness validation test for NVFP4 dual GEMM kernel.
 Runs custom kernel against reference implementation for all test cases.
 """
+import argparse
 import sys
 import torch
 from pathlib import Path
@@ -16,30 +17,49 @@ from utils import set_seed
 
 # Test cases from task.yml
 TEST_CASES = [
-    {"m": 128, "n": 256, "k": 256, "l": 1, "seed": 1111},
-    {"m": 128, "n": 1536, "k": 7168, "l": 1, "seed": 1111},
-    {"m": 128, "n": 3072, "k": 1536, "l": 1, "seed": 1111},
-    {"m": 256, "n": 7168, "k": 256, "l": 1, "seed": 1111},
-    {"m": 256, "n": 7168, "k": 2048, "l": 1, "seed": 1111},
-    {"m": 2304, "n": 4608, "k": 7168, "l": 1, "seed": 1111},
-    {"m": 384, "n": 7168, "k": 2304, "l": 1, "seed": 1111},
-    {"m": 512, "n": 512, "k": 7168, "l": 1, "seed": 1111},
-    {"m": 512, "n": 4096, "k": 512, "l": 1, "seed": 1111},
-    {"m": 512, "n": 1536, "k": 7168, "l": 1, "seed": 1111}
+    {"m": 1536, "n": 512, "k": 7168, "l": 1, "seed": 1111},
+    {"m": 256, "n": 512, "k": 256, "l": 1, "seed": 1111},
+    {"m": 1536, "n": 512, "k": 7168, "l": 1, "seed": 1111},
+    {"m": 3072, "n": 1024, "k": 1536, "l": 1, "seed": 1111},
+    {"m": 7168, "n": 1024, "k": 256, "l": 1, "seed": 1111},
+    {"m": 7168, "n": 2304, "k": 2048, "l": 1, "seed": 1111},
+    {"m": 4608, "n": 384, "k": 7168, "l": 1, "seed": 1111},
+    {"m": 7168, "n": 384, "k": 2304, "l": 1, "seed": 1111},
+    {"m": 512, "n": 768, "k": 7168, "l": 1, "seed": 1111},
+    {"m": 4096, "n": 768, "k": 512, "l": 1, "seed": 1111},
 ]
 
-def run_correctness_tests():
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="NVFP4 dual GEMM correctness validation."
+    )
+    parser.add_argument(
+        "--only",
+        type=int,
+        default=0,
+        help="Run only the first N test cases (0 means all).",
+    )
+    return parser.parse_args()
+
+
+def run_correctness_tests(only_count: int):
     """Run correctness validation for all test cases."""
     print("=" * 80)
-    print("NVFP4 GEMM Correctness Validation")
+    print("NVFP4 Dual GEMM Correctness Validation")
     print("=" * 80)
-    print(f"\nRunning {len(TEST_CASES)} test cases...")
+    if only_count < 0:
+        raise ValueError("--only must be >= 0")
+    if only_count == 0:
+        selected_cases = TEST_CASES
+    else:
+        selected_cases = TEST_CASES[:only_count]
+    print(f"\nRunning {len(selected_cases)} test cases...")
     print(f"Tolerance: rtol=1e-03, atol=1e-03\n")
     
     passed = 0
     failed = 0
     
-    for idx, test_spec in enumerate(TEST_CASES):
+    for idx, test_spec in enumerate(selected_cases):
         m, n, k, l, seed = test_spec["m"], test_spec["n"], test_spec["k"], test_spec["l"], test_spec["seed"]
         
         print(f"\n[Test {idx+1}/{len(TEST_CASES)}] M={m}, N={n}, K={k}, L={l}")
@@ -81,9 +101,10 @@ def run_correctness_tests():
     print("\n" + "=" * 80)
     print("SUMMARY")
     print("=" * 80)
-    print(f"Total tests: {len(TEST_CASES)}")
-    print(f"Passed:      {passed} ({100*passed//len(TEST_CASES)}%)")
-    print(f"Failed:      {failed} ({100*failed//len(TEST_CASES)}%)")
+    total = len(selected_cases)
+    print(f"Total tests: {total}")
+    print(f"Passed:      {passed} ({100*passed//total}%)")
+    print(f"Failed:      {failed} ({100*failed//total}%)")
     
     if failed == 0:
         print("\n✓ All tests passed!")
@@ -93,4 +114,5 @@ def run_correctness_tests():
         return 1
 
 if __name__ == "__main__":
-    sys.exit(run_correctness_tests())
+    args = parse_args()
+    sys.exit(run_correctness_tests(args.only))

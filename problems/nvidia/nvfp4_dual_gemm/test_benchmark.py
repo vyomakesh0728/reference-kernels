@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Performance benchmarking test for NVFP4 GEMM kernel.
+Performance benchmarking test for NVFP4 dual GEMM kernel.
 Measures execution latency without correctness checks and calculates geometric mean.
 """
 import sys
@@ -18,13 +18,14 @@ from utils import set_seed, clear_l2_cache
 
 # Benchmark cases from task.yml
 BENCHMARK_CASES = [
-    {"m": 128, "n": 7168, "k": 16384, "l": 1, "seed": 1111},
-    {"m": 128, "n": 4096, "k": 7168, "l": 1, "seed": 1111},
-    {"m": 128, "n": 7168, "k": 2048, "l": 1, "seed": 1111},
+    {"m": 256, "n": 4096, "k": 7168, "l": 1, "seed": 1111},
+    {"m": 512, "n": 4096, "k": 7168, "l": 1, "seed": 1111},
+    {"m": 256, "n": 3072, "k": 4096, "l": 1, "seed": 1111},
+    {"m": 512, "n": 3072, "k": 7168, "l": 1, "seed": 1111},
 ]
 
 # Speed of light targets (in microseconds) at 1.5GHz clock
-SPEED_OF_LIGHT_TARGETS = [8.994, 2.354, 1.333]
+SPEED_OF_LIGHT_TARGETS = [4.708, 8.714, 2.125, 6.535]
 
 NUM_WARMUP_RUNS = 5
 NUM_BENCHMARK_RUNS = 50
@@ -77,7 +78,7 @@ def benchmark_kernel(m, n, k, l, seed):
 def run_benchmarks():
     """Run performance benchmarks for all cases."""
     print("=" * 80)
-    print("NVFP4 GEMM Performance Benchmark")
+    print("NVFP4 Dual GEMM Performance Benchmark")
     print("=" * 80)
     print(f"\nConfiguration:")
     print(f"  Warmup runs:    {NUM_WARMUP_RUNS}")

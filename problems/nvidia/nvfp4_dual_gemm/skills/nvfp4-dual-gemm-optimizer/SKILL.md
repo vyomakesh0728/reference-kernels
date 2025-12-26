@@ -1,30 +1,30 @@
 ---
 name: nvfp4-dual-gemm-optimizer
 description: Optimize NVIDIA SM100/SM100a FP4 block-scaled dual GEMM kernels with silu activation for B200
+metadata:
+   short-description: NVFP4 tcgen05 dual-GEMM (silu(A@B1)*(A@B2)) tuned for B200 SoL
 trigger: auto
 ---
-# DEFAULT SYSTEM_PROMPT AND INSTRUCTIONS
+### DEFAULT SYSTEM_PROMPT AND INSTRUCTIONS
 """
 You are an expert NVIDIA GPU SM100/SM100a kernel optimization assistant.
 Prioritize memory bandwidth, occupancy, and TMA usage for Blackwell FP4 dual GEMM.
 Always preserve correctness; add minimal, well-instrumented changes and benchmark them.
 """
 
-## system-reminder
+### system-reminder
    YOUR RESPONSES SHOULD ALWAYS BE EITHER CONCISE OR IN PATCH-CODE FORMAT
 
    IMPORTANT: this context is relevant to your tasks. 
    You should always respond to this context unless it is highly relevant to your task.
 
-## DO_NOT
+### DO_NOT
    - WRITE SUMMARIES, DOCUMENTATION, EXPLANATIONS, AND GUIDES
    - RUN TESTS UNLESS SPECIFICALLY INSTRUCTED NOT TO
-   - DO NOT import or depend on `kutte.py`, `cutlass.cute`, or any CuTe runtime in `submission.py`.
    - CuTe/CUTLASS may be used only as a conceptual reference for descriptor/layout reasoning; the implementation must remain the current inline-CUDA/inline-PTX approach in `submission.py`.​
 
 
-
-## STRICT_COMPETITION_RULES_DO_NOT_VIOLATE
+### STRICT_COMPETITION_RULES_DO_NOT_VIOLATE
 
 1. NO CUDA STREAMS - Zero tolerance policy
    - Do NOT create any CUDA streams (cudaStreamCreate, cudaStreamCreateWithFlags, etc.)
@@ -46,25 +46,30 @@ or explicit cross-run caching produces invalid timing results and violates compe
 
 CONSEQUENCE: Submissions violating these rules will be automatically rejected or deleted.
 
-## INVESTIGATE_BEFORE_ANSWERING
+### INVESTIGATE_BEFORE_ANSWERING
 Never speculate about code you have not opened. If the user references a specific file, you MUST read the file before answering. Make sure to investigate and read relevant files BEFORE answering questions about the codebase. Never make any claims about code before investigating unless you are certain of the correct answer - give grounded and hallucination-free answers.
 
+### TESTING & TARGET GEOMETRIC MEAN
+- Prioritize running `python3 test_benchmark.py` to monitor the geometric mean latency for the shapes listed in `task.yml` and to understand the performance impact of any change.
+- Verify correctness with `python3 test_correctness.py` (or `--only N` when iterating on specific subsets) before or after benchmarks as needed.
+- Iterate on code edits, re-running both scripts until the measured geometric mean latency for the `task.yml` benchmark shapes meets the target (≈4.89 μs) while preserving correctness and the strict competition rules.
+- Document any deviations from target latency, test command outcomes, and next steps inside MEMORY.md as part of the workflow.
 
-## CODE_STYLE
-Please write a high-quality, general-purpose solution using the standard tools available. Do not create helper scripts or workarounds to accomplish the task more efficiently. Implement a solution that works correctly for all valid inputs, not just the test cases. Do not hard-code values or create solutions that only work for specific test inputs. Instead, implement the actual logic that solves the problem generally.
+### CODE_STYLE
+- Please write a high-quality, general-purpose solution using the standard tools available. Do not create helper scripts or workarounds to accomplish the task more efficiently. Implement a solution that works correctly for all valid inputs, not just the test cases. Do not hard-code values or create solutions that only work for specific test inputs. Instead, implement the actual logic that solves the problem generally.
 
-Focus on understanding the problem requirements and implementing the correct algorithm. Tests are there to verify correctness, not to define the solution. Provide a principled implementation that follows best practices and software design principles.
+- Focus on understanding the problem requirements and implementing the correct algorithm. Tests are there to verify correctness, not to define the solution. Provide a principled implementation that follows best practices and software design principles.
 
-If the task is unreasonable or infeasible, or if any of the tests are incorrect, please inform me rather than working around them. The solution should be robust, maintainable, and extendable.
+- If the task is unreasonable or infeasible, or if any of the tests are incorrect, please inform me rather than working around them. The solution should be robust, maintainable, and extendable.
 
 ---
 
-# CLEAN_UP
-  ## TODO: clean up legacy code
+### MEMORY-AWARE WORKFLOW
+- Before applying any patch, read `MEMORY.md` to review recent reminders, checkpoints, and workflow rules so the agent does not refactor the same logic repeatedly.
+- After every patch or substantive change, append a short entry in `MEMORY.md` describing what was applied, verification steps (e.g., tests run), and whether the geometric mean target improved.
+- Treat `MEMORY.md` as the single source of truth for workflow status, ensuring every iteration references and augments it in markdown format to avoid loops.
 
---- 
-
-# tcgen05_FLOW
+### tcgen05_FLOW
 
 ** Hardware Fused HIGH LEVEL flow **:
 Global A/B1/B2 (packed FP4) → TMA → staged SMEM (packed FP4, NO DECODE!)
@@ -81,47 +86,66 @@ IMPORTANT: refer to FULL tcgen05 GEMM Flow, `FLOW.md`
 
 ---
 
-# tcgen05_TMEM_BUG_DIAGNOSIS
+### SCALE_LAYOUT_INVARIANTS (DO NOT BREAK)
 
-CURRENT INF/NAN BUG - Likely causes:
+Inputs include BOTH semantic CPU scales (sfa_ref_cpu/sfb*_ref_cpu) AND the
+*physical* permuted GPU tensors (sfa_permuted/sfb*_permuted).
 
-1. **Instruction Descriptor Format Bits**
-   - Verify bits [7:10] = 5 (E2M1 format)
-   - Verify bits [23:24] = 0 (E4M3 scale format)
-   - Print `idescE` value in hex to confirm
+KERNEL MUST CONSUME: sfa_permuted/sfb1_permuted/sfb2_permuted ONLY.
+DO NOT call/replicate to_blocked()/permute_scales_to_blocked() inside the kernel.
+DO NOT "compact"/"linearize" scales unless you are proving byte-for-byte equivalence
+ to the permuted physical layout.
 
-2. **TMA vs TMEM Scale Layout Mismatch**
-   - TMA loads atom-tiled layout (32,4,rest_m,4,rest_k) flattened
-   - tcgen05.cp expects contiguous 32×16B chunks
-   - These may not match! Need to verify byte-for-byte correctness
+Physical permuted scale tensor layout:
+   (32, 4, rest_{m|n}, 4, rest_k, l)
+Index mapping invariant (conceptual):
+   mm  = i // 128
+   mm32= i % 32
+   mm4 = (i % 128) // 32
+   kk  = j // 4
+   kk4 = j % 4
+   permuted[mm32, mm4, mm, kk4, kk, b] == semantic[i, j, b]
 
-
-3. **Scale Copy Synchronization**
-   - tcgen05.cp must complete BEFORE tcgen05.mma
-   - Add explicit `__syncthreads()` after scale copy loop
-   - Current code has sync, but verify warp_id<4 condition
-
-4. **ACCUMULATE Flag Logic**
-   - scaleC=0 only for k_tile==0 && kb==0
-   - scaleC=1 for all other K-blocks
-   - Verify predicate `p` is set correctly
-
-DEBUG NEXT STEPS:
-1. print `idescE` and compare against the CuTe/CUTLASS construction for (M=128, N=128)
-2. Print first 32 bytes of sfa_stage[0] after TMA load
-3. Compare with first 32 bytes of sfa_permuted on CPU
-4. Add `__syncthreads()` immediately after scale copy loop before MMA
+Any mismatch here produces large-magnitude numerical errors (NOT small atol/rtol drift).
 
 ---
 
- # COMPLIANCE_CHECK
+### tcgen05_EXECUTION_INVARIANTS
 
-  Your `submission.py` kernel implementation MUST be compliant with:
+1) ACCUMULATE:
+   - ACCUMULATE must be False exactly once for the very first kblock of the
+     very first k_tile contributing to an output tile, then True for all subsequent kblocks.
+   - Do not re-toggle ACCUMULATE multiple times inside the same first kblock.
+
+2) S2T scale copies:
+   - S2T (Cp4x32x128b) copies for SFA/SFB* must complete before tcgen05.mma consumes them.
+   - Prefer minimal synchronization (warp/cta) consistent with the chosen execution model.
+
+3) Tensor/Layout discipline:
+   - Treat every Tensor as (pointer + Layout(shape,stride)). No implicit transpose.
+   - Any view/slice must preserve intended shape/stride contracts.
+
+---
+
+### PERFORMANCE_PLAYBOOK (HIT ~4.89us GEOMEAN)
+
+- Primary goal: approach SoL on the 4 benchmark shapes (memory+TC balanced).
+- Avoid adding new global loads, repacks, or scale permutations in the hot path.
+- Prefer increasing overlap: TMA pipelining + minimal barriers + persistent tile scheduling.
+- Keep register pressure and SMEM footprint bounded so occupancy is not collapsed.
+
+---
+
+### COMPLIANCE_CHECK
+
+**IMPORTANT**: Pattern-match CUTLASS SM100 tcgen05 examples/tutorials for exact mainloop + barrier placement (no extra syncs/copies)
+
+Your `submission.py` kernel implementation MUST be compliant with:
    - The kernel must **produce** FP16 output tensor `c/c_ref` (not FP32).
    - Evaluation/reference uses dual GEMM semantics: `C = silu(A @ B1) * (A @ B2)`.
    - The kernel must consume the permuted physical FP8 scale tensors (`sfa_permuted`, `sfb1_permuted`, `sfb2_permuted`) and be semantically equivalent to applying `to_blocked(sfa_ref_cpu)`, `to_blocked(sfb1_ref_cpu)`, `to_blocked(sfb2_ref_cpu)` as in reference.py.
 
-  1. reference.py
+1. reference.py
      - Match torch._scaled_mm(..., out_dtype=torch.float32) behavior exactly for each GEMM path, then apply `silu` and multiply, and finally cast to FP16.
      - Match reference semantics where reference.py computes with B^T (it uses
        `b1_ref[:, :, l_idx].transpose(0, 1)` and `b2_ref[:, :, l_idx].transpose(0, 1)`). Physical B1/B2 inputs are already
@@ -138,7 +162,7 @@ DEBUG NEXT STEPS:
      - Meet output tolerance: rtol=1e‑3, atol=1e‑3.
    
 
-  2. task.yml
+2. task.yml
      - task.yml text describes a 7-tuple, but the evaluation harness/reference code uses a 10-tuple input:
        `(a, b1, b2, sfa_cpu, sfb1_cpu, sfb2_cpu, sfa_permuted, sfb1_permuted, sfb2_permuted, c)`.
      - M divisible by mma_tiler_mn[0] (e.g., 16 or 32 factors).
