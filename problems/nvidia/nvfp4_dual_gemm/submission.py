@@ -365,6 +365,14 @@ class PersistentNvfp4DualGemm:
             a_copy_size + b_copy_size * 2 + sfa_copy_size + sfb_copy_size * 2
         ) * atom_thr_size
 
+        epi_smem_layout = cute.slice_(self.c_smem_layout_staged, (None, None, 0))
+        tma_atom_c, tma_tensor_c = cpasync.make_tiled_tma_atom(
+            cpasync.CopyBulkTensorTileS2GOp(),
+            c_tensor,
+            epi_smem_layout,
+            self.epi_tile,
+        )
+
         self.tile_sched_params, grid = self._compute_grid(
             c_tensor,
             self.cta_tile_shape_mnk,
@@ -392,13 +400,15 @@ class PersistentNvfp4DualGemm:
             tma_tensor_sfb1,
             tma_atom_sfb2,
             tma_tensor_sfb2,
-            c_tensor,
+            tma_atom_c,
+            tma_tensor_c,
             self.cluster_layout_vmnk,
             self.cluster_layout_sfb_vmnk,
             self.a_smem_layout_staged,
             self.b_smem_layout_staged,
             self.sfa_smem_layout_staged,
             self.sfb_smem_layout_staged,
+            self.c_smem_layout_staged,
             self.epi_tile,
             self.tile_sched_params,
         ).launch(
@@ -418,6 +428,12 @@ class PersistentNvfp4DualGemm:
             acc_empty_mbar_ptr: cute.struct.MemRange[cutlass.Int64, self.num_acc_stage]
             tmem_dealloc_mbar_ptr: cutlass.Int64
             tmem_holding_buf: cutlass.Int32
+            sC: cute.struct.Align[
+                cute.struct.MemRange[
+                    self.c_dtype, cute.cosize(self.c_smem_layout_staged.outer)
+                ],
+                self.buffer_align_bytes,
+            ]
             sA: cute.struct.Align[
                 cute.struct.MemRange[
                     self.a_dtype, cute.cosize(self.a_smem_layout_staged.outer)
@@ -477,6 +493,7 @@ class PersistentNvfp4DualGemm:
         mSFB_nkl1: cute.Tensor,
         tma_atom_sfb2: cute.CopyAtom,
         mSFB_nkl2: cute.Tensor,
+        tma_atom_c: cute.CopyAtom,
         mC_mnl: cute.Tensor,
         cluster_layout_vmnk: cute.Layout,
         cluster_layout_sfb_vmnk: cute.Layout,
@@ -484,6 +501,7 @@ class PersistentNvfp4DualGemm:
         b_smem_layout_staged: cute.ComposedLayout,
         sfa_smem_layout_staged: cute.Layout,
         sfb_smem_layout_staged: cute.Layout,
+        c_smem_layout_staged: cute.ComposedLayout,
         epi_tile: cute.Tile,
         tile_sched_params: utils.PersistentTileSchedulerParams,
         epilogue_op: cutlass.Constexpr = lambda x: x
@@ -499,6 +517,7 @@ class PersistentNvfp4DualGemm:
             cpasync.prefetch_descriptor(tma_atom_sfa)
             cpasync.prefetch_descriptor(tma_atom_sfb1)
             cpasync.prefetch_descriptor(tma_atom_sfb2)
+            cpasync.prefetch_descriptor(tma_atom_c)
 
         use_2cta_instrs = cute.size(tiled_mma.thr_id.shape) == 2
 
@@ -560,6 +579,9 @@ class PersistentNvfp4DualGemm:
 
         pipeline_init_arrive(cluster_shape_mn=self.cluster_shape_mn, is_relaxed=True)
 
+        sC = storage.sC.get_tensor(
+            c_smem_layout_staged.outer, swizzle=c_smem_layout_staged.inner
+        )
         sA = storage.sA.get_tensor(
             a_smem_layout_staged.outer, swizzle=a_smem_layout_staged.inner
         )
@@ -1067,7 +1089,7 @@ class PersistentNvfp4DualGemm:
                 tiled_copy_t2r,
                 tTR_tAcc_base,
                 tTR_rAcc1,
-                tTR_gC_base,
+                _,
             ) = self.epilog_tmem_copy_and_partition(
                 epi_tidx, tCtAcc_base, tCgC, epi_tile, use_2cta_instrs
             )
@@ -1081,7 +1103,16 @@ class PersistentNvfp4DualGemm:
             )
 
             tTR_rC = cute.make_rmem_tensor(tTR_rAcc1.shape, self.c_dtype)
-            simt_atom = cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), self.c_dtype)
+            tiled_copy_r2s, tRS_rC, tRS_sC = self.epilog_smem_copy_and_partition(
+                tiled_copy_t2r, tTR_rC, epi_tidx, sC
+            )
+            (
+                tma_atom_c,
+                bSG_sC,
+                bSG_gC_partitioned,
+            ) = self.epilog_gmem_copy_and_partition(
+                epi_tidx, tma_atom_c, tCgC, epi_tile, sC
+            )
 
             tile_sched = utils.StaticPersistentTileScheduler.create(
                 tile_sched_params, cute.arch.block_idx(), cute.arch.grid_dim()
@@ -1092,6 +1123,15 @@ class PersistentNvfp4DualGemm:
                 pipeline.PipelineUserType.Consumer, self.num_acc_stage
             )
 
+            c_producer_group = pipeline.CooperativeGroup(
+                pipeline.Agent.Thread,
+                32 * len(self.epilog_warp_id),
+            )
+            c_pipeline = pipeline.PipelineTmaStore.create(
+                num_stages=self.num_c_stage,
+                producer_group=c_producer_group,
+            )
+
             while work_tile.is_valid_tile:
                 cur_tile_coord = work_tile.tile_idx
                 mma_tile_coord_mnl = (
@@ -1099,12 +1139,14 @@ class PersistentNvfp4DualGemm:
                     cur_tile_coord[1],
                     cur_tile_coord[2],
                 )
-                tTR_gC = tTR_gC_base[
-                    (None, None, None, None, None, *mma_tile_coord_mnl)
+                bSG_gC = bSG_gC_partitioned[
+                    (None, None, None, *mma_tile_coord_mnl)
                 ]
 
                 acc_stage_index = acc_consumer_state.index
-                tTR_tAcc1 = tTR_tAcc_base[(None, None, None, None, None, acc_stage_index)]
+                tTR_tAcc1 = tTR_tAcc_base[
+                    (None, None, None, None, None, acc_stage_index)
+                ]
                 tTR_tAcc2 = tTR_tAcc_base2[
                     (None, None, None, None, None, acc_stage_index)
                 ]
@@ -1113,21 +1155,42 @@ class PersistentNvfp4DualGemm:
 
                 tTR_tAcc1 = cute.group_modes(tTR_tAcc1, 3, cute.rank(tTR_tAcc1))
                 tTR_tAcc2 = cute.group_modes(tTR_tAcc2, 3, cute.rank(tTR_tAcc2))
-                tTR_gC = cute.group_modes(tTR_gC, 3, cute.rank(tTR_gC))
+                bSG_gC = cute.group_modes(bSG_gC, 1, cute.rank(bSG_gC))
 
                 subtile_cnt = cute.size(tTR_tAcc1.shape, mode=[3])
+                num_prev_subtiles = tile_sched.num_tiles_executed * subtile_cnt
                 for subtile_idx in cutlass.range(subtile_cnt):
                     tTR_tAcc1_mn = tTR_tAcc1[(None, None, None, subtile_idx)]
                     tTR_tAcc2_mn = tTR_tAcc2[(None, None, None, subtile_idx)]
                     cute.copy(tiled_copy_t2r, tTR_tAcc1_mn, tTR_rAcc1)
                     cute.copy(tiled_copy_t2r2, tTR_tAcc2_mn, tTR_rAcc2)
 
-                    acc_vec1 = tTR_rAcc1.load()
-                    acc_vec2 = tTR_rAcc2.load()
+                    acc_vec1 = tiled_copy_r2s.retile(tTR_rAcc1).load()
+                    acc_vec2 = tiled_copy_r2s.retile(tTR_rAcc2).load()
                     acc_vec = epilogue_op(acc_vec1) * acc_vec2
-                    tTR_rC.store(acc_vec.to(self.c_dtype))
-                    tTR_gC_mn = tTR_gC[(None, None, None, subtile_idx)]
-                    cute.copy(simt_atom, tTR_rC, tTR_gC_mn)
+                    tRS_rC.store(acc_vec.to(self.c_dtype))
+
+                    c_buffer = (num_prev_subtiles + subtile_idx) % self.num_c_stage
+                    cute.copy(
+                        tiled_copy_r2s,
+                        tRS_rC,
+                        tRS_sC[(None, None, None, c_buffer)],
+                    )
+                    cute.arch.fence_proxy(
+                        cute.arch.ProxyKind.async_shared,
+                        space=cute.arch.SharedSpace.shared_cta,
+                    )
+                    self.epilog_sync_barrier.arrive_and_wait()
+
+                    if warp_idx == self.epilog_warp_id[0]:
+                        cute.copy(
+                            tma_atom_c,
+                            bSG_sC[(None, c_buffer)],
+                            bSG_gC[(None, subtile_idx)],
+                        )
+                        c_pipeline.producer_commit()
+                        c_pipeline.producer_acquire()
+                    self.epilog_sync_barrier.arrive_and_wait()
 
                 with cute.arch.elect_one():
                     acc_pipeline.consumer_release(acc_consumer_state)
@@ -1137,7 +1200,9 @@ class PersistentNvfp4DualGemm:
                 work_tile = tile_sched.get_current_work()
 
             tmem.relinquish_alloc_permit()
+            self.epilog_sync_barrier.arrive_and_wait()
             tmem.free(acc_tmem_ptr)
+            c_pipeline.producer_tail()
 
     def mainloop_s2t_copy_and_partition(self, sSF: cute.Tensor, tSF: cute.Tensor):
         tCsSF_compact = cute.filter_zeros(sSF)

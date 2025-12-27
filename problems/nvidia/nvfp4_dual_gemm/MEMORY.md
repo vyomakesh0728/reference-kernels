@@ -54,3 +54,7 @@
 - Ran `python3 test_correctness.py` (pass) and `python3 test_benchmark.py` (geom mean 56.294 us).
 ## 2025-09-13
 - Replaced submission.py with persistent warp-specialized dual GEMM port from nvfp4_gemm.py; corrected loop variable naming to satisfy DSL; tests pending.
+## 2025-09-13
+- Added TMA-store epilogue path (smem staging + TMA store pipeline) to dual GEMM in `submission.py`, including `sC` storage and `tma_atom_c`; ran `python3 test_correctness.py` (pass) and `python3 test_benchmark.py` (geom mean 33.468 us, improved).
+## 2025-09-13
+- Tried N=3072 config with 128x192 tile + swizzle=2; `python3 test_correctness.py` passed but `python3 test_benchmark.py` regressed to geom mean 39.719 us; reverted to default mapping and reran tests (correctness pass, geom mean 33.387 us).
