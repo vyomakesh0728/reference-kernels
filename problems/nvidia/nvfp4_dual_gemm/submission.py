@@ -43,6 +43,22 @@ CONFIGS = {
         raster_along_m=True,
         occupancy=1,
     ),
+    "n3072_k4096": KernelConfig(
+        name="n3072_k4096",
+        mma_tiler_mn=(128, 64),
+        cluster_shape_mn=(1, 1),
+        swizzle_size=2,
+        raster_along_m=False,
+        occupancy=1,
+    ),
+    "n3072_k7168": KernelConfig(
+        name="n3072_k7168",
+        mma_tiler_mn=(128, 64),
+        cluster_shape_mn=(1, 1),
+        swizzle_size=2,
+        raster_along_m=False,
+        occupancy=1,
+    ),
 }
 
 ab_dtype = cutlass.Float4E2M1FN
@@ -199,7 +215,7 @@ class PersistentNvfp4DualGemm:
             self.c_dtype, self.c_layout, self.epi_tile, self.num_c_stage
         )
 
-        self.overlapping_accum = False
+        self.overlapping_accum = self.num_acc_stage == 1
 
         sf_atom_mn = 32
         self.num_sfa_tmem_cols = (
@@ -209,7 +225,12 @@ class PersistentNvfp4DualGemm:
             self.cta_tile_shape_mnk_sfb[1] // sf_atom_mn
         ) * mma_inst_tile_k
         self.num_sf_tmem_cols = self.num_sfa_tmem_cols + 2 * self.num_sfb_tmem_cols
-        self.num_accumulator_tmem_cols = self.cta_tile_shape_mnk[1] * 2
+        self.num_accumulator_tmem_cols_per_gemm = (
+            self.cta_tile_shape_mnk[1] * self.num_acc_stage
+        )
+        self.num_accumulator_tmem_cols = (
+            self.num_accumulator_tmem_cols_per_gemm * 2
+        )
 
         self.iter_acc_early_release_in_epilogue = (
             self.num_sf_tmem_cols // self.epi_tile_n
@@ -845,7 +866,8 @@ class PersistentNvfp4DualGemm:
             acc_tmem_ptr = tmem.retrieve_ptr(self.acc_dtype)
             tCtAcc_base = cute.make_tensor(acc_tmem_ptr, tCtAcc_fake.layout)
             acc_tmem_ptr2 = cute.recast_ptr(
-                acc_tmem_ptr + self.cta_tile_shape_mnk[1], dtype=self.acc_dtype
+                acc_tmem_ptr + self.num_accumulator_tmem_cols_per_gemm,
+                dtype=self.acc_dtype,
             )
             tCtAcc_base2 = cute.make_tensor(acc_tmem_ptr2, tCtAcc_fake.layout)
 
@@ -1080,7 +1102,8 @@ class PersistentNvfp4DualGemm:
             acc_tmem_ptr = tmem.retrieve_ptr(self.acc_dtype)
             tCtAcc_base = cute.make_tensor(acc_tmem_ptr, tCtAcc_fake.layout)
             acc_tmem_ptr2 = cute.recast_ptr(
-                acc_tmem_ptr + self.cta_tile_shape_mnk[1], dtype=self.acc_dtype
+                acc_tmem_ptr + self.num_accumulator_tmem_cols_per_gemm,
+                dtype=self.acc_dtype,
             )
             tCtAcc_base2 = cute.make_tensor(acc_tmem_ptr2, tCtAcc_fake.layout)
 
@@ -1309,7 +1332,7 @@ class PersistentNvfp4DualGemm:
         smem_capacity,
         occupancy,
     ):
-        num_acc_stage = 1
+        num_acc_stage = 1 if mma_tiler_mnk[1] >= 128 else 2
         num_c_stage = 2
 
         a_smem_layout_stage_one = sm100_utils.make_smem_layout_a(
@@ -1380,6 +1403,10 @@ class PersistentNvfp4DualGemm:
 def select_config(m: int, n: int, k: int) -> KernelConfig:
     if n == 4096 and k >= 7168:
         return CONFIGS["n4096_k7168"]
+    if n == 3072 and k == 4096:
+        return CONFIGS["n3072_k4096"]
+    if n == 3072 and k >= 7168:
+        return CONFIGS["n3072_k7168"]
     return CONFIGS["default"]
 
 

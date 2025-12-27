@@ -58,3 +58,5 @@
 - Added TMA-store epilogue path (smem staging + TMA store pipeline) to dual GEMM in `submission.py`, including `sC` storage and `tma_atom_c`; ran `python3 test_correctness.py` (pass) and `python3 test_benchmark.py` (geom mean 33.468 us, improved).
 ## 2025-09-13
 - Tried N=3072 config with 128x192 tile + swizzle=2; `python3 test_correctness.py` passed but `python3 test_benchmark.py` regressed to geom mean 39.719 us; reverted to default mapping and reran tests (correctness pass, geom mean 33.387 us).
+## 2025-09-13
+- Added N=3072 configs with 128x64 tiles + swizzle=2 and set num_acc_stage=2 only for N<128 tiles; updated acc TMEM offsets accordingly. Ran `python3 test_correctness.py` (pass) and `python3 test_benchmark.py` (geom mean 31.334 us; N=3072/K=4096 improved to 17.725 us).
