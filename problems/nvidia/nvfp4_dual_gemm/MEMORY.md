@@ -52,3 +52,5 @@
 - Restored warp0-only mainloop and descriptor prefetch gating after full-CTA mainloop caused launch failures; tests not run yet.
 ## 2025-09-13
 - Ran `python3 test_correctness.py` (pass) and `python3 test_benchmark.py` (geom mean 56.294 us).
+## 2025-09-13
+- Replaced submission.py with persistent warp-specialized dual GEMM port from nvfp4_gemm.py; corrected loop variable naming to satisfy DSL; tests pending.
