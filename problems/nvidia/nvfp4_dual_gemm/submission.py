@@ -31,7 +31,7 @@ sf_vec_size = 16
 threads_per_cta = 128  
 # Stage numbers of shared memory and tmem
 num_acc_stage = 1
-num_ab_stage = 1
+num_ab_stage = 3
 # Total number of columns in tmem
 num_tmem_alloc_cols = 512
 
@@ -72,6 +72,14 @@ def kernel(
     warp_idx = cute.arch.warp_idx()
     warp_idx = cute.arch.make_warp_uniform(warp_idx)
     tidx = cute.arch.thread_idx()
+
+    if warp_idx == 0:
+        cpasync.prefetch_descriptor(tma_atom_a)
+        cpasync.prefetch_descriptor(tma_atom_b1)
+        cpasync.prefetch_descriptor(tma_atom_b2)
+        cpasync.prefetch_descriptor(tma_atom_sfa)
+        cpasync.prefetch_descriptor(tma_atom_sfb1)
+        cpasync.prefetch_descriptor(tma_atom_sfb2)
 
     #
     # Setup cta/thread coordinates
@@ -444,12 +452,9 @@ def kernel(
         acc_empty = acc_producer.acquire_and_advance()
         # Set ACCUMULATE field to False for the first k_tile iteration
         tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
-        # Execute k_tile loop
-        for k_tile in range(k_tile_cnt):
-            # Wait for AB buffer empty
+        prefetch_k_tile_cnt = cutlass.min(num_ab_stage - 2, k_tile_cnt)
+        for k_tile_idx in cutlass.range(prefetch_k_tile_cnt, unroll=1):
             ab_empty = ab_producer.acquire_and_advance()
-
-            #  TMA load A/B1/B2/SFA/SFB1/SFB2 to shared memory
             cute.copy(
                 tma_atom_a,
                 tAgA[(None, ab_empty.count)],
@@ -487,8 +492,51 @@ def kernel(
                 tma_bar_ptr=ab_empty.barrier,
             )
 
+        peek_ab_full_status = ab_consumer.try_wait()
+        peek_ab_empty_status = ab_producer.try_acquire()
+        # Execute k_tile loop
+        for k_tile in range(k_tile_cnt):
+            if k_tile < k_tile_cnt - prefetch_k_tile_cnt:
+                ab_empty = ab_producer.acquire_and_advance(peek_ab_empty_status)
+                cute.copy(
+                    tma_atom_a,
+                    tAgA[(None, ab_empty.count)],
+                    tAsA[(None, ab_empty.index)],
+                    tma_bar_ptr=ab_empty.barrier,
+                )
+                cute.copy(
+                    tma_atom_b1,
+                    tBgB1[(None, ab_empty.count)],
+                    tBsB1[(None, ab_empty.index)],
+                    tma_bar_ptr=ab_empty.barrier,
+                )
+                cute.copy(
+                    tma_atom_b2,
+                    tBgB2[(None, ab_empty.count)],
+                    tBsB2[(None, ab_empty.index)],
+                    tma_bar_ptr=ab_empty.barrier,
+                )
+                cute.copy(
+                    tma_atom_sfa,
+                    tAgSFA[(None, ab_empty.count)],
+                    tAsSFA[(None, ab_empty.index)],
+                    tma_bar_ptr=ab_empty.barrier,
+                )
+                cute.copy(
+                    tma_atom_sfb1,
+                    tBgSFB1[(None, ab_empty.count)],
+                    tBsSFB1[(None, ab_empty.index)],
+                    tma_bar_ptr=ab_empty.barrier,
+                )
+                cute.copy(
+                    tma_atom_sfb2,
+                    tBgSFB2[(None, ab_empty.count)],
+                    tBsSFB2[(None, ab_empty.index)],
+                    tma_bar_ptr=ab_empty.barrier,
+                )
+
             # Wait for AB buffer full
-            ab_full = ab_consumer.wait_and_advance()
+            ab_full = ab_consumer.wait_and_advance(peek_ab_full_status)
 
             #  Copy SFA/SFB1/SFB2 to tmem
             s2t_stage_coord = (None, None, None, None, ab_full.index)
@@ -557,6 +605,10 @@ def kernel(
 
             # Async arrive AB buffer empty
             ab_full.release()
+            if k_tile + 1 < k_tile_cnt - prefetch_k_tile_cnt:
+                peek_ab_empty_status = ab_producer.try_acquire()
+            if k_tile + 1 < k_tile_cnt:
+                peek_ab_full_status = ab_consumer.try_wait()
         acc_empty.commit()
 
     #
