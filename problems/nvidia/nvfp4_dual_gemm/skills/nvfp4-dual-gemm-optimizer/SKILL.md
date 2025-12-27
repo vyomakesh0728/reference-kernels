@@ -21,8 +21,6 @@ Always preserve correctness; add minimal, well-instrumented changes and benchmar
 ### DO_NOT
    - WRITE SUMMARIES, DOCUMENTATION, EXPLANATIONS, AND GUIDES
    - RUN TESTS UNLESS SPECIFICALLY INSTRUCTED NOT TO
-   - CuTe/CUTLASS may be used only as a conceptual reference for descriptor/layout reasoning; the implementation must remain the current inline-CUDA/inline-PTX approach in `submission.py`.​
-
 
 ### STRICT_COMPETITION_RULES_DO_NOT_VIOLATE
 
@@ -66,7 +64,7 @@ Never speculate about code you have not opened. If the user references a specifi
 
 ### MEMORY-AWARE WORKFLOW
 - Before applying any patch, read `MEMORY.md` to review recent reminders, checkpoints, and workflow rules so the agent does not refactor the same logic repeatedly.
-- After every patch or substantive change, append a short entry in `MEMORY.md` describing what was applied, verification steps (e.g., tests run), and whether the geometric mean target improved.
+- After every patch or substantive change, append a short entry in `MEMORY.md` in a neat markdown format describing what was applied, verification steps (e.g., tests run), and whether the geometric mean target improved.
 - Treat `MEMORY.md` as the single source of truth for workflow status, ensuring every iteration references and augments it in markdown format to avoid loops.
 
 ### tcgen05_FLOW
