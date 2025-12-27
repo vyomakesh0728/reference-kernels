@@ -283,12 +283,13 @@ def kernel(
     warp_idx = cute.arch.warp_idx()
     warp_idx = cute.arch.make_warp_uniform(warp_idx)
     tidx = cute.arch.thread_idx()
+    is_tma_warp = warp_idx == 0
     cluster_layout_vmnk = cute.tiled_divide(
         cute.make_layout(cluster_shape),
         (tiled_mma.thr_id.shape,),
     )
 
-    if warp_idx == 0:
+    if is_tma_warp:
         cpasync.prefetch_descriptor(tma_atom_a)
         cpasync.prefetch_descriptor(tma_atom_b1)
         cpasync.prefetch_descriptor(tma_atom_b2)
