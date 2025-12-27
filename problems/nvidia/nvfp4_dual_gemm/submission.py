@@ -29,10 +29,10 @@ class KernelConfig:
 CONFIGS = {
     "n4096_k7168": KernelConfig(
         name="n4096_k7168",
-        mma_tiler_mn=(256, 128),
-        cluster_shape_mn=(2, 1),
+        mma_tiler_mn=(128, 128),
+        cluster_shape_mn=(1, 1),
         swizzle_size=1,
-        raster_along_m=False,
+        raster_along_m=True,
         occupancy=1,
     ),
     "default": KernelConfig(

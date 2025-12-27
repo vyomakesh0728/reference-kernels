@@ -60,3 +60,7 @@
 - Tried N=3072 config with 128x192 tile + swizzle=2; `python3 test_correctness.py` passed but `python3 test_benchmark.py` regressed to geom mean 39.719 us; reverted to default mapping and reran tests (correctness pass, geom mean 33.387 us).
 ## 2025-09-13
 - Added N=3072 configs with 128x64 tiles + swizzle=2 and set num_acc_stage=2 only for N<128 tiles; updated acc TMEM offsets accordingly. Ran `python3 test_correctness.py` (pass) and `python3 test_benchmark.py` (geom mean 31.334 us; N=3072/K=4096 improved to 17.725 us).
+## 2025-09-13
+- Changed N=4096 config to 128x128 tile with 1x1 cluster and raster_along_m=True in `submission.py`; ran `python3 test_benchmark.py` and it failed due to CUDA device error (cudaGetDeviceCount error 304), so no new performance data.
+## 2025-09-13
+- Ran `python3 test_benchmark.py` after switching N=4096 to 128x128 tile with 1x1 cluster; geom mean 27.750 us (per-case: 35.260, 31.023, 17.800, 30.458 us).
