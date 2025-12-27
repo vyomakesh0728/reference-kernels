@@ -1,6 +1,5 @@
-from torch._higher_order_ops.torchbind import call_torchbind_fake
-import cuda.bindings.driver as cuda
-
+from dataclasses import dataclass
+import os
 import torch
 from task import input_t, output_t
 
@@ -14,26 +13,238 @@ import cutlass.utils.blackwell_helpers as sm100_utils
 import cutlass.utils.blockscaled_layout as blockscaled_utils
 from cutlass.cute.runtime import make_ptr
 
-# Kernel configuration parameters
-# Tile sizes for M, N, K dimensions
-mma_tiler_mnk= (128, 128, 256)  
-# Shape of the K dimension for the MMA instruction
+os.environ["CUTE_DSL_ARCH"] = "sm_100a"
+
+@dataclass(frozen=True)
+class KernelConfig:
+    mma_tiler_mnk: tuple
+    mma_inst_shape_k: int
+    threads_per_cta: int
+    num_acc_stage: int
+    num_ab_stage: int
+    num_tmem_alloc_cols: int
+    cta_group: tcgen05.CtaGroup
+    cluster_shape: tuple
+
+
+# Kernel configuration parameters (default values; updated per-shape)
+mma_tiler_mnk = (128, 128, 256)
 mma_inst_shape_k = 64
-# FP4 data type for A and B
-ab_dtype = cutlass.Float4E2M1FN  
-# FP8 data type for scale factors
-sf_dtype = cutlass.Float8E4M3FN  
-# FP16 output type
-c_dtype = cutlass.Float16  
-# Scale factor block size (16 elements share one scale)
-sf_vec_size = 16  
-# Number of threads per CUDA thread block
-threads_per_cta = 128  
-# Stage numbers of shared memory and tmem
+threads_per_cta = 128
 num_acc_stage = 1
 num_ab_stage = 3
-# Total number of columns in tmem
-num_tmem_alloc_cols = 512
+num_tmem_alloc_cols = 256
+cta_group = tcgen05.CtaGroup.ONE
+cluster_shape = (1, 1, 1)
+
+# FP4 data type for A and B
+ab_dtype = cutlass.Float4E2M1FN
+# FP8 data type for scale factors
+sf_dtype = cutlass.Float8E4M3FN
+# FP16 output type
+c_dtype = cutlass.Float16
+# Scale factor block size (16 elements share one scale)
+sf_vec_size = 16
+
+CONFIGS = {
+    "cta1_128x128": KernelConfig(
+        mma_tiler_mnk=(128, 128, 256),
+        mma_inst_shape_k=64,
+        threads_per_cta=128,
+        num_acc_stage=1,
+        num_ab_stage=3,
+        num_tmem_alloc_cols=256,
+        cta_group=tcgen05.CtaGroup.ONE,
+        cluster_shape=(1, 1, 1),
+    ),
+    "cta1_128x128_tmem128": KernelConfig(
+        mma_tiler_mnk=(128, 128, 256),
+        mma_inst_shape_k=64,
+        threads_per_cta=128,
+        num_acc_stage=1,
+        num_ab_stage=3,
+        num_tmem_alloc_cols=128,
+        cta_group=tcgen05.CtaGroup.ONE,
+        cluster_shape=(1, 1, 1),
+    ),
+    "cta1_128x128_tmem128_ab4": KernelConfig(
+        mma_tiler_mnk=(128, 128, 256),
+        mma_inst_shape_k=64,
+        threads_per_cta=128,
+        num_acc_stage=1,
+        num_ab_stage=4,
+        num_tmem_alloc_cols=128,
+        cta_group=tcgen05.CtaGroup.ONE,
+        cluster_shape=(1, 1, 1),
+    ),
+    "cta1_128x128_tmem64": KernelConfig(
+        mma_tiler_mnk=(128, 128, 256),
+        mma_inst_shape_k=64,
+        threads_per_cta=128,
+        num_acc_stage=1,
+        num_ab_stage=3,
+        num_tmem_alloc_cols=64,
+        cta_group=tcgen05.CtaGroup.ONE,
+        cluster_shape=(1, 1, 1),
+    ),
+    "cta1_128x128_tmem512": KernelConfig(
+        mma_tiler_mnk=(128, 128, 256),
+        mma_inst_shape_k=64,
+        threads_per_cta=128,
+        num_acc_stage=1,
+        num_ab_stage=3,
+        num_tmem_alloc_cols=512,
+        cta_group=tcgen05.CtaGroup.ONE,
+        cluster_shape=(1, 1, 1),
+    ),
+    "cta1_128x128_tmem256": KernelConfig(
+        mma_tiler_mnk=(128, 128, 256),
+        mma_inst_shape_k=64,
+        threads_per_cta=128,
+        num_acc_stage=1,
+        num_ab_stage=3,
+        num_tmem_alloc_cols=256,
+        cta_group=tcgen05.CtaGroup.ONE,
+        cluster_shape=(1, 1, 1),
+    ),
+    "cta1_128x128_acc2": KernelConfig(
+        mma_tiler_mnk=(128, 128, 256),
+        mma_inst_shape_k=64,
+        threads_per_cta=128,
+        num_acc_stage=2,
+        num_ab_stage=3,
+        num_tmem_alloc_cols=512,
+        cta_group=tcgen05.CtaGroup.ONE,
+        cluster_shape=(1, 1, 1),
+    ),
+    "cta1_128x128_tmem1024": KernelConfig(
+        mma_tiler_mnk=(128, 128, 256),
+        mma_inst_shape_k=64,
+        threads_per_cta=128,
+        num_acc_stage=1,
+        num_ab_stage=3,
+        num_tmem_alloc_cols=1024,
+        cta_group=tcgen05.CtaGroup.ONE,
+        cluster_shape=(1, 1, 1),
+    ),
+    "cta1_128x128_tmem512_ab4": KernelConfig(
+        mma_tiler_mnk=(128, 128, 256),
+        mma_inst_shape_k=64,
+        threads_per_cta=128,
+        num_acc_stage=1,
+        num_ab_stage=4,
+        num_tmem_alloc_cols=512,
+        cta_group=tcgen05.CtaGroup.ONE,
+        cluster_shape=(1, 1, 1),
+    ),
+    "cta1_128x128_t256": KernelConfig(
+        mma_tiler_mnk=(128, 128, 256),
+        mma_inst_shape_k=64,
+        threads_per_cta=256,
+        num_acc_stage=1,
+        num_ab_stage=3,
+        num_tmem_alloc_cols=512,
+        cta_group=tcgen05.CtaGroup.ONE,
+        cluster_shape=(1, 1, 1),
+    ),
+    "cta1_128x256": KernelConfig(
+        mma_tiler_mnk=(128, 256, 256),
+        mma_inst_shape_k=64,
+        threads_per_cta=128,
+        num_acc_stage=1,
+        num_ab_stage=3,
+        num_tmem_alloc_cols=512,
+        cta_group=tcgen05.CtaGroup.ONE,
+        cluster_shape=(1, 1, 1),
+    ),
+}
+
+SHAPE_CONFIG = {
+    (256, 4096, 7168): "cta1_128x128_tmem256",
+    (512, 4096, 7168): "cta1_128x128_tmem256",
+    (256, 3072, 4096): "cta1_128x128_tmem128",
+    (512, 3072, 7168): "cta1_128x128_tmem128",
+}
+
+
+def _set_kernel_config(config: KernelConfig) -> None:
+    global mma_tiler_mnk
+    global mma_inst_shape_k
+    global threads_per_cta
+    global num_acc_stage
+    global num_ab_stage
+    global num_tmem_alloc_cols
+    global cta_group
+    global cluster_shape
+    mma_tiler_mnk = config.mma_tiler_mnk
+    mma_inst_shape_k = config.mma_inst_shape_k
+    threads_per_cta = config.threads_per_cta
+    num_acc_stage = config.num_acc_stage
+    num_ab_stage = config.num_ab_stage
+    num_tmem_alloc_cols = config.num_tmem_alloc_cols
+    cta_group = config.cta_group
+    cluster_shape = config.cluster_shape
+
+
+def _make_smem_layout_sfa(
+    tiled_mma: cute.TiledMma,
+    mma_tiler_mnk: cute.Tile,
+    sf_vec_size: int,
+    num_stages: int,
+    atom_m: int,
+):
+    sfa_tile_shape = (
+        mma_tiler_mnk[0] // cute.size(tiled_mma.thr_id.shape),
+        mma_tiler_mnk[2],
+    )
+    smem_layout = cute.tile_to_shape(
+        blockscaled_utils.BlockScaledBasicChunk(sf_vec_size).layout,
+        sfa_tile_shape,
+        (2, 1),
+    )
+    mma_tile_inst_k = 4
+    sfa_tile_shape = cute.shape_div(sfa_tile_shape, (1, mma_tile_inst_k))
+    smem_layout = cute.tiled_divide(smem_layout, sfa_tile_shape)
+    tiler_inst = ((atom_m, sf_vec_size),)
+    smem_layout = cute.logical_divide(smem_layout, tiler_inst)
+    smem_layout = cute.coalesce(smem_layout)
+    return cute.append(
+        smem_layout,
+        cute.make_layout(
+            num_stages, stride=cute.cosize(cute.filter_zeros(smem_layout))
+        ),
+    )
+
+
+def _make_smem_layout_sfb(
+    tiled_mma: cute.TiledMma,
+    mma_tiler_mnk: cute.Tile,
+    sf_vec_size: int,
+    num_stages: int,
+    atom_n: int,
+    n_div: int,
+    round_up_n: int,
+):
+    sfb_tile_shape = (
+        cute.round_up(mma_tiler_mnk[1], round_up_n) // n_div,
+        mma_tiler_mnk[2],
+    )
+    smem_layout = cute.tile_to_shape(
+        blockscaled_utils.BlockScaledBasicChunk(sf_vec_size).layout,
+        sfb_tile_shape,
+        (2, 1),
+    )
+    mma_tile_inst_k = 4
+    sfb_tile_shape = cute.shape_div(sfb_tile_shape, (1, mma_tile_inst_k))
+    smem_layout = cute.tiled_divide(smem_layout, sfb_tile_shape)
+    tiler_inst = ((atom_n, sf_vec_size),)
+    smem_layout = cute.logical_divide(smem_layout, tiler_inst)
+    return cute.append(
+        smem_layout,
+        cute.make_layout(
+            num_stages, stride=cute.cosize(cute.filter_zeros(smem_layout))
+        ),
+    )
 
 
 # Helper function for ceiling division
@@ -72,6 +283,10 @@ def kernel(
     warp_idx = cute.arch.warp_idx()
     warp_idx = cute.arch.make_warp_uniform(warp_idx)
     tidx = cute.arch.thread_idx()
+    cluster_layout_vmnk = cute.tiled_divide(
+        cute.make_layout(cluster_shape),
+        (tiled_mma.thr_id.shape,),
+    )
 
     if warp_idx == 0:
         cpasync.prefetch_descriptor(tma_atom_a)
@@ -95,9 +310,6 @@ def kernel(
         cta_coord[1],
         cta_coord[2],
     )
-    # Coord inside cta
-    tidx, _, _ = cute.arch.thread_idx()
-
     #
     # Define shared storage for kernel
     #
@@ -153,7 +365,7 @@ def kernel(
     # Initialize mainloop ab_pipeline, acc_pipeline and their states
     #
     ab_pipeline_producer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread)
-    ab_pipeline_consumer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread, 1)
+    ab_pipeline_consumer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread)
     ab_producer, ab_consumer = pipeline.PipelineTmaUmma.create(
         barrier_storage=storage.ab_mbar_ptr.data_ptr(),
         num_stages=num_ab_stage,
@@ -447,12 +659,15 @@ def kernel(
     #
     # Execute Data copy and Math computation in the k_tile loop
     #
+    # Coord inside cta
+    tidx, _, _ = cute.arch.thread_idx()
+
     if warp_idx == 0:
         # Wait for accumulator buffer empty
         acc_empty = acc_producer.acquire_and_advance()
         # Set ACCUMULATE field to False for the first k_tile iteration
         tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
-        prefetch_k_tile_cnt = cutlass.min(num_ab_stage - 2, k_tile_cnt)
+        prefetch_k_tile_cnt = cutlass.min(num_ab_stage - 1, k_tile_cnt)
         for k_tile_idx in cutlass.range(prefetch_k_tile_cnt, unroll=1):
             ab_empty = ab_producer.acquire_and_advance()
             cute.copy(
@@ -724,13 +939,13 @@ def my_kernel(
     mma_op = tcgen05.MmaMXF4NVF4Op(
         sf_dtype,
         (mma_tiler_mnk[0], mma_tiler_mnk[1], mma_inst_shape_k),
-        tcgen05.CtaGroup.ONE,
+        cta_group,
         tcgen05.OperandSource.SMEM,
     )
     tiled_mma = cute.make_tiled_mma(mma_op)
 
-    cluster_layout_vmnk  = cute.tiled_divide(
-        cute.make_layout((1, 1, 1)),
+    cluster_layout_vmnk = cute.tiled_divide(
+        cute.make_layout(cluster_shape),
         (tiled_mma.thr_id.shape,),
     )
 
@@ -765,67 +980,70 @@ def my_kernel(
 
     # Setup TMA for A
     a_smem_layout = cute.slice_(a_smem_layout_staged, (None, None, None, 0))
+    op_a = cpasync.CopyBulkTensorTileG2SOp(cta_group)
     tma_atom_a, tma_tensor_a = cute.nvgpu.make_tiled_tma_atom_A(
-        cpasync.CopyBulkTensorTileG2SOp(tcgen05.CtaGroup.ONE),
+        op_a,
         a_tensor,
         a_smem_layout,
         mma_tiler_mnk,
         tiled_mma,
-        cluster_layout_vmnk .shape,
+        cluster_layout_vmnk.shape,
     )
     # Setup TMA for B1
     b_smem_layout = cute.slice_(b_smem_layout_staged, (None, None, None, 0))
+    op_b = cpasync.CopyBulkTensorTileG2SOp(cta_group)
     tma_atom_b1, tma_tensor_b1 = cute.nvgpu.make_tiled_tma_atom_B(
-        cpasync.CopyBulkTensorTileG2SOp(tcgen05.CtaGroup.ONE),
+        op_b,
         b_tensor1,
         b_smem_layout,
         mma_tiler_mnk,
         tiled_mma,
-        cluster_layout_vmnk .shape,
+        cluster_layout_vmnk.shape,
     )
     # Setup TMA for B2
     tma_atom_b2, tma_tensor_b2 = cute.nvgpu.make_tiled_tma_atom_B(
-        cpasync.CopyBulkTensorTileG2SOp(tcgen05.CtaGroup.ONE),
+        op_b,
         b_tensor2,
         b_smem_layout,
         mma_tiler_mnk,
         tiled_mma,
-        cluster_layout_vmnk .shape,
+        cluster_layout_vmnk.shape,
     )
     # Setup TMA for SFA
     sfa_smem_layout = cute.slice_(
         sfa_smem_layout_staged , (None, None, None, 0)
     )
     tma_atom_sfa, tma_tensor_sfa = cute.nvgpu.make_tiled_tma_atom_A(
-        cpasync.CopyBulkTensorTileG2SOp(tcgen05.CtaGroup.ONE),
+        op_a,
         sfa_tensor,
         sfa_smem_layout,
         mma_tiler_mnk,
         tiled_mma,
-        cluster_layout_vmnk .shape,
+        cluster_layout_vmnk.shape,
         internal_type=cutlass.Int16,
     )
     # Setup TMA for SFB1
     sfb_smem_layout = cute.slice_(
         sfb_smem_layout_staged , (None, None, None, 0)
     )
+    op_sfb = cpasync.CopyBulkTensorTileG2SOp(cta_group)
     tma_atom_sfb1, tma_tensor_sfb1 = cute.nvgpu.make_tiled_tma_atom_B(
-        cpasync.CopyBulkTensorTileG2SOp(tcgen05.CtaGroup.ONE),
+        op_sfb,
         sfb_tensor1,
         sfb_smem_layout,
         mma_tiler_mnk,
         tiled_mma,
-        cluster_layout_vmnk .shape,
+        cluster_layout_vmnk.shape,
         internal_type=cutlass.Int16,
     )
     # Setup TMA for SFB2
     tma_atom_sfb2, tma_tensor_sfb2 = cute.nvgpu.make_tiled_tma_atom_B(
-        cpasync.CopyBulkTensorTileG2SOp(tcgen05.CtaGroup.ONE),
+        op_sfb,
         sfb_tensor2,
         sfb_smem_layout,
         mma_tiler_mnk,
         tiled_mma,
-        cluster_layout_vmnk .shape,
+        cluster_layout_vmnk.shape,
         internal_type=cutlass.Int16,
     )
 
@@ -891,16 +1109,16 @@ def my_kernel(
     ).launch(
         grid=grid,
         block=[threads_per_cta, 1, 1],
-        cluster=(1, 1, 1),
+        cluster=cluster_shape,
     )
     return
 
 
 # Global cache for compiled kernel
-_compiled_kernel_cache = None
+_compiled_kernel_cache = {}
 # This function is used to compile the kernel once and cache it and then allow users to 
 # run the kernel multiple times to get more accurate timing results.
-def compile_kernel():
+def compile_kernel(config_key: str):
     """
     Compile the kernel once and cache it.
     This should be called before any timing measurements.
@@ -909,9 +1127,13 @@ def compile_kernel():
         The compiled kernel function
     """
     global _compiled_kernel_cache
-    
-    if _compiled_kernel_cache is not None:
-        return _compiled_kernel_cache
+
+    cached = _compiled_kernel_cache.get(config_key)
+    if cached is not None:
+        return cached
+
+    config = CONFIGS.get(config_key, CONFIGS["cta1_128x128"])
+    _set_kernel_config(config)
     
 
     # Create CuTe pointers for A/B/C/SFA/SFB via torch tensor data pointer
@@ -938,9 +1160,11 @@ def compile_kernel():
     )
 
     # Compile the kernel
-    _compiled_kernel_cache = cute.compile(my_kernel, a_ptr, b1_ptr, b2_ptr, sfa_ptr, sfb1_ptr, sfb2_ptr, c_ptr, (0, 0, 0, 0))
-    
-    return _compiled_kernel_cache
+    compiled = cute.compile(
+        my_kernel, a_ptr, b1_ptr, b2_ptr, sfa_ptr, sfb1_ptr, sfb2_ptr, c_ptr, (0, 0, 0, 0)
+    )
+    _compiled_kernel_cache[config_key] = compiled
+    return compiled
 
 
 def custom_kernel(data: input_t) -> output_t:
@@ -972,7 +1196,10 @@ def custom_kernel(data: input_t) -> output_t:
     
     # Ensure kernel is compiled (will use cached version if available)
     # To avoid the compilation overhead, we compile the kernel once and cache it.
-    compiled_func = compile_kernel()
+    m = c.shape[0]
+    n = c.shape[1]
+    config_key = SHAPE_CONFIG.get((m, n, a.shape[1] * 2), "cta1_128x128")
+    compiled_func = compile_kernel(config_key)
 
     # Get dimensions from MxKxL layout
     _, k, _ = a.shape
