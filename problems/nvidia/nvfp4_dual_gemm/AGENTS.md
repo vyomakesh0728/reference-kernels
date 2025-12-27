@@ -84,6 +84,8 @@ Global SF (FP8, atom-tiled) → TMA → SMEM
 - ❌ No PyTorch stream references (c10::cuda::getCurrentCUDAStream, etc.)
 - ❌ No cross-run caching beyond compilation/autotune
 - ❌ Code containing word "stream" anywhere
+- ❌ No caching of inputs between runs
+- ❌ No graph replay for a single kernel
 
 **Everything runs on default stream.** Benchmarking only syncs default stream.
 

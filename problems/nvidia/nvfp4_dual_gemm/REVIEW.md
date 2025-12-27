@@ -1,17 +1,23 @@
 ## Performance Gains
 
-You're still far off the "speed-of-light" band for the 4 benchmark shapes (SoL per-shape is ~2.1-8.7 µs). The next gains won't come from tiny tweaks, but from better per-shape tiling/cluster configurations and getting back overlap via accumulator staging and early release, plus a bit of epilogue vectorization.
+• Using nvfp4-dual-gemm-optimizer. Short answer: your 27 µs is dominated by bandwidth + overhead; target ~15 µs then ~9 µs by tightening
+  tiles/overhead.
 
-### What to push next (highest ROI first)
+  - Cut CTA size to 128 threads: drop the dedicated TMA warp, shrink epilogue warps (e.g., 2), and keep the MMA warpgroup only; this
+    reduces CTA overhead and raises occupancy.
+  - Use larger M tiles where M=256/512: try 256x128 for N=4096 and 256x64 for N=3072 to reduce tile count; enable 2‑CTA tcgen05 only when
+    it increases arithmetic per load.
+  - Increase cluster_shape_mn to (2,1) on N=4096 to multicast A/SFA and halve A traffic; retune swizzle to keep coalescing.
+  - Specialize away the runtime SFB layout shifts (the 64/192 branches) by compiling per‑shape kernels so the inner loop is branch‑free.
+  - Maximize AB stages (3–4) and keep C stages minimal; overlap TMA→SMEM with MMA to hide latency.
 
-1. **Bring back `num_acc_stage = 2` for the 128×128 family**
 
-   In `nvfp4_gemm.py` you compute `num_acc_stage = 2` unless `N==256`, which enables overlap and early release in the epilogue pipeline. In your current `submission.py`, `num_acc_stage` is hard-pinned to `1`, which typically kills overlap and makes the kernel behave much more "serialized". Fix: mirror the single-GEMM rule (2 stages when not in the 2-CTA/large-N regime). This is often a big step toward SoL.
+To get **~15 µs → ~9 µs**, the biggest wins in your current DSL kernel are:
 
-2. **Add per-shape configurations**
+* **Kill the per-subtile CTA barrier in the epilogue** (`epilog_sync_barrier.arrive_and_wait()` inside the subtile loop): replace with **proper mbarrier/pipeline signaling** so only the TMA-store warp waits (this alone can be a *huge* chunk of your 27 µs).
+* **Make the epilogue cheaper:** compute `sigmoid(acc1)` with a **faster approximation** (or exp2-based fast path) and **vectorize** the rmem ops; keep it fully warp-local (avoid extra fences).
+* **Use a larger/clustered schedule to cut DRAM pressure:** set **cluster_shape_mn=(2,1) or (1,2)** and enable multicast where possible so A/B traffic is amortized across CTAs (you’re near memory-bound on these shapes). 
+* **Turn on 2-CTA UMMA path for the big tiles** (try `mma_tiler_mn=(256,128)` or `(256,64)` where it fits) and retune swizzle/raster for those cases.
+* **Trade stages for occupancy:** cap `num_ab_stage` to what’s needed, push **occupancy=2** (even if fewer stages) if regs/TMEM allow; for memory-edge kernels, 2 resident CTAs often beats deep staging.
 
-   Right now your config selection is too coarse. In the single GEMM you used multiple tuned configs (different `mma_tiler_mn`, `cluster_shape_mn`, `swizzle_size`, raster direction) based on the shape of the tensors. For Blackwell, CUTLASS explicitly leans on persistent tile scheduling and cluster shape selection for performance. NVIDIA Docs +1. Even provides a "preferred cluster" example. GitHub +1.
-
-   Practical: create 3-4 configs keyed to the 4 benchmark shapes' `(N,K)`, similar to your `nvfp4_gemm.py` table.
-
-If you do just two things next: (1) restore `num_acc_stage=2` where appropriate and (2) add per-benchmark configs with larger clusters/2-CTA UMMA where viable. That’s the most realistic path from ~33 µs toward the single-digit µs regime.
+If you do only one thing first: **remove that subtile barrier + pipeline the TMA store**. 
