@@ -125,6 +125,17 @@ Any mismatch here produces large-magnitude numerical errors (NOT small atol/rtol
 
 ---
 
+### EXECUTION_MODEL_REQUIREMENTS
+
+- **Warpgroup MMA** – Assign a full warpgroup (4 warps) to every MMA computation. Do not gate the MMA launch to a single `warpidx`; hardware-multicast, MMA pipelines, and state transitions assume the complete warpgroup is active together.
+- **Single scheduler per CTA** – Each CTA instantiates exactly one tile scheduler/loop. All roles (TMA, MMA, epilogue) must consume tiles from that shared assignment instead of launching their own `StaticPersistentTileScheduler.create(...)` instances.
+- **TMEM allocator ownership** – TMEM allocate/free must be performed by exactly one warp per CTA. All other warps should `wait_for_alloc`, grab the pointer, and proceed without touching the allocator.
+- **TMEM sizing discipline** – Compute `num_tmem_alloc_cols` from `num_accumulator_tmem_cols` plus the scale tensor columns (with alignment). Avoid hard-coded values such as 512 that over-consume TMEM; right-size allocations to the actual accumulator + scale footprint.
+- **Epilogue subtile sync** – Do not place CTA-wide barriers inside the epilogue inner subtile loop. Only the dedicated store warp or pipeline (e.g., `PipelineTmaStore`) should synchronize subtiles via its own mbarrier semantics.
+- **CTA sizing guidance** – Target 128-thread CTAs by default. Use 160- or 192-thread CTAs only when measurable geo-mean latency improvements justify the larger CTA, otherwise extra warps waste bandwidth/occupancy headroom.
+
+---
+
 ### PERFORMANCE_PLAYBOOK (HIT ~4.89us GEOMEAN)
 
 - Primary goal: approach SoL on the 4 benchmark shapes (memory+TC balanced).

@@ -2,6 +2,12 @@
 MAIN GEMM tcgen05 FLOW 
 ----
 
+## Execution Roles Mapping
+
+- **TMA warps** – A single CTA warp owns all Tensor Memory Accelerator loads. This warp instantiates the persistent tile scheduler and feeds the ab pipeline so downstream warps see a consistent tile ordering.
+- **MMA warpgroup** – Four warps (a full warpgroup) form the MMA compute team. They share the same tile scheduler output, march through kblocks together, and collectively execute every tcgen05 mma tile without gating on a specific `warpidx`.
+- **TMEM allocation + TMAstore** – One warp (typically the lead epilogue warp) allocates TMEM (alloc/free) and hosts the TMA store pipeline that writes results back to GMEM. All other epilogue warps wait on the allocation, reuse the pointer, and tap the pipeline stages through the pipeline’s mbarrier semantics.
+
 # tcgen05 GEMM Flow
 
 ## Data Preparation (Python)
@@ -45,5 +51,6 @@ ACCUMULATE toggling:
 
 4. Epilogue (TMEM → Reg → Global)
 tiled_copy_t2r loads tCtAcc1/tCtAcc2 (FP32) → registers, then applies silu+mul and stores to output tensor mC_mnl (FP16)
+  - Avoid CTA-wide barriers per subtile; let the epilogue store warp/pipeline provide the necessary synchronization (per-tile mbarrier semantics) so other warps are never blocked twice per subtile.
 
 ---

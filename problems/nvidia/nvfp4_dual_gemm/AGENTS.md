@@ -89,11 +89,17 @@ Global SF (FP8, atom-tiled) → TMA → SMEM
 
 **Everything runs on default stream.** Benchmarking only syncs default stream.
 
-## Optimization Checklist
+### Optimization Checklist
 
 ### NOTE:
 - No micro-optimization work is allowed until the user specified that all 10 correctness tests and 4 benchmark shape tests pass (rtol/atol)
 - Prefer 128-thread CTAs for tcgen05 path unless there is a proven need for extra warps; extra warps otherwise waste occupancy/bandwidth headroom
+
+### Red flags
+- Single-warp MMA gating.
+- Multiple independent persistent schedulers.
+- Hard-coded `num_tmem_alloc_cols=512`.
+- `arrive_and_wait()` inside the subtile loop.
 
 ### Kernel Launch Configuration
 - [ ] Grid/block dimensions tuned per shape
