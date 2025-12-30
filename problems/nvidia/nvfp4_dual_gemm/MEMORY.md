@@ -9,3 +9,8 @@
 - Versioned the compiled wrapper name, switched compile shapes to real benchmark sizes, and added TMEM scale column asserts before S2T setup in `submission.py`; no tests run.
 - Stopped filtering zeros on the TMEM destination in `mainloop_s2t_copy_and_partition` to avoid 0-column S2T copies; no tests run.
 - Removed `filter_zeros` from both S and D in `mainloop_s2t_copy_and_partition` to keep S2T shapes aligned; no tests run.
+- Added coalesce+filter_zeros on both S and D in `mainloop_s2t_copy_and_partition`, with a fallback when TMEM collapses and a mode-1 assert; no tests run.
+- Removed `coalesce` from S2T setup and added symmetric fallback when the filtered TMEM columns collapse; no tests run.
+- Switched S2T source tensors to stage-0 layouts, removed filter_zeros from S2T, and added rank/shape diagnostics before S2T copy; no tests run.
+- Fixed S2T stage indexing to use a rank-3 coord and added compile-time rank asserts; no tests run.
+- Replaced silent S2T asserts with RuntimeError messages for invalid/mismatched mode-1 sizes; no tests run.

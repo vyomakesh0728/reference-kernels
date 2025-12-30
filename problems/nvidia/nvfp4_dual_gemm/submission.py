@@ -639,6 +639,11 @@ class PersistentNvfp4DualGemm:
         sSFA = storage.sSFA.get_tensor(sfa_smem_layout_staged)
         sSFB1 = storage.sSFB1.get_tensor(sfb_smem_layout_staged)
         sSFB2 = storage.sSFB2.get_tensor(sfb_smem_layout_staged)
+        sfa_smem_layout_stage0 = cute.slice_(sfa_smem_layout_staged, (None, None, None, 0))
+        sfb_smem_layout_stage0 = cute.slice_(sfb_smem_layout_staged, (None, None, None, 0))
+        sSFA_s2t = storage.sSFA.get_tensor(sfa_smem_layout_stage0)
+        sSFB1_s2t = storage.sSFB1.get_tensor(sfb_smem_layout_stage0)
+        sSFB2_s2t = storage.sSFB2.get_tensor(sfb_smem_layout_stage0)
 
         a_full_mcast_mask = None
         b_full_mcast_mask = None
@@ -936,17 +941,17 @@ class PersistentNvfp4DualGemm:
                 tiled_copy_s2t_sfa,
                 tCsSFA_compact_s2t,
                 tCtSFA_compact_s2t,
-            ) = self.mainloop_s2t_copy_and_partition(sSFA, tCtSFA)
+            ) = self.mainloop_s2t_copy_and_partition(sSFA_s2t, tCtSFA, "SFA")
             (
                 tiled_copy_s2t_sfb,
                 tCsSFB1_compact_s2t,
                 tCtSFB1_compact_s2t,
-            ) = self.mainloop_s2t_copy_and_partition(sSFB1, tCtSFB1)
+            ) = self.mainloop_s2t_copy_and_partition(sSFB1_s2t, tCtSFB1, "SFB1")
             (
                 tiled_copy_s2t_sfb2,
                 tCsSFB2_compact_s2t,
                 tCtSFB2_compact_s2t,
-            ) = self.mainloop_s2t_copy_and_partition(sSFB2, tCtSFB2)
+            ) = self.mainloop_s2t_copy_and_partition(sSFB2_s2t, tCtSFB2, "SFB2")
 
             tile_sched = utils.StaticPersistentTileScheduler.create(
                 tile_sched_params, cute.arch.block_idx(), cute.arch.grid_dim()
@@ -1037,13 +1042,19 @@ class PersistentNvfp4DualGemm:
                             ab_consumer_state, peek_ab_full_status
                         )
 
-                        s2t_stage_coord = (
-                            None,
-                            None,
-                            None,
-                            None,
-                            ab_consumer_state.index,
-                        )
+                        if cutlass.const_expr(cute.rank(tCsSFA_compact_s2t) != 3):
+                            raise RuntimeError(
+                                "S2T expected tCsSFA_compact_s2t rank==3"
+                            )
+                        if cutlass.const_expr(cute.rank(tCsSFB1_compact_s2t) != 3):
+                            raise RuntimeError(
+                                "S2T expected tCsSFB1_compact_s2t rank==3"
+                            )
+                        if cutlass.const_expr(cute.rank(tCsSFB2_compact_s2t) != 3):
+                            raise RuntimeError(
+                                "S2T expected tCsSFB2_compact_s2t rank==3"
+                            )
+                        s2t_stage_coord = (None, None, ab_consumer_state.index)
                         tCsSFA_compact_s2t_staged = tCsSFA_compact_s2t[s2t_stage_coord]
                         tCsSFB1_compact_s2t_staged = tCsSFB1_compact_s2t[s2t_stage_coord]
                         tCsSFB2_compact_s2t_staged = tCsSFB2_compact_s2t[s2t_stage_coord]
@@ -1255,9 +1266,24 @@ class PersistentNvfp4DualGemm:
             tmem.free(acc_tmem_ptr)
             c_pipeline.producer_tail()
 
-    def mainloop_s2t_copy_and_partition(self, sSF: cute.Tensor, tSF: cute.Tensor):
-        tCsSF_compact = sSF
+    def mainloop_s2t_copy_and_partition(
+        self, sSF: cute.Tensor, tSF: cute.Tensor, tag: str
+    ):
+        tCsSF = sSF
         tCtSF = tSF
+
+        assert cute.rank(tCsSF) >= cute.rank(tCtSF)
+        if cutlass.const_expr(cute.size(tCsSF) == cute.size(tCtSF)):
+            assert cute.size(tCsSF) == cute.size(tCtSF)
+
+        print(
+            f"S2T {tag} ranks",
+            cute.rank(tCsSF),
+            cute.rank(tCtSF),
+            "shapes",
+            tCsSF.layout.shape,
+            tCtSF.layout.shape,
+        )
 
         copy_atom_s2t = cute.make_copy_atom(
             tcgen05.Cp4x32x128bOp(self.cta_group), self.sf_dtype
@@ -1265,7 +1291,7 @@ class PersistentNvfp4DualGemm:
         tiled_copy_s2t = tcgen05.make_s2t_copy(copy_atom_s2t, tCtSF)
         thr_copy_s2t = tiled_copy_s2t.get_slice(0)
 
-        tCsSF_compact_s2t_ = thr_copy_s2t.partition_S(tCsSF_compact)
+        tCsSF_compact_s2t_ = thr_copy_s2t.partition_S(tCsSF)
         tCsSF_compact_s2t = tcgen05.get_s2t_smem_desc_tensor(
             tiled_copy_s2t, tCsSF_compact_s2t_
         )
@@ -1561,6 +1587,7 @@ def compile_kernel(cfg: KernelConfig):
 
 
 def custom_kernel(data: input_t) -> output_t:
+    print("USING_SUBMISSION_PY", __file__)
     a, b1, b2, _, _, _, sfa_permuted, sfb1_permuted, sfb2_permuted, c = data
 
     m, n, l = c.shape
