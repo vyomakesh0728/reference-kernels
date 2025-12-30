@@ -2,6 +2,15 @@
 
 the first ~5 TODOs (warpgroup MMA + fewer epilogue warps, single-warp TMEM alloc/free, right-sized TMEM, remove inner-loop epilogue barriers, cap stages / raise occupancy) are exactly the kind of fixes that can plausibly take you from ~27 µs geo-mean toward ~9 µs.
 
+## PTX Path TODOs (new)
+
+- Decide integration strategy: replace `submission.py` kernel or add `submission_ptx.py` and route via `custom_kernel`.
+- Implement a single fused PTX kernel that matches the same input/output contract and layouts as `submission.py` (no B transposes; use permuted scale tensors).
+- Build TMA descriptors and SMEM layouts in host code; validate swizzle choices against tcgen05 requirements.
+- Implement tcgen05 FLOW in PTX: TMA gmem→smem, S2T scale copy to TMEM, dual MMA with block scales, TMEM accum, silu+mul, FP16 store.
+- Provide a minimal launch config table keyed by (M,N,K) matching task.yml shapes.
+- Add a lightweight correctness gate to compare PTX output vs reference for one case before performance tuning.
+
 ## TODOs 
 
 - Cut CTA size to 128 threads: current threads_per_cta is 192 (6 warps) (submission.py:85–submission.py:90); restructure so the tcgen05 MMA runs on a full warpgroup and don’t reserve 4 dedicated epilogue warps + 1 dedicated TMA warp.
@@ -22,4 +31,3 @@ the first ~5 TODOs (warpgroup MMA + fewer epilogue warps, single-warp TMEM alloc
 - Revisit cluster/multicast only with a correctness-proof launch rule: current cluster_shape_mn=(1,1) disables multicast; if you try (2,1) to amortize A/SFA traffic, ensure the cluster is compatible with the tiled MMA and your scheduler/layout math (you already saw “cluster shape not divisible…” in MEMORY.md).
 - Make the epilogue math cheaper: epilogue_op is x * sigmoid(x) with exp (submission.py:540–submission.py:542); consider a faster sigmoid approximation (still within 1e-3 tolerances) and keep it warp-local/vectorized to avoid SFU bottleneck dominating.
 - Remove dead/unused state and over-structure (cleanup, not speed): iter_acc_early_release_in_epilogue is computed but unused (submission.py:235), and several “shifted_ptr” special-cases are legacy for tiles you don’t currently use; delete once configs are finalized to prevent accidental regressions.
-

@@ -2,4 +2,10 @@
 - Changed N=4096 config to 128x128 tile with 1x1 cluster and raster_along_m=True in `submission.py`; ran `python3 test_benchmark.py` and it failed due to CUDA device error (cudaGetDeviceCount error 304), so no new performance data.
 - Ran `python3 test_benchmark.py` after switching N=4096 to 128x128 tile with 1x1 cluster; geom mean 27.750 us (per-case: 35.260, 31.023, 17.800, 30.458 us).
 - Updated `submission.py` configs to use 256x128 with cluster (2,1) and occupancy=2 for N=4096, and 256x64 with occupancy=2 for N=3072.
-- Ran `python3 test_correctness.py`: all 10 tests passed. Ran `python3 test_benchmark.py`: N=4096 cases regressed (53.457/49.178 us) and N=3072 cases failed with cluster shape not divisible by MMA size (2:1).
+- Ran `python3 test_correctness.py`: all 10 tests passed. Ran `python3 test_benchmark.py`: N=4096 cases regressed (53.457/49.178 us) and N=3072 cases failed with cluster shape not divisible by MMA size (2:1).- Added PTX path TODO section to `REVIEW.md` outlining pure PTX kernel integration and flow steps; no tests run.
+- Updated `submission.py` to keep baseline warp roles, move TMEM allocate back into the epilog warp block, and set benchmark configs to `cluster_shape_mn=(1,2)` with `swizzle_size=1` for N=4096/N=3072; ran `python3 test_correctness.py` (pass 10/10) and `python3 test_benchmark.py` (geom mean 49.060 us).
+- Added guard-rail block in `submission.py` and fixed TMEM allocation so only warp 0 allocates while warps 0–4 wait; no tests run.
+- Added a cache key with `CACHE_VERSION` plus a TMEM allocation tripwire assert/print in `submission.py`; no tests run.
+- Versioned the compiled wrapper name, switched compile shapes to real benchmark sizes, and added TMEM scale column asserts before S2T setup in `submission.py`; no tests run.
+- Stopped filtering zeros on the TMEM destination in `mainloop_s2t_copy_and_partition` to avoid 0-column S2T copies; no tests run.
+- Removed `filter_zeros` from both S and D in `mainloop_s2t_copy_and_partition` to keep S2T shapes aligned; no tests run.
