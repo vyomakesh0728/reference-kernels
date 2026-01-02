@@ -1,0 +1,139 @@
+Running on:
+GPU: NVIDIA B200
+CPU: INTEL(R) XEON(R) PLATINUM 8570
+Device count: 1
+Runtime: CUDA
+Platform: Linux-6.8.0-51-generic-x86_64-with-glibc2.35
+Torch: 2.9.1+cu130
+Hostname: f5504d0f84d6
+Running failed
+Command 
+python3 eval.py benchmark /tmp/tmprqwlwox3
+
+exited with error code 1 after 4.97 seconds.
+Cluster Bot
+APP
+ — 12:40 PM
+Program stderr (1/6):
+loc("tTR_tAcc1_mn = tTR_tAcc1[(None, None, None, subtile_idx)]"("/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py":1244:0)): error: expects `coord` and shape of view are weakly congruent, but got '!cute.layout<"(((32,32),1),1,1,1,4,2):(((1,65536),0),0,0,0,32,64)">', '!cute.coord<"(_,_,_,?)">'
+multiprocessing.pool.RemoteTraceback: 
+"""
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 125, in worker
+    result = (True, func(*args, **kwds))
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 228, in _run_single_benchmark
+    output = custom_kernel(_clone_data(data))
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1586, in custom_kernel
+    compiled_func = compile_kernel(cfg)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1565, in compile_kernel
+    compiled = cute.compile(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 578, in __call__
+    return self._compile(*args, **kwargs)
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 644, in _compile
+    return func._dsl_object._func(func, *args, **kwargs)
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1613, in _func
+    result = self.generate_mlir(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1414, in generate_mlir
+    module, module_hash, result = self.generate_original_ir(
+Program stderr (2/6):
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1232, in generate_original_ir
+    module, result = profiler(build_ir_module)()
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/utils/timer.py", line 29, in func_wrapper
+    return func(*args, **kwargs)
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1214, in build_ir_module
+    result = funcBody(*ir_args, **ir_kwargs)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1554, in wrapper
+    gemm(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 503, in jit_wrapper
+    return getattr(func._dsl_object, executor_name)(func, *args, **kwargs)
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1569, in _func
+    return funcBody(*args, **kwargs)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 444, in __call__
+    self.kernel(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass.py", line 1012, in launch
+    ret, name = kernel_generator(*self.func_args, **self.func_kwargs, config=config)
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1906, in kernel_wrapper
+    kernel_ret = funcBody(*ir_args, **ir_kwargs)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1158, in kernel
+    if warp_idx < self.mma_warp_id:
+Program stderr (3/6):
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 245, in ir_loop
+    return func(pred, *write_args)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1158, in if_region_68
+    if warp_idx < self.mma_warp_id:
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 283, in if_executor
+    return executor.if_execute(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 145, in if_execute
+    return self._if_dynamic(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 491, in _if_execute_dynamic
+    return scf_gen.scf_execute_dynamic(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+    region_result = builder(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 467, in then_builder
+    return then_block(*flat_args)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1224, in then_block_74
+    while work_tile.is_valid_tile:
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 252, in ir_while_loop
+    return func(pred, *write_args)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1224, in while_region_69
+    while work_tile.is_valid_tile:
+Program stderr (4/6):
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 265, in while_executor
+    return executor.while_execute(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 166, in while_execute
+    return self._while_dynamic(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 620, in _while_execute_dynamic
+    return scf_gen.scf_execute_dynamic(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+    region_result = builder(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 607, in after_block_builder
+    after_results = while_after_block(*flat_args)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1243, in while_after_block_70
+    for subtile_idx in cutlass.range(subtile_cnt):
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 219, in ir_loop
+    return executor.for_execute(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 120, in for_execute
+    return self._loop_execute_range_dynamic(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 411, in _loop_execute_range_dynamic
+    return scf_gen.scf_execute_dynamic(
+Program stderr (5/6):
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+    region_result = builder(
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 407, in for_body_builder
+    updated_func_args = func(iv, *func_args)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/submission.py", line 1244, in loop_body_71
+    tTR_tAcc1_mn = tTR_tAcc1[(None, None, None, subtile_idx)]
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/_mlir_helpers/op.py", line 60, in wrapper
+    res_or_list = opFunc(*args, **kwargs, loc=loc)
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cute/tensor.py", line 255, in __getitem__
+    return slice_(self, crd, loc=loc, ip=ip)
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/_mlir_helpers/op.py", line 60, in wrapper
+    res_or_list = opFunc(*args, **kwargs, loc=loc)
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cute/core.py", line 1942, in slice_
+    return _op_wrapper(partial(_cute_ir.slice, coord=coord_val, loc=loc, ip=ip), src)
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cute/core.py", line 1219, in _op_wrapper
+    res = op_fn(input.value)
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/_mlir/dialects/_cute_ops_gen.py", line 3395, in slice
+    return SliceOp(input=input, coord=coord, loc=loc, ip=ip).result
+Program stderr (6/6):
+  File "/home/runner/.local/lib/python3.10/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/_mlir/dialects/_cute_ops_gen.py", line 3380, in __init__
+    super().__init__(self.build_generic(attributes=attributes, operands=operands, successors=_ods_successors, regions=regions, loc=loc, ip=ip))
+ValueError: Operation creation failed
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 498, in <module>
+    sys.exit(main())
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 466, in main
+    return run_benchmarking(logger, pool, tests)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 319, in run_benchmarking
+    run_single_benchmark(pool, tests[0], False, 200, 10e7)
+  File "/home/runner/_work/discord-cluster-manager/discord-cluster-manager/eval.py", line 304, in run_single_benchmark
+    return pool.apply(_run_single_benchmark, (test, recheck, max_repeats, max_time_ns))
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 360, in apply
+    return self.apply_async(func, args, kwds).get()
+  File "/usr/lib/python3.10/multiprocessing/pool.py", line 774, in get
+    raise self._value
+ValueError: Operation creation failed
