@@ -41,7 +41,7 @@ Always preserve correctness; add minimal, well-instrumented changes and benchmar
 - Default CUDA queue only; do not create or sync non-default queues.
 - No cross-run input caching; only compile or autotune caching is allowed.
 - Do not include the literal token `s-t-r-e-a-m` in any code or comments.
-- Do not embed the CuTe reference kernel; use the tcgen05 PTX path.
+- Do not embed the CuTe reference kernel; stay in the tcgen05 DSL kernel implementation.
 
 ## Execution Invariants
 - Warpgroup MMA: full 4-warp participation; no single-warp gating.

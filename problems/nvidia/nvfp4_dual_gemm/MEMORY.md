@@ -16,3 +16,29 @@
 - Replaced silent S2T asserts with RuntimeError messages for invalid/mismatched mode-1 sizes; no tests run.
 - Resolved merge conflict in `submission.py` to keep stage-3 S2T stage indexing logic (len(shape)-1 based coord); no tests run.
 - Refactored `AGENTS.md`, `skills/nvfp4-dual-gemm-optimizer/SKILL.md`, and `FLOW.md` to reduce duplication and add concise specs/tasks; tests not run; geomean unchanged.
+- Updated `skills/nvfp4-dual-gemm-optimizer/SKILL.md` to emphasize DSL-only optimization and fixed `task.yml` tuple spec to 10 inputs including permuted scales; tests not run; geomean unchanged.
+- Removed tmem_alloc_cols assert/print in `submission.py` to avoid pre-setup attribute access; ran `python3 test_correctness.py` (0/10, S2T rank mismatch); no benchmark run.
+- Applied `cute.filter_zeros` to S2T source/dest tensors in `submission.py`; ran `python3 test_correctness.py` (0/10, same S2T rank mismatch); no benchmark run.
+- Switched S2T source tensors to use staged SMEM layouts in `submission.py`; ran `python3 test_correctness.py` (0/10, tmem alloc num_columns=0); no benchmark run.
+- Forced num_tmem_alloc_cols=512 in `_setup_attributes`; ran `python3 test_correctness.py` (0/10, tmem alloc/free num_columns=0 error); no benchmark run.
+- Passed explicit num_columns to tmem.free in `submission.py`; ran `python3 test_correctness.py` (0/10, num_columns<=num_allocated_columns error); no benchmark run.
+- Moved tmem.allocate into the epilog branch (warp_idx <= mma_warp_id) so allocation happens alongside wait/retrieve; ran `python3 test_correctness.py` (0/10, illegal memory access); no benchmark run.
+- Restored warp roles to epilog=(0,1,2,3), mma=4, tma=5 and changed epilog branch to warp_idx < mma_warp_id; ran `python3 test_correctness.py` (0/10, illegal memory access); no benchmark run.
+- Reverted MMA/epilog TMEM pointer arithmetic, SFB offset handling, and S2T stage coord to baseline logic; ran `python3 test_correctness.py` (0/10, mismatches); no benchmark run.
+- Restored dynamic num_acc_stage with conditional tCtAcc_fake layout; ran `python3 test_correctness.py` (0/10, mismatches); no benchmark run.
+- Switched SFB SMEM/TMEM layouts back to tiled_mma_sfb+mma_tiler_sfb; ran `python3 test_correctness.py` (0/10, mismatches); no benchmark run.
+- Restored epilog accumulator stage indexing before grouping; ran `python3 test_correctness.py` (10/10 pass); no benchmark run.
+- Removed runtime/debug prints and asserts from `submission.py` (custom_kernel + S2T); ran `python3 test_benchmark.py` (geom 78.064 us; per-case 89.151/74.697/56.868/98.061 us).
+- Tried n4096_k7168 mma_tiler_mn=(256,128); ran `python3 test_correctness.py` (10/10 pass) then `python3 test_benchmark.py` (N=4096 cases failed: cluster shape not divisible). Reverted to 128x128.
+- After revert, ran `python3 test_correctness.py --only 1` (pass) and `python3 test_benchmark.py` (geom 77.398 us; per-case 89.343/75.732/54.403/97.488 us).
+- Set n4096_k7168 mma_tiler_mn=(256,128) with cluster_shape_mn=(2,1); ran `python3 test_correctness.py --only 1` (pass) and `python3 test_benchmark.py` (geom 73.092 us; per-case 79.896/69.560/52.968/96.957 us).
+- Set n3072_k4096/n3072_k7168 mma_tiler_mn=(256,64) with cluster_shape_mn=(2,1); ran `python3 test_correctness.py --only 1` (pass) and `python3 test_benchmark.py` (geom 66.714 us; per-case 82.117/69.673/46.947/73.750 us).
+- Lowered n3072_k4096/n3072_k7168 occupancy to 2; ran `python3 test_correctness.py --only 1` (pass) and `python3 test_benchmark.py` (geom 62.627 us; per-case 80.771/68.512/42.667/65.152 us).
+- Set n4096_k7168 occupancy to 1; ran `python3 test_correctness.py --only 1` (pass) and `python3 test_benchmark.py` (geom 61.167 us; per-case 72.332/61.740/46.362/67.612 us).
+- Lowered n3072_k4096/n3072_k7168 occupancy to 1; ran `python3 test_correctness.py --only 1` (pass) and `python3 test_benchmark.py` (geom 57.607 us; per-case 72.614/61.976/41.080/59.569 us).
+- Tried n4096_k7168 raster_along_m=False; ran `python3 test_correctness.py --only 1` (pass) and `python3 test_benchmark.py` (geom 57.656 us); reverted to raster_along_m=True and reran `python3 test_correctness.py --only 1` (pass) + `python3 test_benchmark.py` (geom 56.918 us; per-case 73.049/60.737/39.871/59.328 us).
+- Tried n3072 swizzle_size=2; ran `python3 test_correctness.py --only 1` (pass) and `python3 test_benchmark.py` (geom 58.344 us); reverted to swizzle_size=1 and reran `python3 test_correctness.py --only 1` (pass) + `python3 test_benchmark.py` (geom 56.844 us; per-case 72.465/59.982/39.788/60.371 us).
+- Tried n4096 swizzle_size=2; ran `python3 test_correctness.py --only 1` (pass) and `python3 test_benchmark.py` (geom 60.627 us); reverted to swizzle_size=1 and reran `python3 test_correctness.py --only 1` (pass) + `python3 test_benchmark.py` (geom 57.195 us; per-case 72.743/60.499/40.744/59.679 us).
+- Capped num_ab_stage to 3 in _compute_stages; ran `python3 test_correctness.py --only 1` (pass) and `python3 test_benchmark.py` (geom 59.999 us). Reverted cap and reran `python3 test_correctness.py --only 1` (pass) + `python3 test_benchmark.py` (geom 57.688 us; per-case 72.428/61.265/41.044/60.808 us).
+- Added `codex_background.sh` and launched it via nohup in background (PID 20700); no tests run.
+- Updated `codex_background.sh` to wrap codex with `script -q -c codex /dev/null`; launched background run (PID 24029) and monitoring output; no tests run.

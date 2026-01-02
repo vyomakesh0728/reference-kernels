@@ -12,17 +12,20 @@ lang: "py"
 description: |
   
   You will implement a block scaled dual matrix-matrix multiplication kernel with silu activation optimized for NVIDIA B200.
-  To be explicit, you will be given a tuple of tensors:
+  To be explicit, you will be given a 10-tuple of tensors:
   ```
-  (a, b1, b2, sfa, sfb1, sfb2, c)
+  (a, b1, b2, sfa_cpu, sfb1_cpu, sfb2_cpu, sfa_permuted, sfb1_permuted, sfb2_permuted, c)
   ```
   where:
   * `a` is M x K x L in K-major order in nvfp4(e2m1)
   * `b1` is N x K x L in K-major order in nvfp4(e2m1)
   * `b2` is N x K x L in K-major order in nvfp4(e2m1)
-  * `sfa` is M x (K // 16) x L in K-major order in fp8(e4m3fnuz)
-  * `sfb1` is N x (K // 16) x L in K-major order in fp8(e4m3fnuz)
-  * `sfb2` is N x (K // 16) x L in K-major order in fp8(e4m3fnuz)
+  * `sfa_cpu` is M x (K // 16) x L in K-major order in fp8(e4m3fnuz)
+  * `sfb1_cpu` is N x (K // 16) x L in K-major order in fp8(e4m3fnuz)
+  * `sfb2_cpu` is N x (K // 16) x L in K-major order in fp8(e4m3fnuz)
+  * `sfa_permuted` is the permuted physical layout of `sfa_cpu`
+  * `sfb1_permuted` is the permuted physical layout of `sfb1_cpu`
+  * `sfb2_permuted` is the permuted physical layout of `sfb2_cpu`
   * `c` is M x N x L in fp16
   
   Matrix sizes `M` is divisible by mma_tiler_mn[0], `N` is divisible by mma_tiler_mn[1], `K` is divisible by 256.

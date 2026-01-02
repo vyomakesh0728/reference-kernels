@@ -29,11 +29,11 @@ class KernelConfig:
 CONFIGS = {
     "n4096_k7168": KernelConfig(
         name="n4096_k7168",
-        mma_tiler_mn=(128, 128),
-        cluster_shape_mn=(1, 2),
+        mma_tiler_mn=(256, 128),
+        cluster_shape_mn=(2, 1),
         swizzle_size=1,
         raster_along_m=True,
-        occupancy=2,
+        occupancy=1,
     ),
     "default": KernelConfig(
         name="default",
@@ -45,19 +45,19 @@ CONFIGS = {
     ),
     "n3072_k4096": KernelConfig(
         name="n3072_k4096",
-        mma_tiler_mn=(128, 64),
-        cluster_shape_mn=(1, 2),
+        mma_tiler_mn=(256, 64),
+        cluster_shape_mn=(2, 1),
         swizzle_size=1,
         raster_along_m=False,
-        occupancy=3,
+        occupancy=1,
     ),
     "n3072_k7168": KernelConfig(
         name="n3072_k7168",
-        mma_tiler_mn=(128, 64),
-        cluster_shape_mn=(1, 2),
+        mma_tiler_mn=(256, 64),
+        cluster_shape_mn=(2, 1),
         swizzle_size=1,
         raster_along_m=False,
-        occupancy=3,
+        occupancy=1,
     ),
 }
 
@@ -106,9 +106,9 @@ class PersistentNvfp4DualGemm:
             tcgen05.CtaGroup.TWO if self.use_2cta_instrs else tcgen05.CtaGroup.ONE
         )
 
-        self.epilog_warp_id = (0, 1)
-        self.mma_warp_id = 2
-        self.tma_warp_id = 3
+        self.epilog_warp_id = (0, 1, 2, 3)
+        self.mma_warp_id = 4
+        self.tma_warp_id = 5
         self.threads_per_cta = 32 * len(
             (self.mma_warp_id, self.tma_warp_id, *self.epilog_warp_id)
         )
@@ -171,12 +171,12 @@ class PersistentNvfp4DualGemm:
         )
 
         self.cta_tile_shape_mnk = (
-            self.mma_tiler[0],
+            self.mma_tiler[0] // cute.size(tiled_mma.thr_id.shape),
             self.mma_tiler[1],
             self.mma_tiler[2],
         )
         self.cta_tile_shape_mnk_sfb = (
-            self.mma_tiler_sfb[0],
+            self.mma_tiler_sfb[0] // cute.size(tiled_mma.thr_id.shape),
             self.mma_tiler_sfb[1],
             self.mma_tiler_sfb[2],
         )
@@ -223,12 +223,6 @@ class PersistentNvfp4DualGemm:
             self.occupancy,
         )
 
-        # Force num_acc_stage to 1 unconditionally.
-        # The manual staged tensor layout construction doesn't preserve
-        # proper tensor rank for cute.gemm. Since kernel is memory-bandwidth
-        # bound, single accumulator stage has negligible performance impact.
-        self.num_acc_stage = 1
-
         self.a_smem_layout_staged = sm100_utils.make_smem_layout_a(
             tiled_mma, self.mma_tiler, self.a_dtype, self.num_ab_stage
         )
@@ -248,27 +242,12 @@ class PersistentNvfp4DualGemm:
         self.overlapping_accum = self.num_acc_stage == 1
 
         sf_atom_mn = 32
-        # Calculate K dimension of the scale factor tile needed per MMA
-        # mma_inst_shape_k is typically 64 for fp4 input.
-        # mma_inst_tile_k is 4.
-        # Total K elements = 64 * 4 = 256.
-        # SF vector size is 16. So we need 256 / 16 = 16 SF elements along K per N (or M).
-        # Total SF elements = Dim * 16.
-        # Total SF bytes = Dim * 16 * 1 (FP8).
-        # TMEM col = 32 bytes.
-        # Cols = (Dim * 16) / 32 = Dim / 2.
-        
-        # We use the calculated mma_inst_shape_k from above to be robust.
-        sf_k_elements = mma_inst_shape_k * mma_inst_tile_k // self.sf_vec_size
-        
         self.num_sfa_tmem_cols = (
-            self.cta_tile_shape_mnk[0] * sf_k_elements + 31
-        ) // 32
-        
+            self.cta_tile_shape_mnk[0] // sf_atom_mn
+        ) * mma_inst_tile_k
         self.num_sfb_tmem_cols = (
-            self.cta_tile_shape_mnk_sfb[1] * sf_k_elements + 31
-        ) // 32
-        
+            self.cta_tile_shape_mnk_sfb[1] // sf_atom_mn
+        ) * mma_inst_tile_k
         self.num_sf_tmem_cols = self.num_sfa_tmem_cols + 2 * self.num_sfb_tmem_cols
         
         # TMEM column is 32 bytes.
@@ -281,15 +260,7 @@ class PersistentNvfp4DualGemm:
         self.num_accumulator_tmem_cols = (
             self.num_accumulator_tmem_cols_per_gemm * 2
         )
-        calculated_num_tmem_alloc_cols = self.num_accumulator_tmem_cols + self.num_sf_tmem_cols
-        
-        # Round up to nearest power of 2, min 32, max 512
-        if calculated_num_tmem_alloc_cols <= 32:
-            self.num_tmem_alloc_cols = 32
-        else:
-            self.num_tmem_alloc_cols = 1 << (calculated_num_tmem_alloc_cols - 1).bit_length()
-        
-        self.num_tmem_alloc_cols = int(max(32, min(512, self.num_tmem_alloc_cols)))
+        self.num_tmem_alloc_cols = 512
 
         self.iter_acc_early_release_in_epilogue = (
             self.num_sf_tmem_cols // self.epi_tile_n
@@ -674,11 +645,9 @@ class PersistentNvfp4DualGemm:
         sSFA = storage.sSFA.get_tensor(sfa_smem_layout_staged)
         sSFB1 = storage.sSFB1.get_tensor(sfb_smem_layout_staged)
         sSFB2 = storage.sSFB2.get_tensor(sfb_smem_layout_staged)
-        sfa_smem_layout_stage0 = cute.slice_(sfa_smem_layout_staged, (None, None, None, 0))
-        sfb_smem_layout_stage0 = cute.slice_(sfb_smem_layout_staged, (None, None, None, 0))
-        sSFA_s2t = storage.sSFA.get_tensor(sfa_smem_layout_stage0)
-        sSFB1_s2t = storage.sSFB1.get_tensor(sfb_smem_layout_stage0)
-        sSFB2_s2t = storage.sSFB2.get_tensor(sfb_smem_layout_stage0)
+        sSFA_s2t = sSFA
+        sSFB1_s2t = sSFB1
+        sSFB2_s2t = sSFB2
 
         a_full_mcast_mask = None
         b_full_mcast_mask = None
@@ -802,25 +771,27 @@ class PersistentNvfp4DualGemm:
         tCrB1 = tiled_mma.make_fragment_B(sB1)
         tCrB2 = tiled_mma.make_fragment_B(sB2)
         acc_shape = tiled_mma.partition_shape_C(self.mma_tiler[:2])
-        # Create tCtAcc_fake with 4-mode layout (including staging dimension)
-        # For overlapping_accum=True, use 2 stages with custom strides
-        num_acc_stage_overlapped = 2
-        tCtAcc_fake = tiled_mma.make_fragment_C(
-            cute.append(acc_shape, num_acc_stage_overlapped)
-        )
-        # Customize strides for overlapping accumulator layout
-        tCtAcc_fake = cute.make_tensor(
-            tCtAcc_fake.iterator,
-            cute.make_layout(
-                tCtAcc_fake.shape,
-                stride=(
-                    tCtAcc_fake.stride[0],
-                    tCtAcc_fake.stride[1],
-                    tCtAcc_fake.stride[2],
-                    (256 - self.num_sf_tmem_cols) * tCtAcc_fake.stride[0][1],
+        if cutlass.const_expr(self.overlapping_accum):
+            num_acc_stage_overlapped = 2
+            tCtAcc_fake = tiled_mma.make_fragment_C(
+                cute.append(acc_shape, num_acc_stage_overlapped)
+            )
+            tCtAcc_fake = cute.make_tensor(
+                tCtAcc_fake.iterator,
+                cute.make_layout(
+                    tCtAcc_fake.shape,
+                    stride=(
+                        tCtAcc_fake.stride[0],
+                        tCtAcc_fake.stride[1],
+                        tCtAcc_fake.stride[2],
+                        (256 - self.num_sf_tmem_cols) * tCtAcc_fake.stride[0][1],
+                    ),
                 ),
-            ),
-        )
+            )
+        else:
+            tCtAcc_fake = tiled_mma.make_fragment_C(
+                cute.append(acc_shape, self.num_acc_stage)
+            )
 
         pipeline_init_wait(cluster_shape_mn=self.cluster_shape_mn)
 
@@ -944,22 +915,15 @@ class PersistentNvfp4DualGemm:
             tmem.wait_for_alloc()
 
             acc_tmem_ptr = tmem.retrieve_ptr(self.acc_dtype)
-            
-            # With num_acc_stage=1, use fragment layout directly (no staging)
-            # 1 column = 32 bytes = 8 FP32 elements.
-            elements_per_acc = self.cta_tile_shape_mnk[1] * 8
-            
-            # Create accumulator tensors for GEMM 1 and GEMM 2
-            tCtAcc1 = cute.make_tensor(acc_tmem_ptr, tCtAcc_fake.layout)
+            tCtAcc_base = cute.make_tensor(acc_tmem_ptr, tCtAcc_fake.layout)
+            acc_tmem_ptr2 = cute.recast_ptr(
+                acc_tmem_ptr + self.num_accumulator_tmem_cols_per_gemm,
+                dtype=self.acc_dtype,
+            )
+            tCtAcc_base2 = cute.make_tensor(acc_tmem_ptr2, tCtAcc_fake.layout)
 
-            gemm2_base_offset = elements_per_acc
-            ptr2 = cute.recast_ptr(acc_tmem_ptr + gemm2_base_offset, dtype=self.acc_dtype)
-            tCtAcc2 = cute.make_tensor(ptr2, tCtAcc_fake.layout)
-
-            # SFA starts after all Accumulators (GEMM 1 + GEMM 2)
-            sfa_offset_from_base = 2 * gemm2_base_offset
             sfa_tmem_ptr = cute.recast_ptr(
-                acc_tmem_ptr + sfa_offset_from_base, dtype=self.sf_dtype
+                acc_tmem_ptr + self.num_accumulator_tmem_cols, dtype=self.sf_dtype
             )
             tCtSFA_layout = blockscaled_utils.make_tmem_layout_sfa(
                 tiled_mma,
@@ -969,12 +933,12 @@ class PersistentNvfp4DualGemm:
             )
             tCtSFA = cute.make_tensor(sfa_tmem_ptr, tCtSFA_layout)
 
-            # SFB1 starts after SFA
-            # SFA size in FP8 elements = num_sfa_cols * 32
-            # sfa_tmem_ptr is FP8*, so we add directly
-            sfb1_offset_elements = self.num_sfa_tmem_cols * 32
-            sfb_tmem_ptr1 = sfa_tmem_ptr + sfb1_offset_elements
-            
+            sfb_tmem_ptr1 = cute.recast_ptr(
+                acc_tmem_ptr
+                + self.num_accumulator_tmem_cols
+                + self.num_sfa_tmem_cols,
+                dtype=self.sf_dtype,
+            )
             tCtSFB_layout = blockscaled_utils.make_tmem_layout_sfb(
                 tiled_mma_sfb,
                 self.mma_tiler_sfb,
@@ -982,11 +946,13 @@ class PersistentNvfp4DualGemm:
                 cute.slice_(sfb_smem_layout_staged, (None, None, None, 0)),
             )
             tCtSFB1 = cute.make_tensor(sfb_tmem_ptr1, tCtSFB_layout)
-            
-            # SFB2 starts after SFB1
-            sfb2_offset_elements = self.num_sfb_tmem_cols * 32
-            sfb_tmem_ptr2 = sfb_tmem_ptr1 + sfb2_offset_elements
-            
+            sfb_tmem_ptr2 = cute.recast_ptr(
+                acc_tmem_ptr
+                + self.num_accumulator_tmem_cols
+                + self.num_sfa_tmem_cols
+                + self.num_sfb_tmem_cols,
+                dtype=self.sf_dtype,
+            )
             tCtSFB2 = cute.make_tensor(sfb_tmem_ptr2, tCtSFB_layout)
 
             assert self.num_sfa_tmem_cols > 0
@@ -1029,6 +995,10 @@ class PersistentNvfp4DualGemm:
                     cur_tile_coord[2],
                 )
 
+                acc_stage_index = acc_producer_state.index
+                tCtAcc1 = tCtAcc_base[(None, None, None, acc_stage_index)]
+                tCtAcc2 = tCtAcc_base2[(None, None, None, acc_stage_index)]
+
                 ab_consumer_state.reset_count()
                 acc_producer_state.reset_count()
 
@@ -1044,61 +1014,47 @@ class PersistentNvfp4DualGemm:
                 tCtSFB1_mma = tCtSFB1
                 tCtSFB2_mma = tCtSFB2
                 if cutlass.const_expr(self.cta_tile_shape_mnk[1] == 192):
-                    # For 192, we have offset of 2 columns for odd tiles
-                    # 2 columns = 2 * 32 bytes = 64 bytes = 64 FP8 elements
-                    # Wait, offset needs to be in elements.
-                    # If we need to skip columns, we must multiply by 32 (elements per column).
-                    # The comment "offset of 2 columns" might be for a specific packing,
-                    # but for N=64 tiling, we skip 64 columns.
-                    # Let's assume N=192 uses a similar packed layout where we need to skip appropriately.
-                    # If intended offset is 2 columns: 64 elements.
-                    # If intended offset is 64 columns: 64 * 32 elements.
-                    # Given the N=64 logic below, let's stick to the structure but be careful.
-                    # However, since N=192 config is not standard, I will leave it as 64 elements
-                    # IF the intention was indeed 2 columns.
-                    # But for N=64 case, we KNOW we have 64-wide tiles.
-                    offset_elements = (
-                        cutlass.Int32(64)
+                    offset = (
+                        cutlass.Int32(2)
                         if mma_tile_coord_mnl[1] % 2 == 1
                         else cutlass.Int32(0)
                     )
-                    
-                    # sfa_tmem_ptr is the base for SFB1 (after adding sfb1 offset)
-                    # We need to recalculate pointers with the extra offset
-                    
-                    # SFB1
-                    sfb_tmem_ptr1_offset = sfa_tmem_ptr + sfb1_offset_elements + offset_elements
-                    tCtSFB1_mma = cute.make_tensor(sfb_tmem_ptr1_offset, tCtSFB_layout)
-                    
-                    # SFB2
-                    sfb_tmem_ptr2_offset = sfb_tmem_ptr1 + sfb2_offset_elements + offset_elements
-                    tCtSFB2_mma = cute.make_tensor(sfb_tmem_ptr2_offset, tCtSFB_layout)
-
+                    shifted_ptr1 = cute.recast_ptr(
+                        acc_tmem_ptr
+                        + self.num_accumulator_tmem_cols
+                        + self.num_sfa_tmem_cols
+                        + offset,
+                        dtype=self.sf_dtype,
+                    )
+                    tCtSFB1_mma = cute.make_tensor(shifted_ptr1, tCtSFB_layout)
+                    shifted_ptr2 = cute.recast_ptr(
+                        acc_tmem_ptr
+                        + self.num_accumulator_tmem_cols
+                        + self.num_sfa_tmem_cols
+                        + self.num_sfb_tmem_cols
+                        + offset,
+                        dtype=self.sf_dtype,
+                    )
+                    tCtSFB2_mma = cute.make_tensor(shifted_ptr2, tCtSFB_layout)
                 elif cutlass.const_expr(self.cta_tile_shape_mnk[1] == 64):
-                    # For 64, offset is based on tile index parity.
-                    # The full SFB tile in TMEM covers 128 N (due to mma_tiler_sfb).
-                    # This 128 N occupies 64 TMEM columns (since 1 col = 2 N for K=256/sf_vec=16).
-                    # CTA 0 (even) needs N=0..63 -> Cols 0..31.
-                    # CTA 1 (odd) needs N=64..127 -> Cols 32..63.
-                    # So offset for odd index is 32 columns.
-                    # 32 columns * 32 FP8 elements/column = 1024 elements.
-                    offset_elements = cutlass.Int32((mma_tile_coord_mnl[1] % 2) * 32 * 32)
-                    
-                    # SFB1
-                    sfb_tmem_ptr1_offset = sfa_tmem_ptr + sfb1_offset_elements + offset_elements
-                    tCtSFB1_mma = cute.make_tensor(sfb_tmem_ptr1_offset, tCtSFB_layout)
-                    
-                    # SFB2
-                    sfb_tmem_ptr2_offset = sfb_tmem_ptr1 + sfb2_offset_elements + offset_elements
-                    tCtSFB2_mma = cute.make_tensor(sfb_tmem_ptr2_offset, tCtSFB_layout)
-
-                # For overlapping_accum, select stage using phase XOR 1
-                acc_stage_index = acc_producer_state.phase ^ 1
-                
-                # Slice accumulators to select specific stage
-                tCtAcc1_stage = tCtAcc1[(None, None, None, acc_stage_index)]
-                tCtAcc2_stage = tCtAcc2[(None, None, None, acc_stage_index)]
-
+                    offset = cutlass.Int32((mma_tile_coord_mnl[1] % 2) * 2)
+                    shifted_ptr1 = cute.recast_ptr(
+                        acc_tmem_ptr
+                        + self.num_accumulator_tmem_cols
+                        + self.num_sfa_tmem_cols
+                        + offset,
+                        dtype=self.sf_dtype,
+                    )
+                    tCtSFB1_mma = cute.make_tensor(shifted_ptr1, tCtSFB_layout)
+                    shifted_ptr2 = cute.recast_ptr(
+                        acc_tmem_ptr
+                        + self.num_accumulator_tmem_cols
+                        + self.num_sfa_tmem_cols
+                        + self.num_sfb_tmem_cols
+                        + offset,
+                        dtype=self.sf_dtype,
+                    )
+                    tCtSFB2_mma = cute.make_tensor(shifted_ptr2, tCtSFB_layout)
                 tiled_mma.set(tcgen05.Field.ACCUMULATE, False)
 
                 for k_tile in range(k_tile_cnt):
@@ -1107,11 +1063,16 @@ class PersistentNvfp4DualGemm:
                             ab_consumer_state, peek_ab_full_status
                         )
 
-                        s2t_stage_coord_sfa = (None,) * (len(tCsSFA_compact_s2t.shape) - 1) + (ab_consumer_state.index,)
-                        tCsSFA_compact_s2t_staged = tCsSFA_compact_s2t[s2t_stage_coord_sfa]
-                        s2t_stage_coord_sfb = (None,) * (len(tCsSFB1_compact_s2t.shape) - 1) + (ab_consumer_state.index,)
-                        tCsSFB1_compact_s2t_staged = tCsSFB1_compact_s2t[s2t_stage_coord_sfb]
-                        tCsSFB2_compact_s2t_staged = tCsSFB2_compact_s2t[s2t_stage_coord_sfb]
+                        s2t_stage_coord = (
+                            None,
+                            None,
+                            None,
+                            None,
+                            ab_consumer_state.index,
+                        )
+                        tCsSFA_compact_s2t_staged = tCsSFA_compact_s2t[s2t_stage_coord]
+                        tCsSFB1_compact_s2t_staged = tCsSFB1_compact_s2t[s2t_stage_coord]
+                        tCsSFB2_compact_s2t_staged = tCsSFB2_compact_s2t[s2t_stage_coord]
                         cute.copy(
                             tiled_copy_s2t_sfa,
                             tCsSFA_compact_s2t_staged,
@@ -1148,10 +1109,10 @@ class PersistentNvfp4DualGemm:
                         )
                         cute.gemm(
                             tiled_mma,
-                            tCtAcc1_stage,
+                            tCtAcc1,
                             tCrA[kblock_coord],
                             tCrB1[kblock_coord],
-                            tCtAcc1_stage,
+                            tCtAcc1,
                         )
 
                         tiled_mma.set(
@@ -1160,10 +1121,10 @@ class PersistentNvfp4DualGemm:
                         )
                         cute.gemm(
                             tiled_mma,
-                            tCtAcc2_stage,
+                            tCtAcc2,
                             tCrA[kblock_coord],
                             tCrB2[kblock_coord],
-                            tCtAcc2_stage,
+                            tCtAcc2,
                         )
 
                         tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
@@ -1188,20 +1149,16 @@ class PersistentNvfp4DualGemm:
 
             acc_pipeline.producer_tail(acc_producer_state)
 
-        if warp_idx == self.epilog_warp_id[0]:
+        if warp_idx < self.mma_warp_id:
             tmem.allocate(self.num_tmem_alloc_cols)
-        if warp_idx <= self.mma_warp_id:
             tmem.wait_for_alloc()
             acc_tmem_ptr = tmem.retrieve_ptr(self.acc_dtype)
-            
-            # With num_acc_stage=1, use fragment layout directly
-            elements_per_acc = self.cta_tile_shape_mnk[1] * 8
-
-            tCtAcc1 = cute.make_tensor(acc_tmem_ptr, tCtAcc_fake.layout)
-
-            gemm2_base_offset = elements_per_acc
-            ptr2 = cute.recast_ptr(acc_tmem_ptr + gemm2_base_offset, dtype=self.acc_dtype)
-            tCtAcc2 = cute.make_tensor(ptr2, tCtAcc_fake.layout)
+            tCtAcc_base = cute.make_tensor(acc_tmem_ptr, tCtAcc_fake.layout)
+            acc_tmem_ptr2 = cute.recast_ptr(
+                acc_tmem_ptr + self.num_accumulator_tmem_cols_per_gemm,
+                dtype=self.acc_dtype,
+            )
+            tCtAcc_base2 = cute.make_tensor(acc_tmem_ptr2, tCtAcc_fake.layout)
 
             epi_tidx = tidx
             
@@ -1212,7 +1169,7 @@ class PersistentNvfp4DualGemm:
                 tTR_rAcc1,
                 _,
             ) = self.epilog_tmem_copy_and_partition(
-                epi_tidx, tCtAcc1, tCgC, epi_tile, use_2cta_instrs
+                epi_tidx, tCtAcc_base, tCgC, epi_tile, use_2cta_instrs
             )
             
             (
@@ -1221,7 +1178,7 @@ class PersistentNvfp4DualGemm:
                 tTR_rAcc2,
                 _,
             ) = self.epilog_tmem_copy_and_partition(
-                epi_tidx, tCtAcc2, tCgC, epi_tile, use_2cta_instrs
+                epi_tidx, tCtAcc_base2, tCgC, epi_tile, use_2cta_instrs
             )
 
             tTR_rC = cute.make_rmem_tensor(tTR_rAcc1.shape, self.c_dtype)
@@ -1265,10 +1222,22 @@ class PersistentNvfp4DualGemm:
                     (None, None, None, *mma_tile_coord_mnl)
                 ]
 
+                acc_stage_index = acc_consumer_state.index
+                tTR_tAcc1_stage = tTR_tAcc1[
+                    (None, None, None, None, None, acc_stage_index)
+                ]
+                tTR_tAcc2_stage = tTR_tAcc2[
+                    (None, None, None, None, None, acc_stage_index)
+                ]
+
                 acc_pipeline.consumer_wait(acc_consumer_state)
 
-                tTR_tAcc1_grouped = cute.group_modes(tTR_tAcc1, 3, cute.rank(tTR_tAcc1))
-                tTR_tAcc2_grouped = cute.group_modes(tTR_tAcc2, 3, cute.rank(tTR_tAcc2))
+                tTR_tAcc1_grouped = cute.group_modes(
+                    tTR_tAcc1_stage, 3, cute.rank(tTR_tAcc1_stage)
+                )
+                tTR_tAcc2_grouped = cute.group_modes(
+                    tTR_tAcc2_stage, 3, cute.rank(tTR_tAcc2_stage)
+                )
                 bSG_gC = cute.group_modes(bSG_gC, 1, cute.rank(bSG_gC))
 
                 subtile_cnt = cute.size(tTR_tAcc1_grouped.shape, mode=[3])
@@ -1315,27 +1284,14 @@ class PersistentNvfp4DualGemm:
 
             tmem.relinquish_alloc_permit()
             self.epilog_sync_barrier.arrive_and_wait()
-            tmem.free(acc_tmem_ptr)
+            tmem.free(acc_tmem_ptr, self.num_tmem_alloc_cols)
             c_pipeline.producer_tail()
 
     def mainloop_s2t_copy_and_partition(
         self, sSF: cute.Tensor, tSF: cute.Tensor, tag: str
     ):
-        tCsSF = sSF
-        tCtSF = tSF
-
-        assert cute.rank(tCsSF) >= cute.rank(tCtSF)
-        if cutlass.const_expr(cute.size(tCsSF) == cute.size(tCtSF)):
-            assert cute.size(tCsSF) == cute.size(tCtSF)
-
-        print(
-            f"S2T {tag} ranks",
-            cute.rank(tCsSF),
-            cute.rank(tCtSF),
-            "shapes",
-            tCsSF.layout.shape,
-            tCtSF.layout.shape,
-        )
+        tCsSF = cute.filter_zeros(sSF)
+        tCtSF = cute.filter_zeros(tSF)
 
         copy_atom_s2t = cute.make_copy_atom(
             tcgen05.Cp4x32x128bOp(self.cta_group), self.sf_dtype
@@ -1488,7 +1444,6 @@ class PersistentNvfp4DualGemm:
         # If still < 2, well, we take what we can get, but it's suboptimal
         if num_ab_stage < 2:
              num_ab_stage = max(1, num_ab_stage)
-
         return num_acc_stage, num_ab_stage, num_c_stage
 
     @staticmethod
@@ -1554,10 +1509,6 @@ def compile_kernel(cfg: KernelConfig):
     sfb2_ptr = make_ptr(sf_dtype, 0, cute.AddressSpace.gmem, assumed_align=32)
 
     gemm = PersistentNvfp4DualGemm(cfg)
-    assert gemm.num_tmem_alloc_cols in (32, 64, 128, 256, 512), (
-        gemm.num_tmem_alloc_cols
-    )
-    print(f"tmem_alloc_cols={gemm.num_tmem_alloc_cols}")
 
     hardware_info = utils.HardwareInfo()
     max_active = hardware_info.get_max_active_clusters(
@@ -1650,7 +1601,6 @@ def compile_kernel(cfg: KernelConfig):
 
 
 def custom_kernel(data: input_t) -> output_t:
-    print("USING_SUBMISSION_PY", __file__)
     a, b1, b2, _, _, _, sfa_permuted, sfb1_permuted, sfb2_permuted, c = data
 
     m, n, l = c.shape
