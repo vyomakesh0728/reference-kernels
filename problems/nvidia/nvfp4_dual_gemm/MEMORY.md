@@ -14,3 +14,5 @@
 - Switched S2T source tensors to stage-0 layouts, removed filter_zeros from S2T, and added rank/shape diagnostics before S2T copy; no tests run.
 - Fixed S2T stage indexing to use a rank-3 coord and added compile-time rank asserts; no tests run.
 - Replaced silent S2T asserts with RuntimeError messages for invalid/mismatched mode-1 sizes; no tests run.
+- Resolved merge conflict in `submission.py` to keep stage-3 S2T stage indexing logic (len(shape)-1 based coord); no tests run.
+- Refactored `AGENTS.md`, `skills/nvfp4-dual-gemm-optimizer/SKILL.md`, and `FLOW.md` to reduce duplication and add concise specs/tasks; tests not run; geomean unchanged.

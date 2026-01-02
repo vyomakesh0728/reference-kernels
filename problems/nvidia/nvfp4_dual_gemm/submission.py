@@ -1107,30 +1107,11 @@ class PersistentNvfp4DualGemm:
                             ab_consumer_state, peek_ab_full_status
                         )
 
-<<<<<<< HEAD
-                        if cutlass.const_expr(cute.rank(tCsSFA_compact_s2t) != 3):
-                            raise RuntimeError(
-                                "S2T expected tCsSFA_compact_s2t rank==3"
-                            )
-                        if cutlass.const_expr(cute.rank(tCsSFB1_compact_s2t) != 3):
-                            raise RuntimeError(
-                                "S2T expected tCsSFB1_compact_s2t rank==3"
-                            )
-                        if cutlass.const_expr(cute.rank(tCsSFB2_compact_s2t) != 3):
-                            raise RuntimeError(
-                                "S2T expected tCsSFB2_compact_s2t rank==3"
-                            )
-                        s2t_stage_coord = (None, None, ab_consumer_state.index)
-                        tCsSFA_compact_s2t_staged = tCsSFA_compact_s2t[s2t_stage_coord]
-                        tCsSFB1_compact_s2t_staged = tCsSFB1_compact_s2t[s2t_stage_coord]
-                        tCsSFB2_compact_s2t_staged = tCsSFB2_compact_s2t[s2t_stage_coord]
-=======
                         s2t_stage_coord_sfa = (None,) * (len(tCsSFA_compact_s2t.shape) - 1) + (ab_consumer_state.index,)
                         tCsSFA_compact_s2t_staged = tCsSFA_compact_s2t[s2t_stage_coord_sfa]
                         s2t_stage_coord_sfb = (None,) * (len(tCsSFB1_compact_s2t.shape) - 1) + (ab_consumer_state.index,)
                         tCsSFB1_compact_s2t_staged = tCsSFB1_compact_s2t[s2t_stage_coord_sfb]
                         tCsSFB2_compact_s2t_staged = tCsSFB2_compact_s2t[s2t_stage_coord_sfb]
->>>>>>> fadca01 (add stage 3 (Operation creation))
                         cute.copy(
                             tiled_copy_s2t_sfa,
                             tCsSFA_compact_s2t_staged,
