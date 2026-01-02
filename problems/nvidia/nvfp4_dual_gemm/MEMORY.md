@@ -42,3 +42,9 @@
 - Capped num_ab_stage to 3 in _compute_stages; ran `python3 test_correctness.py --only 1` (pass) and `python3 test_benchmark.py` (geom 59.999 us). Reverted cap and reran `python3 test_correctness.py --only 1` (pass) + `python3 test_benchmark.py` (geom 57.688 us; per-case 72.428/61.265/41.044/60.808 us).
 - Added `codex_background.sh` and launched it via nohup in background (PID 20700); no tests run.
 - Updated `codex_background.sh` to wrap codex with `script -q -c codex /dev/null`; launched background run (PID 24029) and monitoring output; no tests run.
+- Updated `codex_background.sh` to use `script -q -fec` with inlined cat|codex pipeline; no tests run.
+- Updated `codex_background.sh` to use prompt string with `codex -c model=... --full-auto`; running it failed with codex CLI “unexpected argument --- …” (needs `--` before prompt). No tests run.
+- Removed `--full-auto` from `codex_background.sh` codex invocation; no tests run.
+- Updated epilog TMEM allocation so only warp 0 calls allocate; ran `python3 test_correctness.py` and it failed due to cudaGetDeviceCount error 304 (no CUDA device), no benchmark run.
+- Switched benchmark configs cluster_shape_mn to (1, 2) for n4096_k7168/n3072_k4096/n3072_k7168; ran `python3 test_benchmark.py` and it failed due to cudaGetDeviceCount error 304 (no CUDA device), no performance data.
+- Added `test_tflops.py` to report TFLOPs for benchmark cases using the current DSL kernel; no tests run.
