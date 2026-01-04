@@ -1,4 +1,0 @@
-- Add a new pure PTX tcgen05 kernel file (TMA + dual GEMM + silu) without touching `submission.py`.
-- Replace dual scheduler with a single scheduler shared by TMA/MMA/epilog roles in the DSL kernel.
-- Switch to a 4-warp MMA group and re-balance epilog/TMA warps with correct TMEM alloc ownership.
-- Add 2-stage TMEM scale panels with a minimal handoff barrier scheme.
