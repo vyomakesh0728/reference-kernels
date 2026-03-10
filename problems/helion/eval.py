@@ -6,25 +6,12 @@ import time
 import os
 import sys
 import math
-
-# Disable CuTe DSL file caching for more stable benchmarking
-os.environ["CUTE_DSL_DISABLE_FILE_CACHING"] = "1"
-
-
-def _init_worker():
-    """Initialize worker process with correct env vars."""
-    os.environ["CUTE_DSL_DISABLE_FILE_CACHING"] = "1"
-
-
 from pathlib import Path
 from typing import Any, Optional
 
 import torch.cuda
-from cutlass.cute.nvgpu.common import OpError
-from torch.cuda.nvtx import range as nvtx_range
 
-from utils import set_seed, clear_l2_cache_large as clear_l2_cache
-
+from utils import set_seed, clear_l2_cache
 try:
     from task import TestSpec
 except ImportError:
@@ -32,23 +19,21 @@ except ImportError:
 
 from reference import check_implementation, generate_input
 
-NUM_ITERATIONS_PER_BENCHMARK = 50
-
 
 class PopcornOutput:
     def __init__(self, fd: int):
-        self.file = os.fdopen(fd, "w")
+        self.file = os.fdopen(fd, 'w')
         os.set_inheritable(fd, False)
-
+    
     def __enter__(self):
         return self
-
+    
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.file.close()
-
+    
     def print(self, *args, **kwargs):
         print(*args, **kwargs, file=self.file, flush=True)
-
+    
     def log(self, key, value):
         self.print(f"{key}: {value}")
 
@@ -67,7 +52,7 @@ def _combine(a: int, b: int) -> int:
     # so we need to make sure they don't provide any useful info for the full seed.
     # This Cantor construction ensures that if the secret seed is a large number,
     # then so is the overall seed.
-    return int(a + (a + b) * (a + b + 1) // 2)
+    return int(a + (a+b)*(a+b+1)//2)
 
 
 def get_test_cases(file_name: str, seed: Optional[int]) -> list[TestCase]:
@@ -79,7 +64,7 @@ def get_test_cases(file_name: str, seed: Optional[int]) -> list[TestCase]:
 
     tests = []
     lines = content.splitlines()
-    match = r"\s*([a-zA-Z]+):\s*([a-zA-Z]+|[+-]?[0-9]+)\s*"
+    match = r"\s*([a-zA-Z_]\w*):\s*([a-zA-Z_]\w*|[+-]?[0-9]+)\s*"
     for line in lines:
         parts = line.split(";")
         case = {}
@@ -93,7 +78,10 @@ def get_test_cases(file_name: str, seed: Optional[int]) -> list[TestCase]:
             try:
                 val = int(val)
             except ValueError:
-                pass
+                if val == "true":
+                    val = True
+                elif val == "false":
+                    val = False
 
             case[key] = val
         tests.append(TestCase(spec=line, args=case))
@@ -129,13 +117,12 @@ def calculate_stats(durations: list[int]):
     worst = max(durations)
 
     avg = total / runs
-    variance = sum(map(lambda x: (x - avg) ** 2, durations))
+    variance = sum(map(lambda x: (x - avg)**2, durations))
     std = math.sqrt(variance / (runs - 1))
     err = std / math.sqrt(runs)
 
-    return Stats(
-        runs=runs, mean=avg, std=std, err=err, best=float(best), worst=float(worst)
-    )
+    return Stats(runs=runs, mean=avg, std=std, err=err, best=float(best),
+                 worst=float(worst))
 
 
 def _clone_data(data):
@@ -159,15 +146,9 @@ def _run_single_test(test: TestCase):
     Runs a single test case. Do not call directly
     """
     from submission import custom_kernel
-
     data = generate_input(**test.args)
     torch.cuda.synchronize()
-    try:
-        submission_output = custom_kernel(_clone_data(data))
-
-    except OpError as E:
-        print(f"Encountered {E}", file=sys.stderr)
-        return False, str(E)
+    submission_output = custom_kernel(_clone_data(data))
     torch.cuda.synchronize()
     return check_implementation(data, submission_output)
 
@@ -179,9 +160,7 @@ def run_single_test(pool: multiprocessing.Pool, test: TestCase):
     return pool.apply(_run_single_test, (test,))
 
 
-def run_testing(
-    logger: PopcornOutput, pool: multiprocessing.Pool, tests: list[TestCase]
-):
+def run_testing(logger: PopcornOutput, pool: multiprocessing.Pool, tests: list[TestCase]):
     """
     Executes the actual test case code and checks for correctness.
 
@@ -211,96 +190,70 @@ def run_testing(
         return 112
 
 
-def _run_single_benchmark(
-    test: TestCase, recheck: bool, max_repeats: int, max_time_ns: float
-) -> Stats | Any:
+def _run_single_benchmark(test: TestCase, recheck: bool, max_repeats: int, max_time_ns: float) -> Stats | Any:
     """
     Runs one benchmark. Do not call directly.
     """
     from submission import custom_kernel
 
     durations = []
-    data_list = []
     # generate input data once
-
-    for i in range(NUM_ITERATIONS_PER_BENCHMARK):
-        if "seed" in test.args:
-            test.args["seed"] += 42
-        data = generate_input(**test.args)
-        data_list.append(data)
-
-    check_copy = _clone_data(data_list)
-
+    data = generate_input(**test.args)
+    check_copy = _clone_data(data)
     #  first, one obligatory correctness check
-    outputs = []
-    try:
-        for data in data_list:
-            output = custom_kernel(_clone_data(data))
-            outputs.append(output)
-    except OpError as E:
-        return f"Encountered {E}"
-    for reference_output, custom_output in zip(check_copy, outputs):
-        good, message = check_implementation(reference_output, custom_output)
-        if not good:
-            return message
+    output = custom_kernel(data)
+    good, message = check_implementation(check_copy, output)
+    if not good:
+        return message
 
     # now, do multiple timing runs without further correctness testing
-    # there is an upper bound of 200 runs, and a lower bound of 3 runs;
+    # there is an upper bound of 100 runs, and a lower bound of 3 runs;
     # otherwise, we repeat until we either measure at least 10 full seconds,
     # or the relative error of the mean is below 1%.
 
     bm_start_time = time.perf_counter_ns()
     for i in range(max_repeats):
-        torch.cuda.synchronize()
+        if recheck:
+            # ensure we use a different seed for every benchmark
+            if "seed" in test.args:
+                test.args["seed"] += 13
 
-        outputs = []
-        clear_l2_cache()
+            data = generate_input(**test.args)
+            check_copy = _clone_data(data)
+        torch.cuda.synchronize()
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
+        clear_l2_cache()
+
         start_event.record()
-        for data in data_list:
-            output = custom_kernel(data)
-            outputs.append(output)
+        output = custom_kernel(data)
         end_event.record()
         torch.cuda.synchronize()
-        duration = (
-            start_event.elapsed_time(end_event) / NUM_ITERATIONS_PER_BENCHMARK
-        ) * 1e6  # Convert ms to ns
+        duration = start_event.elapsed_time(end_event) * 1e6  # Convert ms to ns
 
         if recheck:
-            for reference_output, custom_output in zip(check_copy, outputs):
-                good, message = check_implementation(reference_output, custom_output)
+            good, message = check_implementation(check_copy, output)
             if not good:
                 return message
 
+        del output
         durations.append(duration)
 
-        total_bm_duration = time.perf_counter_ns() - bm_start_time
-        if (
-            i > 1 and total_bm_duration > 1e8
-        ):  # at least 2 runs, and at least 100 ms total time
+        if i > 1:
+            total_bm_duration = time.perf_counter_ns() - bm_start_time
             stats = calculate_stats(durations)
             # stop if either
             # a) relative error dips below 0.1%
             # b) we exceed the total time limit for benchmarking the kernel
             # c) we exceed 2 minutes of total wallclock time.
-            if (
-                stats.err / stats.mean < 0.001
-                or stats.mean * stats.runs > max_time_ns
-                or total_bm_duration > 120e9
-            ):
+            if stats.err / stats.mean < 0.001 or stats.mean * stats.runs > max_time_ns or total_bm_duration > 120e9:
                 break
 
     return calculate_stats(durations)
 
 
-def run_single_benchmark(
-    pool: multiprocessing.Pool,
-    test: TestCase,
-    recheck: bool,
-    max_repeats: int,
-    max_time_ns: float,
-):
+def run_single_benchmark(pool: multiprocessing.Pool, test: TestCase, recheck: bool, max_repeats: int,
+                         max_time_ns: float):
     """
     For a particular test case, check correctness (if applicable) and grab runtime results.
 
@@ -314,9 +267,7 @@ def run_single_benchmark(
     return pool.apply(_run_single_benchmark, (test, recheck, max_repeats, max_time_ns))
 
 
-def run_benchmarking(
-    logger: PopcornOutput, pool: multiprocessing.Pool, tests: list[TestCase]
-):
+def run_benchmarking(logger: PopcornOutput, pool: multiprocessing.Pool, tests: list[TestCase]):
     """
     Executes benchmarking code for a CUDA Kernel and logs runtimes.
 
@@ -325,14 +276,14 @@ def run_benchmarking(
     @param tests: A list of TestCase objects representing the test cases to be benchmarked.
     @return: An integer representing the exit status: 0 if all benchmarks pass, otherwise 112.
     """
-
-    run_single_benchmark(pool, tests[0], False, 200, 10e7)
+    # warm up
+    run_single_benchmark(pool, tests[0], False, 100, 10e7)
 
     passed = True
     logger.log("benchmark-count", len(tests))
     for idx, test in enumerate(tests):
         logger.log(f"benchmark.{idx}.spec", test.spec)
-        result = run_single_benchmark(pool, test, False, 200, 10e9)
+        result = run_single_benchmark(pool, test, False, 100, 10e9)
         if isinstance(result, Stats):
             for field in dataclasses.fields(Stats):
                 logger.log(f"benchmark.{idx}.{field.name}", getattr(result, field.name))
@@ -349,102 +300,27 @@ def run_benchmarking(
         return 112
 
 
-def _run_single_profile_torch(test: TestCase) -> str:
+def run_single_profile(test: TestCase) -> str:
     """
-    Profiles a single benchmark using the torch profiler.
+    Runs a single test case. Do not call directly
     """
     from submission import custom_kernel
-    from torch.profiler import profile, ProfilerActivity
+    from torch.profiler import profile, record_function, ProfilerActivity
+    data = generate_input(**test.args)
+    torch.cuda.synchronize()
 
-    with nvtx_range("generate input"):
-        data = generate_input(**test.args)
-        torch.cuda.synchronize()
-
-    cloned = _clone_data(data)
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-        with nvtx_range("custom_kernel"):
-            submission_output = custom_kernel(cloned)
-            torch.cuda.synchronize()
-
+        submission_output = custom_kernel(_clone_data(data))
+        torch.cuda.synchronize()
     return prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=20)
 
 
-def _run_single_profile_ncu(test: TestCase) -> str:
-    """
-    Profiles a single benchmark using ncu. Note: this does not
-    invoke NCU; instead, it is expected that eval is launched
-    under NCU, and this function will rurnthe kernel excactly
-    once in the 'custom_kernel' nvtx range.
-    """
-    from submission import custom_kernel
-
-    with nvtx_range("generate input"):
-        data = generate_input(**test.args)
-        torch.cuda.synchronize()
-
-    cloned = _clone_data(data)
-    with nvtx_range("custom_kernel"):
-        submission_output = custom_kernel(cloned)
-        torch.cuda.synchronize()
-
-    return ""
-
-
-def _combine_traces(traces: list["EventList"]) -> "EventList":
-    """
-    Combine multiple event traces obtained from multiple (distributed) torch.profiler
-    activities. This function simply aggregates the data as like `prof.key_averages()`,
-    except over multiple traces. Most of this function is reimplemented
-    from `torch.autograd.profiler_util.EventList.key_averages()`.
-    """
-    from torch.autograd.profiler_util import FunctionEventAvg, EventList
-    from collections import defaultdict
-
-    def get_key(event) -> tuple[str, ...]:
-        return (
-            str(event.key),
-            str(event.node_id),
-            str(event.device_type),
-            str(event.is_legacy),
-            str(event.is_user_annotation),
-        )
-
-    stats: dict[tuple[str, ...], FunctionEventAvg] = defaultdict(FunctionEventAvg)
-
-    for events in traces:
-        for event in events:
-            stats[get_key(event)].add(event)
-
-    avg_list = EventList(stats.values())
-    for event in avg_list:
-        event.stack = []
-        event.input_shapes = ""
-        event.overload_name = ""
-
-    return avg_list
-
-
-def run_single_profile(test: TestCase, pool: multiprocessing.Pool) -> str:
-    """
-    Runs a single profiling activity in another process.
-    """
-    if bool(os.getenv("POPCORN_NCU", "0")):
-        return pool.apply(_run_single_profile_ncu, (test,))
-    else:
-        return pool.apply(_run_single_profile_torch, (test,))
-
-
-def run_profiling(
-    logger: PopcornOutput, pool: multiprocessing.Pool, tests: list[TestCase]
-):
+def run_profiling(logger: PopcornOutput, tests: list[TestCase]):
     logger.log("benchmark-count", len(tests))
     for idx, test in enumerate(tests):
         logger.log(f"benchmark.{idx}.spec", test.spec)
-        report = run_single_profile(test, pool)
-        logger.log(
-            f"benchmark.{idx}.report",
-            base64.b64encode(report.encode("utf-8"), b"+*").decode("utf-8"),
-        )
+        report = run_single_profile(test)
+        logger.log(f"benchmark.{idx}.report", base64.b64encode(report.encode("utf-8"), b"+*").decode("utf-8"))
     logger.log("check", "pass")
     return 0
 
@@ -462,45 +338,37 @@ def main():
     os.unsetenv("POPCORN_SEED")
     seed = int(seed) if seed else None
     set_seed(seed or 42)
-
     tests = get_test_cases(sys.argv[2], seed)
 
     with PopcornOutput(int(fd)) as logger:
         import multiprocessing
-
-        mp_context = multiprocessing.get_context("spawn")
-        with mp_context.Pool(1, initializer=_init_worker) as pool:
+        mp_context = multiprocessing.get_context('spawn')
+        with mp_context.Pool(1) as pool:
             if mode == "test":
                 return run_testing(logger, pool, tests)
             if mode == "benchmark":
                 return run_benchmarking(logger, pool, tests)
 
             if mode == "leaderboard":
-                # Warmup all test shapes to ensure consistent benchmarking
-                for test in tests:
-                    run_single_benchmark(pool, test, False, 1000, 5e8)
+                # warmup
+                run_single_benchmark(pool, tests[0], False, 100, 1e7)
                 logger.log("benchmark-count", len(tests))
                 passed = True
                 for i in range(len(tests)):
-                    result = run_single_benchmark(pool, tests[i], True, 1000, 30e9)
+                    result = run_single_benchmark(pool, tests[i], True, 100, 30e9)
                     logger.log(f"benchmark.{i}.spec", tests[i].spec)
                     if isinstance(result, Stats):
                         for field in dataclasses.fields(Stats):
-                            logger.log(
-                                f"benchmark.{i}.{field.name}",
-                                getattr(result, field.name),
-                            )
+                            logger.log(f"benchmark.{i}.{field.name}", getattr(result, field.name))
                     else:
                         passed = False
                         logger.log(f"benchmark.{i}.status", "fail")
-                        logger.log(
-                            f"benchmark.{i}.error", str(result)
-                        )  # TODO: Make sure result implements __str__?
+                        logger.log(f"benchmark.{i}.error", str(result))  # TODO: Make sure result implements __str__?
                         break
 
                 logger.log("check", "pass" if passed else "fail")
             elif mode == "profile":
-                run_profiling(logger, pool, tests)
+                run_profiling(logger, tests)
             else:
                 # TODO: Implement script mode
                 return 2
