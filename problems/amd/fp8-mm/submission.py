@@ -1,56 +1,21 @@
-import torch
+#!POPCORN leaderboard amd-mxfp4-mm
+#!POPCORN gpu MI355X
+# AGENT_LOOP_META: {"attempt": 6, "gpu": "MI355X", "leaderboard": "amd-mxfp4-mm", "problem": "mxfp4_mm", "variant": {"family": "anchor", "strategy": "contract_anchor", "variant_name": "aiter_contract_anchor"}, "variant_index": 0}
+import aiter
+from aiter import QuantType, dtypes
 from task import input_t, output_t
 
+
 def custom_kernel(data: input_t) -> output_t:
-    """
-    Reference implementation of block-scale fp8 gemm 
-    Args:
-        data: Tuple that expands to:
-            a: torch.Tensor[float8_e4m3fnuz] of shape [m, k], 
-            b: torch.Tensor[float8_e4m3fnuz] of shape [n, k], 
-            a_scale: torch.Tensor[float32] of shape [m, k // 128], 
-            b_scale: torch.Tensor[float32] of shape [n // 128, k // 128], 
-            c: torch.Tensor[bfloat16] of shape [m, n]
-    Returns:
-        Tensor containing output in bf16
-    """
-    # c: [m, n] is pre-allocated memory to avoid timing allocation overhead.
-    a, b, a_scale, b_scale, c = data
-
-    # a is M x K in column-major order, we convert here for simplicity.
-    a = a.contiguous()
-    a_scale = a_scale.contiguous()
-    b_scale = b_scale.contiguous()
-
-    # constants
-    m = a.shape[0]
-    n = b.shape[0]
-    k = a.shape[1]
-    block_shape_n = 128
-    block_shape_k = 128
-    scale_n = b_scale.shape[0]
-    scale_k = b_scale.shape[1]
-
-    # Apply scaling to input 'a'
-    a_scale = a_scale.unsqueeze(-1).repeat(1, 1, block_shape_k)  # Shape: [m, scale_k, block_shape_k]
-    a_scale = a_scale.reshape(m, scale_k * block_shape_k) 
-    a_scale = a_scale[:, :k]
-
-    # Dequantize 'a', in your implementation you should do this at the end.
-    a = a.to(a_scale.dtype) * a_scale 
-
-    # Apply scaling to input 'b'
-    b_scale = (
-        b_scale.view(-1, 1)
-        .repeat(1, block_shape_n * block_shape_k)
-        .view(scale_n, scale_k, block_shape_n, block_shape_k)
-        .permute(0, 2, 1, 3)  # Reorder dimensions: [scale_n, blk_n, scale_k, blk_k]
-        .reshape(scale_n * block_shape_n, scale_k * block_shape_k)
+    a, b, b_q, b_shuffle, b_scale_sh = data
+    del b, b_q
+    quant = aiter.get_triton_quant(QuantType.per_1x32)
+    a_q, a_scale_sh = quant(a.contiguous(), shuffle=True)
+    return aiter.gemm_a4w4(
+        a_q,
+        b_shuffle,
+        a_scale_sh,
+        b_scale_sh,
+        dtype=dtypes.bf16,
+        bpreshuffle=True,
     )
-    b_scale = b_scale[:n, :k]
-
-    # Dequantize 'b', in your implementation you should do this at the end.
-    b = b.to(b_scale.dtype) * b_scale 
-
-    c[...] = (a @ b.T).to(torch.bfloat16)
-    return c

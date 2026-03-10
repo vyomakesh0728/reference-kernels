@@ -1,0 +1,37 @@
+[workspace]
+root = ".agent-loop"
+popcorn_cli = "popcorn-cli"
+api_url = "https://site--bot--dxfjds728w5v.code.run"
+default_gpu = "MI355X"
+default_mode = "benchmark"
+leaderboard_reference_seconds = 338.0
+leaderboard_timeout_seconds = 600.0
+promote_on_improve = true
+improvement_epsilon = 0.0
+
+[problems.mxfp4_mm]
+submission_path = "fp8-mm/submission.py"
+leaderboard = "amd-mxfp4-mm"
+gpu = "MI355X"
+mode = "benchmark"
+objective = "geom_mean_ns"
+goal = "min"
+mutator_command = "python3 -m agent_loop.triton_mutator --parent {parent} --output {output} --context {context}"
+
+[problems.moe_mxfp4]
+submission_path = "moe/submission.py"
+leaderboard = "amd-moe-mxfp4"
+gpu = "MI355X"
+mode = "benchmark"
+objective = "geom_mean_ns"
+goal = "min"
+mutator_command = "python3 -m agent_loop.triton_mutator --parent {parent} --output {output} --context {context}"
+
+[problems.mixed_mla]
+submission_path = "mla-decode/submission.py"
+leaderboard = "amd-mixed-mla"
+gpu = "MI355X"
+mode = "benchmark"
+objective = "geom_mean_ns"
+goal = "min"
+mutator_command = "python3 -m agent_loop.triton_mutator --parent {parent} --output {output} --context {context}"

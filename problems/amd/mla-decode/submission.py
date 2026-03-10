@@ -1,166 +1,159 @@
-import math
-from dataclasses import dataclass
+#!POPCORN leaderboard amd-mixed-mla
+#!POPCORN gpu MI355X
+# AGENT_LOOP_META: {"attempt": 2, "gpu": "MI355X", "leaderboard": "amd-mixed-mla", "problem": "mixed_mla", "variant": {"family": "anchor", "strategy": "contract_anchor", "variant_name": "aiter_fp8_anchor"}, "variant_index": 0}
 import torch
-from torch import nn
-import torch.nn.functional as F
+from aiter import dtypes as aiter_dtypes
+from aiter import get_mla_metadata_info_v1, get_mla_metadata_v1
+from aiter.mla import mla_decode_fwd
 from task import input_t, output_t
 
-class RoPE(nn.Module):
-    def __init__(self, d_model: int):
-        super().__init__()
-        self.d_model = d_model
-        theta = 10000 ** (-torch.arange(0, d_model//2,dtype=torch.bfloat16) / (d_model//2))
-        self.register_buffer("theta", theta)
-
-    def rotate_half(self, x: torch.Tensor) -> torch.Tensor:
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat((-x2, x1), dim=-1)
-
-    def forward(self, x: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
-        seq_len = x.size(-2)
-        d_model = x.size(-1)
-        assert d_model == self.d_model
-        seq_idx = torch.arange(start_pos, start_pos + seq_len, device=x.device)
-        idx_theta = torch.einsum('s,d->sd', seq_idx, self.theta)
-        idx_theta2 = torch.cat([idx_theta, idx_theta], dim=-1)
-        cos = idx_theta2.cos().to(torch.bfloat16)
-        sin = idx_theta2.sin().to(torch.bfloat16)
-        return x * cos + self.rotate_half(x) * sin
+NUM_HEADS = 16
+NUM_KV_HEADS = 1
+KV_LORA_RANK = 512
+QK_ROPE_HEAD_DIM = 64
+QK_HEAD_DIM = KV_LORA_RANK + QK_ROPE_HEAD_DIM
+V_HEAD_DIM = KV_LORA_RANK
+SM_SCALE = 1.0 / (QK_HEAD_DIM ** 0.5)
+PAGE_SIZE = 1
+NUM_KV_SPLITS = 32
+FP8_DTYPE = aiter_dtypes.fp8
 
 
-class KVCache(nn.Module):
-    def __init__(self, kv_cache_shape: tuple) -> None:
-        super().__init__()
-        self.register_buffer('data', torch.zeros(kv_cache_shape, dtype=torch.bfloat16, device='cuda'))
-        self.seq_len = 0
-        self.zero()
-
-    def zero(self) -> None:
-        self.data.zero_()
-    
-    def get_data(self) -> torch.Tensor:
-        return self.data
-
-    def forward(self, c_kv: torch.Tensor) -> torch.Tensor:
-        assert self.seq_len + c_kv.size(1) <= self.data.size(1), "KV Cache Exceeded"
-
-        self.data = self.data.to(c_kv.dtype)
-        self.data[
-            :, self.seq_len : self.seq_len + c_kv.size(1), :
-        ] = c_kv
-        self.seq_len += c_kv.size(1)
-
-        return self.data[:, :self.seq_len], self.seq_len
-    
-@dataclass
-class Config:
-    batch_size: int
-    dim: int
-    n_heads: int
-    q_lora_rank: int 
-    kv_lora_rank: int
-    qk_nope_head_dim: int
-    qk_rope_head_dim: int
-    v_head_dim: int
-    seq_len: int
-    max_seq_len: int
-    kv_cache_shape: tuple
-    Q_proj_down_weight: torch.Tensor
-    Q_proj_up_weight: torch.Tensor
-    KV_proj_down_weight: torch.Tensor
-    KV_proj_up_weight: torch.Tensor
-    wo_weight: torch.Tensor
-
-class MLA(nn.Module):
-    def __init__(self, config: Config):
-        super().__init__()
-        self.dim = config.dim
-        self.n_heads = config.n_heads
-        self.q_lora_rank = config.q_lora_rank
-        self.kv_lora_rank = config.kv_lora_rank
-        self.nope_head_dim = config.qk_nope_head_dim
-        self.rope_head_dim = config.qk_rope_head_dim
-        self.v_head_dim = config.v_head_dim
-        # Down-projection matrices
-        self.Q_proj_down = nn.Linear(self.dim, self.q_lora_rank, bias=False, dtype=torch.bfloat16)
-        self.KV_proj_down = nn.Linear(self.dim, self.kv_lora_rank + self.rope_head_dim, bias=False, dtype=torch.bfloat16)
-
-        # Up-projection and rope projection matrices
-        self.Q_proj_up = nn.Linear(self.q_lora_rank, (self.nope_head_dim + self.rope_head_dim) * self.n_heads, bias=False, dtype=torch.bfloat16)
-        self.KV_proj_up = nn.Linear(self.kv_lora_rank, (self.nope_head_dim + self.v_head_dim) * self.n_heads, bias=False, dtype=torch.bfloat16)
-
-        # RoPE on half embeddings
-        self.q_rope = RoPE(self.rope_head_dim)
-        self.k_rope = RoPE(self.rope_head_dim)
-
-        # Output projection
-        self.wo = nn.Linear(self.v_head_dim * self.n_heads, self.dim, dtype=torch.bfloat16, bias=False)
-        self.eps = 1e-6
-   
-    def forward(self, x: torch.Tensor, kv_cache: KVCache) -> torch.Tensor:
-        # seq_len = 1 always here
-        batch_size, seq_len, model_dim = x.size()
-
-        ################################################################################
-        #                 Step 1: Handle down-projection + KV cache                    #
-        ################################################################################
-        q_lora = self.Q_proj_down(x)
-        kv_lora = self.KV_proj_down(x)
-        kv_lora, kv_len = kv_cache(kv_lora)
-        query_pos = kv_len - 1
-
-        ################################################################################
-        #                  Step 2: Up-project and prepare NoPE + RoPE                  #
-        ################################################################################
-
-        # Handle queries Q first
-        q_nope_and_rope = self.Q_proj_up(q_lora).view(
-            batch_size, seq_len, self.n_heads, self.nope_head_dim + self.rope_head_dim)
-        q_nope, q_rope = torch.split(q_nope_and_rope, [self.nope_head_dim, self.rope_head_dim], dim=-1)
-
-        # Handle keys and values K/V. V does not need RoPE
-        kv_nope, k_rope = torch.split(kv_lora, [self.kv_lora_rank, self.rope_head_dim], dim=-1)
-        kv_nope = self.KV_proj_up(kv_nope).view(
-            batch_size, kv_len, self.n_heads, self.nope_head_dim + self.v_head_dim)
-        k_nope, v = torch.split(kv_nope, [self.nope_head_dim, self.v_head_dim], dim=-1)
-
-        ################################################################################
-        #                    Step 3: Handle RoPE Stream                                #
-        ################################################################################
-
-        # Compute RoPE for queries and combine with no-RoPE part
-        q_rope = q_rope.permute(0, 2, 1, 3) # bs x n_heads x seq_len x rope_head_dim
-        q_rope = self.q_rope(q_rope, start_pos=query_pos)
-
-        q_nope = q_nope.permute(0, 2, 1, 3) # bs x n_heads x seq_len x rope_head_dim
-        q = torch.concat([q_nope, q_rope], dim=-1)
+def quantize_fp8(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    finfo = torch.finfo(FP8_DTYPE)
+    amax = tensor.abs().amax().clamp(min=1e-12)
+    scale = amax / finfo.max
+    fp8_tensor = (tensor / scale).clamp(min=finfo.min, max=finfo.max).to(FP8_DTYPE)
+    return fp8_tensor, scale.to(torch.float32).reshape(1)
 
 
-        # Compute RoPE for keys and combine with no-RoPE part
-        k_rope = k_rope[:, None, :, :]
-        k_rope = self.k_rope(k_rope).expand(-1,self.n_heads,-1,-1)
-        k_nope = k_nope.permute(0, 2, 1, 3) # bs x kv_len x n_heads x rope_head_dim
-        k = torch.concat([k_nope, k_rope], dim=-1)
-                
-        ################################################################################
-        #                        Compute Multi-head Attention                          #
-        ################################################################################
-        v = v.permute(0, 2, 1, 3) # bs x n_heads x kv_len x v_head_dim
-        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.rope_head_dim + self.nope_head_dim)
-        attn = F.softmax(scores, dim=-1).to(torch.bfloat16)
-        y = torch.matmul(attn, v).view(batch_size, 1, -1)
-        y = self.wo(y)
+def _make_mla_decode_metadata(
+    batch_size: int,
+    max_q_len: int,
+    nhead: int,
+    nhead_kv: int,
+    q_dtype: torch.dtype,
+    kv_dtype: torch.dtype,
+    qo_indptr: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    kv_last_page_len: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    info = get_mla_metadata_info_v1(
+        batch_size,
+        max_q_len,
+        nhead,
+        q_dtype,
+        kv_dtype,
+        is_sparse=False,
+        fast_mode=False,
+        num_kv_splits=NUM_KV_SPLITS,
+        intra_batch_mode=True,
+    )
+    work = [torch.empty(shape, dtype=dtype, device="cuda") for shape, dtype in info]
+    (
+        work_metadata,
+        work_indptr,
+        work_info_set,
+        reduce_indptr,
+        reduce_final_map,
+        reduce_partial_map,
+    ) = work
+    get_mla_metadata_v1(
+        qo_indptr,
+        kv_indptr,
+        kv_last_page_len,
+        nhead // nhead_kv,
+        nhead_kv,
+        True,
+        work_metadata,
+        work_info_set,
+        work_indptr,
+        reduce_indptr,
+        reduce_final_map,
+        reduce_partial_map,
+        page_size=PAGE_SIZE,
+        kv_granularity=max(PAGE_SIZE, 16),
+        max_seqlen_qo=max_q_len,
+        uni_seqlen_qo=max_q_len,
+        fast_mode=False,
+        max_split_per_batch=NUM_KV_SPLITS,
+        intra_batch_mode=True,
+        dtype_q=q_dtype,
+        dtype_kv=kv_dtype,
+    )
+    return {
+        "work_meta_data": work_metadata,
+        "work_indptr": work_indptr,
+        "work_info_set": work_info_set,
+        "reduce_indptr": reduce_indptr,
+        "reduce_final_map": reduce_final_map,
+        "reduce_partial_map": reduce_partial_map,
+    }
 
-        return y, kv_cache.get_data()
+
+def _aiter_mla_decode(
+    q: torch.Tensor,
+    kv_buffer: torch.Tensor,
+    qo_indptr: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    config: dict,
+    q_scale: torch.Tensor | None,
+    kv_scale: torch.Tensor | None,
+) -> torch.Tensor:
+    batch_size = int(config["batch_size"])
+    nq = int(config["num_heads"])
+    nkv = int(config["num_kv_heads"])
+    dq = int(config["qk_head_dim"])
+    dv = int(config["v_head_dim"])
+    q_seq_len = int(config["q_seq_len"])
+    total_kv_len = int(kv_indptr[-1].item())
+    kv_indices = torch.arange(total_kv_len, dtype=torch.int32, device="cuda")
+    kv_buffer_4d = kv_buffer.view(kv_buffer.shape[0], PAGE_SIZE, nkv, kv_buffer.shape[-1])
+    kv_last_page_len = (kv_indptr[1:] - kv_indptr[:-1]).to(torch.int32)
+    meta = _make_mla_decode_metadata(
+        batch_size,
+        q_seq_len,
+        nq,
+        nkv,
+        q.dtype,
+        kv_buffer.dtype,
+        qo_indptr,
+        kv_indptr,
+        kv_last_page_len,
+    )
+    out = torch.empty((q.shape[0], nq, dv), dtype=torch.bfloat16, device="cuda")
+    mla_decode_fwd(
+        q.view(-1, nq, dq),
+        kv_buffer_4d,
+        out,
+        qo_indptr,
+        kv_indptr,
+        kv_indices,
+        kv_last_page_len,
+        q_seq_len,
+        page_size=PAGE_SIZE,
+        nhead_kv=nkv,
+        sm_scale=SM_SCALE,
+        logit_cap=0.0,
+        num_kv_splits=NUM_KV_SPLITS,
+        q_scale=q_scale,
+        kv_scale=kv_scale,
+        intra_batch_mode=True,
+        **meta,
+    )
+    return out
+
 
 def custom_kernel(data: input_t) -> output_t:
-    config, x, kv_cache = data
-    model = MLA(config).to('cuda')
-    model.Q_proj_down.weight = nn.Parameter(config.Q_proj_down_weight)
-    model.Q_proj_up.weight = nn.Parameter(config.Q_proj_up_weight)
-    model.KV_proj_down.weight = nn.Parameter(config.KV_proj_down_weight)
-    model.KV_proj_up.weight = nn.Parameter(config.KV_proj_up_weight)
-    model.wo.weight = nn.Parameter(config.wo_weight)
-
-    output, kv_cache = model(x, kv_cache)
-    return output, kv_cache
+    q, kv_data, qo_indptr, kv_indptr, config = data
+    q_input, q_scale = quantize_fp8(q)
+    kv_input, kv_scale = kv_data["fp8"]
+    return _aiter_mla_decode(
+        q_input,
+        kv_input,
+        qo_indptr,
+        kv_indptr,
+        config,
+        q_scale=q_scale,
+        kv_scale=kv_scale,
+    )

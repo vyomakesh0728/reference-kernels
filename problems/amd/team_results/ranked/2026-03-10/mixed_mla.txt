@@ -1,0 +1,103 @@
+"**MI355X on GitHub ✅ success**
+> Workflow [22904422749](<https://github.com/gpu-mode/kernelbot/actions/runs/22904422749>) completed
+> Downloading artifacts... done
+> ✅ Testing successful
+> ✅ Benchmarking successful
+> ✅ Leaderboard run successful
+
+Running on:
+* GPU: `AMD Instinct MI355X`
+* CPU: `AMD EPYC 9575F 64-Core Processor`
+* Device count: `1`
+* Runtime: `ROCm`
+* Platform: `Linux-6.8.0-60-generic-x86_64-with-glibc2.39`
+* Torch: `2.10.0+rocm7.1`
+* Hostname: `arc-runner-set-h82gb-runner-mwxfz`
+
+
+## ✅ Passed 4/4 tests:
+```
+✅ seed: 4220; qseqlen: 1; kvseqlen: 1024; batchsize: 4
+> Maximum error: 0.0
+✅ seed: 5412; qseqlen: 1; kvseqlen: 1024; batchsize: 32
+> Maximum error: 0.0
+✅ seed: 1360; qseqlen: 1; kvseqlen: 8192; batchsize: 64
+> Maximum error: 0.0
+✅ seed: 9826; qseqlen: 1; kvseqlen: 8192; batchsize: 256
+> Maximum error: 0.0```
+
+## Benchmarks:
+```
+seed: 4217; qseqlen: 1; kvseqlen: 1024; batchsize: 4
+ ⏱ 120 ± 0.6 µs
+ ⚡ 109 µs 🐌 301 µs
+
+seed: 4220; qseqlen: 1; kvseqlen: 8192; batchsize: 4
+ ⏱ 121 ± 0.1 µs
+ ⚡ 116 µs 🐌 161 µs
+
+seed: 5412; qseqlen: 1; kvseqlen: 1024; batchsize: 32
+ ⏱ 121 ± 0.1 µs
+ ⚡ 116 µs 🐌 151 µs
+
+seed: 5415; qseqlen: 1; kvseqlen: 8192; batchsize: 32
+ ⏱ 164 ± 0.2 µs
+ ⚡ 160 µs 🐌 192 µs
+
+seed: 1357; qseqlen: 1; kvseqlen: 1024; batchsize: 64
+ ⏱ 127 ± 0.1 µs
+ ⚡ 123 µs 🐌 158 µs
+
+seed: 1360; qseqlen: 1; kvseqlen: 8192; batchsize: 64
+ ⏱ 208 ± 0.2 µs
+ ⚡ 204 µs 🐌 235 µs
+
+seed: 9823; qseqlen: 1; kvseqlen: 1024; batchsize: 256
+ ⏱ 166 ± 0.2 µs
+ ⚡ 162 µs 🐌 188 µs
+
+seed: 9826; qseqlen: 1; kvseqlen: 8192; batchsize: 256
+ ⏱ 355 ± 0.4 µs
+ ⚡ 350 µs 🐌 379 µs
+```
+
+## Ranked Benchmark:
+```
+seed: 4217; qseqlen: 1; kvseqlen: 1024; batchsize: 4
+ ⏱ 155 ± 4.3 µs
+ ⚡ 139 µs 🐌 386 µs
+
+seed: 4220; qseqlen: 1; kvseqlen: 8192; batchsize: 4
+ ⏱ 156 ± 4.1 µs
+ ⚡ 141 µs 🐌 400 µs
+
+seed: 5412; qseqlen: 1; kvseqlen: 1024; batchsize: 32
+ ⏱ 152 ± 3.4 µs
+ ⚡ 140 µs 🐌 405 µs
+
+seed: 5415; qseqlen: 1; kvseqlen: 8192; batchsize: 32
+ ⏱ 194 ± 2.9 µs
+ ⚡ 183 µs 🐌 360 µs
+
+seed: 1357; qseqlen: 1; kvseqlen: 1024; batchsize: 64
+ ⏱ 158 ± 4.1 µs
+ ⚡ 146 µs 🐌 433 µs
+
+seed: 1360; qseqlen: 1; kvseqlen: 8192; batchsize: 64
+ ⏱ 237 ± 2.9 µs
+ ⚡ 225 µs 🐌 407 µs
+
+seed: 9823; qseqlen: 1; kvseqlen: 1024; batchsize: 256
+ ⏱ 199 ± 3.6 µs
+ ⚡ 184 µs 🐌 407 µs
+
+seed: 9826; qseqlen: 1; kvseqlen: 8192; batchsize: 256
+ ⏱ 389 ± 2.7 µs
+ ⚡ 377 µs 🐌 551 µs
+```","**MI355X on GitHub (secret) ✅ success**
+> Workflow [22904423076](<https://github.com/gpu-mode/kernelbot/actions/runs/22904423076>) completed
+> Downloading artifacts... done
+> ✅ Testing successful
+> ✅ Benchmarking successful
+> ✅ Leaderboard run successful
+"

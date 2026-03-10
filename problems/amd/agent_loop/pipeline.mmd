@@ -1,0 +1,52 @@
+flowchart TD
+    A[Repo submission.py per problem] --> B[ClosedLoopRunner]
+    B --> C[ensure_baseline or choose current best]
+    C --> D["Write candidate workspace
+    .agent-loop/problems/<problem>/candidates/<candidate-id>/"]
+
+    D --> D1[submission.py]
+    D --> D2[context.json]
+    D --> D3[mutator.command.txt]
+    D --> D4[mutator.stdout.txt and mutator.stderr.txt]
+
+    D2 --> E[triton_mutator.py]
+    K2 --> E
+    E --> F[New candidate submission.py]
+    F --> G["popcorn-cli submit
+    mode = benchmark or leaderboard"]
+    G --> H[Kernelbot on MI355X]
+    H --> I[Raw result artifacts]
+
+    I --> I1["evaluation/result.txt"]
+    I --> I2["evaluation/stdout.txt"]
+    I --> I3["evaluation/stderr.txt"]
+    I --> I4["evaluation/parsed_metrics.json"]
+    I --> I5["evaluation/critique.json"]
+
+    I --> J[evaluator.py parses metrics]
+    J --> K[runner.py records evaluation]
+    K --> K1[".agent-loop/state.sqlite3"]
+    K --> K2[".agent-loop/problems/<problem>/knowledge.json"]
+
+    K --> L{Improved and valid?}
+    L -- Yes --> M[promote candidate back into repo submission.py]
+    L -- No --> N[keep as historical candidate]
+
+    G --> O["If ranked run:
+    .agent-loop/ranked/<problem>/<candidate-id>.txt"]
+
+    subgraph Workspace[".agent-loop directory"]
+        W1["state.sqlite3
+        SQLite store for candidates and evaluations"]
+        W2["problems/<problem>/candidates/<candidate-id>/
+        per-candidate source and logs"]
+        W3["problems/<problem>/knowledge.json
+        rolling memory and critiques"]
+        W4["ranked/<problem>/<candidate-id>.txt
+        saved leaderboard output"]
+    end
+
+    K1 -. store .- W1
+    D -. candidate files .- W2
+    K2 -. memory .- W3
+    O -. ranked results .- W4
