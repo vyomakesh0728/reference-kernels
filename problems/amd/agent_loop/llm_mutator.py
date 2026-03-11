@@ -98,6 +98,8 @@ def _experiment_protocol(desired_family: str | None) -> list[str]:
             [
                 "Stay in one compilation path: Python submission.py + load_inline + HIP C++ on gfx950.",
                 "Remove inherited Triton scaffold completely; the final HIP candidate should not keep import triton, @triton.jit, or unused Triton helper code.",
+                "Competition purity rule: do not use alternate streams, async overlap tricks, event/timing hacks, background work, or benchmark-specific hacks that can distort measured microseconds.",
+                "Do not include the lowercase token `stream` anywhere in the final submission source; KernelBot rejects such submissions before execution.",
                 f"Treat this as a {family} microkernel experiment over one lever at a time: tile shape, LDS movement, double buffering, swizzle, or scaled MFMA replacement.",
             ]
         )
@@ -931,6 +933,24 @@ def _validate_hot_path(
             raise RuntimeError("HIP family candidate did not use load_inline")
         if "gfx950" not in source:
             raise RuntimeError("HIP family candidate did not target gfx950")
+        lower_source = source.lower()
+        forbidden_purity_tokens = (
+            "stream",
+            "cudaevent",
+            "hipevent",
+            "record_event",
+            "wait_event",
+            "torch.cuda.synchronize",
+            "hipdevicesynchronize",
+            "cudaeventsynchronize",
+            "usleep(",
+            "sleep(",
+        )
+        for token in forbidden_purity_tokens:
+            if token in lower_source:
+                raise RuntimeError(
+                    f"HIP family candidate contained forbidden purity token {token!r}"
+                )
         forbidden_hip_scaffold = (
             "import triton",
             "@triton.jit",

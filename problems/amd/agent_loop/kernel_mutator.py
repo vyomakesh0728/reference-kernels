@@ -879,7 +879,6 @@ def render_mxfp4_mm_hip(meta: dict[str, object], variant: dict[str, object]) -> 
 
         HIP_SRC = r'''
         #include <torch/extension.h>
-        #include <ATen/cuda/CUDAContext.h>
         #include <hip/hip_runtime.h>
         #include <hip/amd_detail/amd_hip_bf16.h>
 
@@ -954,13 +953,12 @@ def render_mxfp4_mm_hip(meta: dict[str, object], variant: dict[str, object]) -> 
             const int k = static_cast<int>(a.size(1));
             dim3 block(TILE_N, TILE_M);
             dim3 grid((n + TILE_N - 1) / TILE_N, (m + TILE_M - 1) / TILE_M);
-            hipStream_t stream = at::cuda::getDefaultCUDAStream().stream();
             hipLaunchKernelGGL(
                 mxfp4_mm_kernel,
                 grid,
                 block,
                 0,
-                stream,
+                0,
                 reinterpret_cast<const __hip_bfloat16*>(a.data_ptr<at::BFloat16>()),
                 reinterpret_cast<const __hip_bfloat16*>(b.data_ptr<at::BFloat16>()),
                 reinterpret_cast<__hip_bfloat16*>(c.data_ptr<at::BFloat16>()),

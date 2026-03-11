@@ -125,6 +125,7 @@ For `mxfp4_mm`, the current default is HIP-first:
 - the seed path stays in one compilation pipeline: Python `submission.py` + HIP C++ only
 - the first HIP seeds are correctness-first tiled bf16 kernels that the loop can evolve toward CDNA4 scaled-MFMA, LDS swizzle, and double buffering
 - HIP candidates are seeded from the clean HIP template and rejected if they keep inherited Triton scaffold
+- HIP candidates are also rejected if they contain purity-breaking tokens such as alternate `stream` usage, event/timing hacks, or inherited Triton scaffold
 - this is intentionally closer to an AutoKernel-style microkernel program than a broad codegen search
 
 ## Objective
