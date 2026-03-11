@@ -63,23 +63,37 @@ mutator_command = "python3 -m agent_loop.llm_mutator --config agent_loop.toml --
 The `llm_mutator`:
 
 - reads the parent candidate, recent critique/history, policy profile, and a seeded Triton template
-- asks the configured LLM for a full new `submission.py`
+- asks the configured generator for a full new `submission.py`
 - compile-checks the result locally
-- falls back to the deterministic Triton generator if the API key is missing, the request fails, or the returned code is invalid
+- falls back to the deterministic Triton generator if the chosen provider is unavailable, the request fails, or the returned code is invalid
 
 Configuration lives in the `[llm]` table:
 
 ```toml
 [llm]
 enabled = true
-provider = "openai"
+provider = "auto"
 model = "gpt-5-mini"
 api_url = "https://api.openai.com/v1/responses"
 api_key_env_var = "OPENAI_API_KEY"
 reasoning_effort = "medium"
 max_output_tokens = 12000
 fallback_to_triton = true
+codex_cli = "codex"
+codex_model = ""
+codex_sandbox = "read-only"
+codex_use_plan = true
+codex_parallel_agents = 3
 ```
+
+Provider behavior:
+
+- `provider = "auto"`: use OpenAI Responses when `OPENAI_API_KEY` is present, otherwise use local `codex exec`, otherwise fall back to the seeded Triton generator
+- `provider = "openai"`: force the Responses API path
+- `provider = "codex_cli"`: force local Codex CLI generation
+
+The Codex path is designed as the no-API-key option. It shells out to `codex exec`, asks for a concise plan, and explicitly allows helper-agent fanout up to the configured `codex_parallel_agents` count before returning a single final `submission.py`.
+Leave `codex_model` empty to let the local Codex CLI use its account-default model.
 
 The seeded Triton generator still provides the search-space skeleton. The current setup mutates both kernel variants and policy profiles:
 

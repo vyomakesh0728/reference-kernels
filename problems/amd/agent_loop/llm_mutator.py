@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import py_compile
 import re
+import shutil
+import subprocess
 import tempfile
 import urllib.error
 import urllib.request
@@ -225,6 +227,88 @@ def _call_openai_responses(
     return text, response_payload
 
 
+def _call_codex_exec(
+    config: AppConfig,
+    system_prompt: str,
+    user_prompt: str,
+) -> tuple[str, dict[str, object]]:
+    codex_path = shutil.which(config.llm.codex_cli)
+    if not codex_path:
+        raise RuntimeError(f"codex CLI '{config.llm.codex_cli}' was not found in PATH")
+
+    orchestration_bits = [
+        "You are running inside a repo-local autonomous kernel search loop.",
+        "Return only raw Python source for a single submission.py file.",
+        "Do not modify repository files or describe what you did.",
+        "Do not emit markdown fences.",
+    ]
+    if config.llm.codex_use_plan:
+        orchestration_bits.append(
+            "Use a concise internal plan before writing code, and if it helps, use helper agents for parallel analysis."
+        )
+        orchestration_bits.append(
+            f"Keep helper-agent fanout to at most {config.llm.codex_parallel_agents}."
+        )
+
+    prompt = "\n\n".join(
+        [
+            f"SYSTEM:\n{system_prompt}",
+            f"EXECUTION:\n{' '.join(orchestration_bits)}",
+            f"USER:\n{user_prompt}",
+        ]
+    )
+
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as handle:
+        output_path = Path(handle.name)
+
+    command = [
+        codex_path,
+        "exec",
+        "--ephemeral",
+        "--color",
+        "never",
+        "-C",
+        str(config.repo_root),
+        "-s",
+        config.llm.codex_sandbox,
+        "-o",
+        str(output_path),
+    ]
+    if config.llm.codex_use_plan and config.llm.codex_parallel_agents > 1:
+        command.extend(["--enable", "multi_agent"])
+    if config.llm.codex_model:
+        command.extend(["-m", config.llm.codex_model])
+    if config.llm.codex_profile:
+        command.extend(["-p", config.llm.codex_profile])
+    command.append("-")
+
+    try:
+        completed = subprocess.run(
+            command,
+            input=prompt,
+            cwd=str(config.repo_root),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            stderr = completed.stderr.strip()
+            stdout = completed.stdout.strip()
+            detail = stderr or stdout or f"rc={completed.returncode}"
+            raise RuntimeError(f"codex exec failed: {detail}")
+        text = output_path.read_text(encoding="utf-8").strip()
+        if not text:
+            raise RuntimeError("codex exec did not write a final message")
+        return text, {
+            "provider": "codex_cli",
+            "command": command,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+    finally:
+        output_path.unlink(missing_ok=True)
+
+
 def _compile_check(path: Path) -> None:
     py_compile.compile(str(path), doraise=True)
 
@@ -272,6 +356,38 @@ def _llm_source(
     return candidate_source
 
 
+def _codex_source(
+    config: AppConfig,
+    context: dict[str, object],
+    parent_source: str,
+    seed_source: str,
+    seed_meta: dict[str, object],
+    policy_profile: dict[str, object],
+    variant: dict[str, object],
+) -> str:
+    system_prompt, user_prompt = _build_prompt(
+        config,
+        context,
+        parent_source,
+        seed_source,
+        policy_profile,
+        variant,
+    )
+    raw_text, _ = _call_codex_exec(config, system_prompt, user_prompt)
+    meta = dict(seed_meta)
+    meta["generator"] = {
+        "kind": "llm",
+        "provider": "codex_cli",
+        "model": config.llm.codex_model or "(codex default)",
+        "use_plan": config.llm.codex_use_plan,
+        "parallel_agents": config.llm.codex_parallel_agents,
+    }
+    candidate_source = _canonicalize_source(raw_text, seed_source, meta)
+    if "def custom_kernel" not in candidate_source:
+        raise RuntimeError("Codex output did not define custom_kernel")
+    return candidate_source
+
+
 def _generate_source(
     config: AppConfig,
     context: dict[str, object],
@@ -314,26 +430,50 @@ def _generate_source(
     if not config.llm.enabled:
         return _fallback_source(seed_source, seed_meta, "llm_disabled"), policy_profile, variant
 
-    if config.llm.provider != "openai":
-        if config.llm.fallback_to_triton:
-            return _fallback_source(seed_source, seed_meta, f"unsupported_provider:{config.llm.provider}"), policy_profile, variant
-        raise RuntimeError(f"unsupported llm provider: {config.llm.provider}")
+    providers_to_try: list[str]
+    provider = config.llm.provider
+    if provider == "auto":
+        providers_to_try = []
+        if os.environ.get(config.llm.api_key_env_var):
+            providers_to_try.append("openai")
+        providers_to_try.append("codex_cli")
+    else:
+        providers_to_try = [provider]
 
-    try:
-        source = _llm_source(
-            config,
-            context,
-            parent_source,
-            seed_source,
-            seed_meta,
-            policy_profile,
-            variant,
-        )
-        return source, policy_profile, variant
-    except (RuntimeError, urllib.error.URLError, TimeoutError) as exc:
-        if not config.llm.fallback_to_triton:
-            raise
-        return _fallback_source(seed_source, seed_meta, str(exc)), policy_profile, variant
+    last_error: Exception | None = None
+    for active_provider in providers_to_try:
+        try:
+            if active_provider == "openai":
+                source = _llm_source(
+                    config,
+                    context,
+                    parent_source,
+                    seed_source,
+                    seed_meta,
+                    policy_profile,
+                    variant,
+                )
+                return source, policy_profile, variant
+            if active_provider == "codex_cli":
+                source = _codex_source(
+                    config,
+                    context,
+                    parent_source,
+                    seed_source,
+                    seed_meta,
+                    policy_profile,
+                    variant,
+                )
+                return source, policy_profile, variant
+            raise RuntimeError(f"unsupported llm provider: {active_provider}")
+        except (RuntimeError, urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            continue
+
+    if not config.llm.fallback_to_triton and last_error is not None:
+        raise last_error
+    reason = str(last_error) if last_error is not None else f"unsupported_provider:{provider}"
+    return _fallback_source(seed_source, seed_meta, reason), policy_profile, variant
 
 
 def main() -> int:

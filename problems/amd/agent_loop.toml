@@ -11,13 +11,18 @@ improvement_epsilon = 0.0
 
 [llm]
 enabled = true
-provider = "openai"
+provider = "auto"
 model = "gpt-5-mini"
 api_url = "https://api.openai.com/v1/responses"
 api_key_env_var = "OPENAI_API_KEY"
 reasoning_effort = "medium"
 max_output_tokens = 12000
 fallback_to_triton = true
+codex_cli = "codex"
+codex_model = ""
+codex_sandbox = "read-only"
+codex_use_plan = true
+codex_parallel_agents = 3
 
 [problems.mxfp4_mm]
 submission_path = "fp8-mm/submission.py"

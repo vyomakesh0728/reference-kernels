@@ -28,6 +28,12 @@ class LLMConfig:
     reasoning_effort: str
     max_output_tokens: int
     fallback_to_triton: bool
+    codex_cli: str
+    codex_model: str | None
+    codex_profile: str | None
+    codex_sandbox: str
+    codex_use_plan: bool
+    codex_parallel_agents: int
 
 
 @dataclass(frozen=True)
@@ -100,13 +106,23 @@ def load_config(path: str | Path) -> AppConfig:
 
     llm = LLMConfig(
         enabled=bool(llm_raw.get("enabled", False)),
-        provider=str(llm_raw.get("provider", "openai")),
+        provider=str(llm_raw.get("provider", "auto")),
         model=str(llm_raw.get("model", "gpt-5-mini")),
         api_url=str(llm_raw.get("api_url", "https://api.openai.com/v1/responses")),
         api_key_env_var=str(llm_raw.get("api_key_env_var", "OPENAI_API_KEY")),
         reasoning_effort=str(llm_raw.get("reasoning_effort", "medium")),
         max_output_tokens=int(llm_raw.get("max_output_tokens", 12000)),
         fallback_to_triton=bool(llm_raw.get("fallback_to_triton", True)),
+        codex_cli=str(llm_raw.get("codex_cli", "codex")),
+        codex_model=(
+            str(llm_raw["codex_model"]) if llm_raw.get("codex_model") else None
+        ),
+        codex_profile=(
+            str(llm_raw["codex_profile"]) if llm_raw.get("codex_profile") else None
+        ),
+        codex_sandbox=str(llm_raw.get("codex_sandbox", "read-only")),
+        codex_use_plan=bool(llm_raw.get("codex_use_plan", True)),
+        codex_parallel_agents=int(llm_raw.get("codex_parallel_agents", 3)),
     )
 
     problems: dict[str, ProblemConfig] = {}

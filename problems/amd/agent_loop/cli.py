@@ -239,6 +239,13 @@ def _run_healthcheck(config, problem_key: str | None) -> int:
             "reasoning_effort": config.llm.reasoning_effort,
             "max_output_tokens": config.llm.max_output_tokens,
             "fallback_to_triton": config.llm.fallback_to_triton,
+            "codex_cli": config.llm.codex_cli,
+            "codex_model": config.llm.codex_model,
+            "codex_path": shutil.which(config.llm.codex_cli),
+            "codex_profile": config.llm.codex_profile,
+            "codex_sandbox": config.llm.codex_sandbox,
+            "codex_use_plan": config.llm.codex_use_plan,
+            "codex_parallel_agents": config.llm.codex_parallel_agents,
         },
         "problems": sorted(config.problems),
     }
