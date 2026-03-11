@@ -134,5 +134,8 @@ benchmark section. Lower is better.
 - `--bootstrap-baseline` is idempotent: it reuses an already evaluated baseline for that mode and
   only resubmits the repo anchor when the submission source has changed or no cached baseline eval
   exists yet.
+- failed mutation candidates are compacted after evaluation: the loop keeps a small pruned summary
+  with meta/critique/metrics for future prompt memory, then deletes the bulky candidate directory
+  so dead ends do not accumulate indefinitely.
 - The local repo task YAMLs are MI300-era. The loop is configured against the live MI355X
   leaderboard slugs and generates submissions against those server-side contracts.

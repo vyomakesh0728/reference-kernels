@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 import json
 import re
@@ -87,6 +88,8 @@ class ClosedLoopRunner:
         )
         critique = build_critique(problem_key, candidate_id, result)
         write_critique(artifacts_dir / "critique.json", critique)
+        if self._should_prune_candidate(problem_key, candidate, result):
+            self._prune_candidate_artifacts(problem_key, candidate, result, critique)
         self._write_problem_memory(problem_key)
 
         if result.status == "ok" and result.objective is not None:
@@ -371,11 +374,24 @@ class ClosedLoopRunner:
                 "status": row.status,
             }
             meta = self._load_candidate_meta(source_path)
+            critique = load_critique(critique_path)
+            pruned_summary = None
+            if meta is None or critique is None:
+                pruned_summary = self._load_pruned_candidate_summary(problem_key, row.candidate_id)
+            if meta is None and isinstance(pruned_summary, dict):
+                pruned_meta = pruned_summary.get("meta")
+                if isinstance(pruned_meta, dict):
+                    meta = pruned_meta
             if meta is not None:
                 entry["meta"] = meta
-            critique = load_critique(critique_path)
+            if critique is None and isinstance(pruned_summary, dict):
+                pruned_critique = pruned_summary.get("critique")
+                if isinstance(pruned_critique, dict):
+                    critique = pruned_critique
             if critique is not None:
                 entry["critique"] = critique
+            if isinstance(pruned_summary, dict):
+                entry["pruned"] = True
             history.append(entry)
         return history
 
@@ -431,3 +447,65 @@ class ClosedLoopRunner:
             return json.loads(match.group(1))
         except json.JSONDecodeError:
             return None
+
+    def _should_prune_candidate(
+        self,
+        problem_key: str,
+        candidate,
+        result: EvaluationResult,
+    ) -> bool:
+        if candidate.kind != "mutation":
+            return False
+        if result.status == "ok":
+            return False
+        if candidate.promoted:
+            return False
+        best = self.store.get_best_candidate(problem_key)
+        if best is not None and best.candidate_id == candidate.candidate_id:
+            return False
+        return True
+
+    def _pruned_summary_path(self, problem_key: str, candidate_id: str) -> Path:
+        path = self._problem_dir(problem_key) / "pruned" / f"{candidate_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _load_pruned_candidate_summary(
+        self,
+        problem_key: str,
+        candidate_id: str,
+    ) -> dict[str, object] | None:
+        path = self._pruned_summary_path(problem_key, candidate_id)
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _prune_candidate_artifacts(
+        self,
+        problem_key: str,
+        candidate,
+        result: EvaluationResult,
+        critique,
+    ) -> None:
+        source_path = Path(candidate.source_path)
+        candidate_dir = source_path.parent
+        meta = self._load_candidate_meta(source_path) or {}
+        summary = {
+            "candidate_id": candidate.candidate_id,
+            "problem_key": problem_key,
+            "parent_id": candidate.parent_id,
+            "kind": candidate.kind,
+            "hypothesis": candidate.hypothesis,
+            "source_sha256": candidate.source_sha256,
+            "status": result.status,
+            "objective": result.objective,
+            "meta": meta,
+            "critique": asdict(critique),
+            "metrics": result.metrics,
+            "pruned_at": datetime.now(UTC).isoformat(),
+        }
+        self._pruned_summary_path(problem_key, candidate.candidate_id).write_text(
+            json.dumps(summary, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        shutil.rmtree(candidate_dir, ignore_errors=True)
