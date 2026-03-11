@@ -19,6 +19,39 @@ SEARCH_SPACE: dict[str, list[dict[str, object]]] = {
             "strategy": "contract_anchor",
         },
         {
+            "variant_name": "triton_requant_m16n256k128",
+            "family": "triton_explore",
+            "strategy": "runtime_requant_matmul",
+            "BLOCK_M": 16,
+            "BLOCK_N": 256,
+            "BLOCK_K": 128,
+            "GROUP_M": 1,
+            "NUM_WARPS": 4,
+            "NUM_STAGES": 3,
+        },
+        {
+            "variant_name": "triton_requant_m32n256k128",
+            "family": "triton_explore",
+            "strategy": "runtime_requant_matmul",
+            "BLOCK_M": 32,
+            "BLOCK_N": 256,
+            "BLOCK_K": 128,
+            "GROUP_M": 2,
+            "NUM_WARPS": 4,
+            "NUM_STAGES": 3,
+        },
+        {
+            "variant_name": "triton_requant_m64n128k64",
+            "family": "triton_explore",
+            "strategy": "runtime_requant_matmul",
+            "BLOCK_M": 64,
+            "BLOCK_N": 128,
+            "BLOCK_K": 64,
+            "GROUP_M": 4,
+            "NUM_WARPS": 8,
+            "NUM_STAGES": 2,
+        },
+        {
             "variant_name": "triton_contract_m16n256k128",
             "family": "triton_explore",
             "strategy": "contract_bf16_dequant_matmul",
@@ -187,10 +220,12 @@ POLICY_PROFILES: dict[str, list[dict[str, object]]] = {
             "family": "triton_explore",
             "focus": "preserve shuffled MXFP4 semantics before tuning",
             "preferred_variants": [
+                "triton_requant_m16n256k128",
+                "triton_requant_m32n256k128",
                 "triton_contract_m16n256k128",
                 "triton_contract_m32n256k128",
             ],
-            "preferred_strategies": ["contract_bf16_dequant_matmul"],
+            "preferred_strategies": ["runtime_requant_matmul", "contract_bf16_dequant_matmul"],
             "trigger_signals": ["contract_repair", "runtime_repair", "submission_repair"],
         },
         {
@@ -198,11 +233,13 @@ POLICY_PROFILES: dict[str, list[dict[str, object]]] = {
             "family": "triton_explore",
             "focus": "prioritize skinny-M long-K ranked cases first",
             "preferred_variants": [
+                "triton_requant_m16n256k128",
+                "triton_requant_m32n256k128",
                 "triton_contract_m16n256k128",
                 "triton_contract_m32n256k128",
                 "triton_contract_m64n256k128",
             ],
-            "preferred_strategies": ["contract_bf16_dequant_matmul"],
+            "preferred_strategies": ["runtime_requant_matmul", "contract_bf16_dequant_matmul"],
             "trigger_signals": ["throughput_shift"],
         },
         {
@@ -210,11 +247,12 @@ POLICY_PROFILES: dict[str, list[dict[str, object]]] = {
             "family": "triton_explore",
             "focus": "cover wider shapes once the skinny path is stable",
             "preferred_variants": [
+                "triton_requant_m64n128k64",
                 "triton_contract_m64n128k64",
                 "triton_contract_m128n128k64",
                 "triton_contract_m64n256k128",
             ],
-            "preferred_strategies": ["contract_bf16_dequant_matmul"],
+            "preferred_strategies": ["runtime_requant_matmul", "contract_bf16_dequant_matmul"],
             "trigger_signals": ["throughput_shift", "latency_repair"],
         },
     ],
@@ -615,24 +653,28 @@ def render_mxfp4_mm_triton(meta: dict[str, object], variant: dict[str, object]) 
         SCALE_GROUP = 32
 
 
-        def _dequantize_matrix(fp4_packed: torch.Tensor, scale_e8m0: torch.Tensor) -> torch.Tensor:
-            rows = fp4_packed.shape[0]
+        def _dequantize_matrix(fp4_packed: torch.Tensor, scale_e8m0: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
             values = fp4_utils.mxfp4_to_f32(fp4_packed)
             scale = fp4_utils.e8m0_to_f32(scale_e8m0)
-            scale = scale[:rows, :].repeat_interleave(SCALE_GROUP, dim=1)[:, : values.shape[1]]
+            if scale.ndim == 1:
+                scale = scale.reshape(rows, -1)
+            scale = scale[:rows, :].repeat_interleave(SCALE_GROUP, dim=1)[:, :cols]
+            values = values[:rows, :cols]
             return (values * scale).to(torch.bfloat16)
 
 
         def _quantize_and_dequantize(matrix: torch.Tensor, label: str, *, shuffle: bool) -> torch.Tensor:
             del label
-            return _dequantize_matrix(
-                *aiter.get_triton_quant(QuantType.per_1x32)(matrix.contiguous(), shuffle=shuffle)
-            )
+            quantized, scale = aiter.get_triton_quant(QuantType.per_1x32)(matrix.contiguous(), shuffle=shuffle)
+            rows, cols = matrix.shape
+            return _dequantize_matrix(quantized, scale, rows=rows, cols=cols)
 
 
         def _dequantize_contract_tensor(fp4_packed: torch.Tensor, scale_e8m0: torch.Tensor, label: str) -> torch.Tensor:
             del label
-            return _dequantize_matrix(fp4_packed.contiguous(), scale_e8m0.contiguous())
+            rows = fp4_packed.shape[0]
+            cols = fp4_utils.mxfp4_to_f32(fp4_packed.contiguous()).shape[1]
+            return _dequantize_matrix(fp4_packed.contiguous(), scale_e8m0.contiguous(), rows=rows, cols=cols)
 
 
         @triton.jit
@@ -684,8 +726,11 @@ def render_mxfp4_mm_triton(meta: dict[str, object], variant: dict[str, object]) 
 
         def custom_kernel(data: input_t) -> output_t:
             a, b, b_q, b_shuffle, b_scale_sh = data
-            del b_q
-            if CONFIG.get("CONTRACT_NATIVE", False):
+            if CONFIG.get("strategy") == "runtime_requant_matmul":
+                del b_q, b_shuffle, b_scale_sh
+                a_dq = _quantize_and_dequantize(a, "a_runtime", shuffle=False)
+                b_dq = _quantize_and_dequantize(b, "b_runtime", shuffle=False)
+            elif CONFIG.get("CONTRACT_NATIVE", False):
                 a_dq = _quantize_and_dequantize(a, "a_contract", shuffle=True)
                 b_dq = _dequantize_contract_tensor(b_shuffle, b_scale_sh, "b_contract")
             else:

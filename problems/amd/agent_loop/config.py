@@ -41,6 +41,7 @@ class LLMConfig:
     codex_sandbox: str
     codex_use_plan: bool
     codex_parallel_agents: int
+    codex_timeout_seconds: float | None
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,11 @@ class ProblemConfig:
     goal: str
     objective: str
     mutator_command: str | None
+    parent_strategy: str
+    prune_failures: bool
+    keep_revert: bool
+    max_changed_lines: int | None
+    max_edit_hunks: int | None
 
     @property
     def lower_is_better(self) -> bool:
@@ -153,6 +159,11 @@ def load_config(path: str | Path) -> AppConfig:
         codex_sandbox=str(llm_raw.get("codex_sandbox", "read-only")),
         codex_use_plan=bool(llm_raw.get("codex_use_plan", True)),
         codex_parallel_agents=int(llm_raw.get("codex_parallel_agents", 3)),
+        codex_timeout_seconds=(
+            None
+            if llm_raw.get("codex_timeout_seconds") in {None, "", 0, 0.0}
+            else float(llm_raw.get("codex_timeout_seconds"))
+        ),
     )
 
     problems: dict[str, ProblemConfig] = {}
@@ -175,6 +186,19 @@ def load_config(path: str | Path) -> AppConfig:
             objective=str(value.get("objective", "geom_mean_ns")),
             mutator_command=(
                 str(value["mutator_command"]) if value.get("mutator_command") else None
+            ),
+            parent_strategy=str(value.get("parent_strategy", "best")),
+            prune_failures=bool(value.get("prune_failures", True)),
+            keep_revert=bool(value.get("keep_revert", False)),
+            max_changed_lines=(
+                int(value["max_changed_lines"])
+                if value.get("max_changed_lines") is not None
+                else None
+            ),
+            max_edit_hunks=(
+                int(value["max_edit_hunks"])
+                if value.get("max_edit_hunks") is not None
+                else None
             ),
         )
 

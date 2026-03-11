@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import ast
 import argparse
 import json
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 import py_compile
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -27,9 +30,92 @@ from .triton_mutator import (
 
 CODE_BLOCK_RE = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL)
 CUSTOM_KERNEL_RE = re.compile(
-    r"def\s+custom_kernel\s*\([^)]*\):\n(?P<body>(?:[ \t]+.*(?:\n|$))*)",
+    r"def\s+custom_kernel\s*\([^)]*\)\s*(?:->\s*[^:]+)?\s*:\n(?P<body>(?:[ \t]+.*(?:\n|$)|\s*\n)*)",
     re.MULTILINE,
 )
+TOP_LEVEL_TRANSCRIPT_MARKERS = (
+    "OpenAI Codex v",
+    "workdir:",
+    "model:",
+    "provider:",
+    "approval:",
+    "sandbox:",
+    "reasoning effort:",
+    "reasoning summaries:",
+    "session id:",
+    "tokens used",
+    "deprecated:",
+    "mcp:",
+    "codex",
+    "user",
+    "assistant",
+)
+PYTHON_START_MARKERS = (
+    "#!POPCORN",
+    "from __future__ import annotations",
+    "import ",
+    "from ",
+    "def custom_kernel",
+)
+CODEX_USAGE_LIMIT_RE = re.compile(r"you've hit your usage limit", re.IGNORECASE)
+CODEX_TRY_AGAIN_RE = re.compile(r"try again at\s+([0-9]{1,2}:[0-9]{2}\s*[AP]M)", re.IGNORECASE)
+AOT_GUIDANCE = [
+    "Use an Atom-of-Thoughts style internal process: treat the current parent submission as the current Markov state, not as a transcript to copy verbatim.",
+    "Preserve an answer-equivalence invariant: every next state must keep the exact live contract, semantics, and correctness behavior of the original task.",
+    "Decomposition stage: internally split the kernel problem into 2-5 self-contained atomic bottlenecks such as contract correctness, quant/dequant flow, memory layout, tile geometry, or launch configuration.",
+    "Choose exactly one atomic bottleneck for this transition. Do not change multiple independent bottlenecks in the same candidate.",
+    "Contraction stage: output one full next-state submission.py that is self-contained, contract-faithful, and simpler to verify than a broad rewrite.",
+    "Require monotonic complexity reduction: the next state should reduce open decisions or isolate one clearer bottleneck instead of expanding scope.",
+    "Reflective refinement: before finalizing, internally verify that the new state preserves the live contract and meaningfully improves the chosen bottleneck. If not, revise once and keep the smaller change.",
+    "Minimize historical dependence: use the parent source, compact history digest, and knowledge summary, but do not rely on long free-form transcripts.",
+    "Terminate at the current atomic frontier: if the right next move is still correctness repair, keep the edit correctness-first instead of pretending to optimize throughput.",
+    "Operate like an AutoKernel experiment: make one focused kernel edit per iteration so the outer loop can explicitly keep or revert it.",
+]
+
+
+def _codex_usage_limit_reset_time(text: str) -> datetime | None:
+    if not CODEX_USAGE_LIMIT_RE.search(text):
+        return None
+    match = CODEX_TRY_AGAIN_RE.search(text)
+    if not match:
+        return None
+    now = datetime.now().astimezone()
+    try:
+        clock = datetime.strptime(match.group(1).upper(), "%I:%M %p")
+    except ValueError:
+        return None
+    reset_at = now.replace(
+        hour=clock.hour,
+        minute=clock.minute,
+        second=0,
+        microsecond=0,
+    )
+    if reset_at <= now:
+        reset_at += timedelta(days=1)
+    return reset_at
+
+
+def _write_codex_wait_artifact(workspace_dir: Path, *, reset_at: datetime | None, stderr: str) -> None:
+    payload = {
+        "event": "codex_usage_limit",
+        "detected_at": datetime.now().astimezone().isoformat(),
+        "reset_at": reset_at.isoformat() if reset_at is not None else None,
+        "message_tail": "\n".join(stderr.strip().splitlines()[-10:]),
+    }
+    (workspace_dir / "codex_usage_limit.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _compact_command_failure(stderr: str, stdout: str) -> str:
+    text = stderr.strip() or stdout.strip()
+    if not text:
+        return "rc=1"
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) <= 24:
+        return "\n".join(lines)
+    return "\n".join(lines[-24:])
 
 
 def _extract_meta(source: str) -> dict[str, object]:
@@ -59,7 +145,24 @@ def _extract_code(text: str) -> str:
     match = CODE_BLOCK_RE.search(text)
     if match:
         return match.group(1).strip()
-    return text.strip()
+    stripped = text.strip()
+    lines = stripped.splitlines()
+    start_index = 0
+    for index, line in enumerate(lines):
+        candidate = line.lstrip()
+        if any(candidate.startswith(marker) for marker in PYTHON_START_MARKERS):
+            start_index = index
+            break
+    stripped = "\n".join(lines[start_index:]).strip()
+
+    lines = stripped.splitlines()
+    cleaned: list[str] = []
+    for line in lines:
+        if cleaned and not line.startswith((" ", "\t")):
+            if any(line.startswith(marker) for marker in TOP_LEVEL_TRANSCRIPT_MARKERS):
+                break
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
 
 
 def _canonicalize_source(raw_source: str, seed_source: str, meta: dict[str, object]) -> str:
@@ -139,6 +242,7 @@ def _problem_specific_guidance(
         guidance.extend(
             [
                 "Preserve the shuffled MXFP4 contract exactly: quantize A with shuffle=True and consume B_shuffle/B_scale_sh consistently.",
+                "If the shuffled-B interpretation is still unstable, prefer a correctness-first Triton seed that requantizes both A and B from the original bf16 tensors, dequantizes them plainly, and only then runs Triton matmul.",
                 "Do not change both semantic layout and tiling in the same candidate when correctness is failing repeatedly; fix contract/dataflow first, then tune tiles.",
                 "Prefer a minimal Triton matmul path that is actually called from custom_kernel over a larger submission that still routes the hot path through aiter.gemm_a4w4.",
             ]
@@ -168,6 +272,8 @@ def _build_prompt(
     seed_source: str,
     policy_profile: dict[str, object],
     variant: dict[str, object],
+    *,
+    workspace_edit: bool = False,
 ) -> tuple[str, str]:
     problem = context["problem"]
     history = history_entries(context)
@@ -176,13 +282,46 @@ def _build_prompt(
     desired_family = context.get("desired_family")
     if not isinstance(desired_family, str):
         desired_family = None
+    edit_budget = context.get("edit_budget")
+    if not isinstance(edit_budget, dict):
+        edit_budget = {}
+    max_changed_lines = edit_budget.get("max_changed_lines")
+    max_edit_hunks = edit_budget.get("max_edit_hunks")
+    budget_lines: list[str] = []
+    if isinstance(max_changed_lines, int):
+        budget_lines.append(f"- keep the diff at or under {max_changed_lines} changed lines")
+    if isinstance(max_edit_hunks, int):
+        budget_lines.append(f"- keep the diff at or under {max_edit_hunks} unified-diff hunks")
+    if budget_lines:
+        budget_text = "\n".join(budget_lines)
+    else:
+        budget_text = "- no explicit edit budget provided"
 
-    system_prompt = (
-        "You are an expert AMD MI355X Triton kernel engineer working on a real competition submission. "
-        "Generate exactly one Python submission file. Return only raw Python source, no markdown fences. "
-        "Preserve the live kernel contract, keep the two #!POPCORN header lines, define custom_kernel(data), "
-        "and do not use hidden cross-call caches or benchmark-cheating tricks. Favor correctness first, then speed."
-    )
+    if workspace_edit:
+        system_prompt = (
+            "You are an expert AMD MI355X Triton kernel engineer working on a real competition submission. "
+            "Edit the existing submission.py file in place inside the current isolated workspace. "
+            "Preserve the live kernel contract, keep the two #!POPCORN header lines, define custom_kernel(data), "
+            "and do not use hidden cross-call caches or benchmark-cheating tricks. Favor correctness first, then speed. "
+            "Use Codex helper agents only for internal analysis, then finish with a short plain-text summary of the one focused edit you made."
+        )
+        delivery_requirements = [
+            "- edit the existing submission.py in place",
+            "- do not create alternate code files or markdown fences",
+            "- keep the final change localized and preserve untouched code where possible",
+        ]
+    else:
+        system_prompt = (
+            "You are an expert AMD MI355X Triton kernel engineer working on a real competition submission. "
+            "Generate exactly one Python submission file. Return only raw Python source, no markdown fences. "
+            "Preserve the live kernel contract, keep the two #!POPCORN header lines, define custom_kernel(data), "
+            "and do not use hidden cross-call caches or benchmark-cheating tricks. Favor correctness first, then speed. "
+            "Use Codex helper agents only for internal analysis, then return a single final submission.py."
+        )
+        delivery_requirements = [
+            "- return only Python source",
+            "- keep the #!POPCORN header lines valid",
+        ]
 
     user_prompt = f"""
 Problem key: {problem["key"]}
@@ -211,16 +350,23 @@ Seed Triton submission to improve:
 
 Write a new full submission.py candidate for this problem.
 Requirements:
-- return only Python source
-- keep the #!POPCORN header lines valid
+{chr(10).join(delivery_requirements)}
 - preserve the exact data contract for the problem
 - include Triton code when optimizing Triton paths
 - do not add fake speedups, persistent benchmark caches, or hidden state across evaluations
 - prefer a smaller, correct kernel over a large broken rewrite
+- preserve untouched code where possible and keep the edit localized
+
+Focused edit budget:
+{budget_text}
+
+Atom-of-Thoughts operating rules:
+{chr(10).join(f"- {line}" for line in AOT_GUIDANCE)}
 
 Problem-specific guidance:
 {chr(10).join(f"- {line}" for line in _problem_specific_guidance(problem["key"], desired_family, history))}
 """
+    _write_prompt_artifacts(context, system_prompt.strip(), user_prompt.strip())
     return system_prompt.strip(), user_prompt.strip()
 
 
@@ -433,6 +579,8 @@ def _call_codex_exec(
     config: AppConfig,
     system_prompt: str,
     user_prompt: str,
+    *,
+    workspace_dir: Path,
 ) -> tuple[str, dict[str, object]]:
     codex_path = shutil.which(config.llm.codex_cli)
     if not codex_path:
@@ -440,9 +588,10 @@ def _call_codex_exec(
 
     orchestration_bits = [
         "You are running inside a repo-local autonomous kernel search loop.",
-        "Return only raw Python source for a single submission.py file.",
-        "Do not modify repository files or describe what you did.",
-        "Do not emit markdown fences.",
+        "Edit ./submission.py in place inside the current isolated workspace.",
+        "Modify only ./submission.py and keep all other files unchanged.",
+        "Your final message should be a short plain-text note describing the single focused edit you made.",
+        "Use $amd-triton-speedrun for the competition workflow, problem-contract rules, and current search discipline.",
     ]
     if config.llm.codex_use_plan:
         orchestration_bits.append(
@@ -467,12 +616,13 @@ def _call_codex_exec(
         codex_path,
         "exec",
         "--ephemeral",
+        "--skip-git-repo-check",
         "--color",
         "never",
         "-C",
-        str(config.repo_root),
+        str(workspace_dir),
         "-s",
-        config.llm.codex_sandbox,
+        "workspace-write",
         "-o",
         str(output_path),
     ]
@@ -485,28 +635,53 @@ def _call_codex_exec(
     command.append("-")
 
     try:
-        completed = subprocess.run(
-            command,
-            input=prompt,
-            cwd=str(config.repo_root),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            stderr = completed.stderr.strip()
-            stdout = completed.stdout.strip()
-            detail = stderr or stdout or f"rc={completed.returncode}"
-            raise RuntimeError(f"codex exec failed: {detail}")
-        text = output_path.read_text(encoding="utf-8").strip()
-        if not text:
-            raise RuntimeError("codex exec did not write a final message")
-        return text, {
-            "provider": "codex_cli",
-            "command": command,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
-        }
+        while True:
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=prompt,
+                    cwd=str(workspace_dir),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=config.llm.codex_timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                timeout_seconds = config.llm.codex_timeout_seconds
+                if timeout_seconds is None:
+                    raise
+                raise RuntimeError(
+                    f"codex exec timed out after {timeout_seconds:g}s"
+                ) from exc
+
+            stderr = completed.stderr or ""
+            stdout = completed.stdout or ""
+            reset_at = _codex_usage_limit_reset_time(stderr) or _codex_usage_limit_reset_time(stdout)
+            if completed.returncode != 0 and reset_at is not None:
+                _write_codex_wait_artifact(workspace_dir, reset_at=reset_at, stderr=stderr or stdout)
+                sleep_seconds = max((reset_at - datetime.now().astimezone()).total_seconds() + 5.0, 5.0)
+                time.sleep(sleep_seconds)
+                continue
+
+            if completed.returncode != 0:
+                detail = _compact_command_failure(stderr, stdout)
+                raise RuntimeError(f"codex exec failed: {detail}")
+
+            text = output_path.read_text(encoding="utf-8").strip()
+            if not text:
+                raise RuntimeError("codex exec did not write a final message")
+            edited_submission = workspace_dir / "submission.py"
+            if not edited_submission.exists():
+                raise RuntimeError("codex exec did not leave a submission.py in the workspace")
+            edited_text = edited_submission.read_text(encoding="utf-8")
+            return text, {
+                "provider": "codex_cli",
+                "command": command,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+                "workspace_dir": str(workspace_dir),
+                "edited_submission": edited_text,
+            }
     finally:
         output_path.unlink(missing_ok=True)
 
@@ -522,6 +697,70 @@ def _compact_reason(reason: str, limit: int = 240) -> str:
     return compact[: limit - 3] + "..."
 
 
+def _write_prompt_artifacts(
+    context: dict[str, object],
+    system_prompt: str,
+    user_prompt: str,
+) -> None:
+    candidate_dir = context.get("candidate_dir")
+    if not isinstance(candidate_dir, str) or not candidate_dir:
+        return
+    path = Path(candidate_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "prompt.system.txt").write_text(system_prompt + "\n", encoding="utf-8")
+    (path / "prompt.user.txt").write_text(user_prompt + "\n", encoding="utf-8")
+
+
+def _write_generation_artifacts(
+    context: dict[str, object],
+    *,
+    provider: str,
+    raw_text: str,
+    response_payload: dict[str, object] | None = None,
+) -> None:
+    candidate_dir = context.get("candidate_dir")
+    if not isinstance(candidate_dir, str) or not candidate_dir:
+        return
+    path = Path(candidate_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    (path / f"{provider}.raw.txt").write_text(raw_text, encoding="utf-8")
+    if response_payload is not None:
+        try:
+            serialized = json.dumps(response_payload, indent=2, sort_keys=True)
+        except TypeError:
+            serialized = json.dumps({"unserializable": True}, indent=2, sort_keys=True)
+        (path / f"{provider}.response.json").write_text(serialized + "\n", encoding="utf-8")
+
+
+def _custom_kernel_body(source: str) -> str | None:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        tree = None
+
+    if tree is not None:
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "custom_kernel":
+                if not node.body:
+                    return ""
+                segments: list[str] = []
+                for stmt in node.body:
+                    segment = ast.get_source_segment(source, stmt)
+                    if isinstance(segment, str) and segment.strip():
+                        segments.append(segment)
+                if segments:
+                    return "\n".join(segments)
+                lines = source.splitlines()
+                start = node.body[0].lineno - 1
+                end_lineno = getattr(node.body[-1], "end_lineno", None) or node.body[-1].lineno
+                return "\n".join(lines[start:end_lineno])
+
+    match = CUSTOM_KERNEL_RE.search(source)
+    if not match:
+        return None
+    return match.group("body")
+
+
 def _validate_hot_path(
     source: str,
     problem_key: str,
@@ -529,10 +768,9 @@ def _validate_hot_path(
 ) -> None:
     if desired_family != "triton_explore":
         return
-    match = CUSTOM_KERNEL_RE.search(source)
-    if not match:
+    body = _custom_kernel_body(source)
+    if body is None:
         raise RuntimeError("output did not include a readable custom_kernel body")
-    body = match.group("body")
     forbidden = {
         "mxfp4_mm": ["aiter.gemm_a4w4("],
         "moe_mxfp4": ["fused_moe("],
@@ -573,7 +811,8 @@ def _llm_source(
         policy_profile,
         variant,
     )
-    raw_text, _ = _call_openai_responses(config, system_prompt, user_prompt)
+    raw_text, response_payload = _call_openai_responses(config, system_prompt, user_prompt)
+    _write_generation_artifacts(context, provider="openai", raw_text=raw_text, response_payload=response_payload)
     meta = dict(seed_meta)
     meta["generator"] = {
         "kind": "llm",
@@ -607,7 +846,8 @@ def _anthropic_source(
         policy_profile,
         variant,
     )
-    raw_text, _ = _call_anthropic_messages(config, system_prompt, user_prompt)
+    raw_text, response_payload = _call_anthropic_messages(config, system_prompt, user_prompt)
+    _write_generation_artifacts(context, provider="anthropic", raw_text=raw_text, response_payload=response_payload)
     meta = dict(seed_meta)
     meta["generator"] = {
         "kind": "llm",
@@ -641,7 +881,8 @@ def _openrouter_source(
         policy_profile,
         variant,
     )
-    raw_text, _ = _call_openrouter_chat(config, system_prompt, user_prompt)
+    raw_text, response_payload = _call_openrouter_chat(config, system_prompt, user_prompt)
+    _write_generation_artifacts(context, provider="openrouter", raw_text=raw_text, response_payload=response_payload)
     meta = dict(seed_meta)
     meta["generator"] = {
         "kind": "llm",
@@ -674,8 +915,23 @@ def _codex_source(
         seed_source,
         policy_profile,
         variant,
+        workspace_edit=True,
     )
-    raw_text, _ = _call_codex_exec(config, system_prompt, user_prompt)
+    candidate_dir_raw = context.get("candidate_dir")
+    if not isinstance(candidate_dir_raw, str) or not candidate_dir_raw:
+        raise RuntimeError("context did not include candidate_dir for codex workspace edit mode")
+    workspace_dir = Path(candidate_dir_raw)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    workspace_submission = workspace_dir / "submission.py"
+    workspace_submission.write_text(parent_source, encoding="utf-8")
+
+    raw_text, response_payload = _call_codex_exec(
+        config,
+        system_prompt,
+        user_prompt,
+        workspace_dir=workspace_dir,
+    )
+    _write_generation_artifacts(context, provider="codex_cli", raw_text=raw_text, response_payload=response_payload)
     meta = dict(seed_meta)
     meta["generator"] = {
         "kind": "llm",
@@ -683,8 +939,12 @@ def _codex_source(
         "model": config.llm.codex_model or "(codex default)",
         "use_plan": config.llm.codex_use_plan,
         "parallel_agents": config.llm.codex_parallel_agents,
+        "mode": "workspace_edit",
     }
-    candidate_source = _canonicalize_source(raw_text, seed_source, meta)
+    edited_text = response_payload.get("edited_submission")
+    if not isinstance(edited_text, str) or not edited_text.strip():
+        raise RuntimeError("codex workspace edit did not produce readable submission.py contents")
+    candidate_source = _canonicalize_source(edited_text, seed_source, meta)
     if "def custom_kernel" not in candidate_source:
         raise RuntimeError("Codex output did not define custom_kernel")
     desired_family = context.get("desired_family")
@@ -814,6 +1074,7 @@ def main() -> int:
 
     config = load_config(args.config)
     context = load_context(Path(args.context))
+    context["candidate_dir"] = str(Path(args.context).resolve().parent)
     source, _, _ = _generate_source(config, context, Path(args.parent))
 
     output = Path(args.output)

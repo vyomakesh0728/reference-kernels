@@ -289,6 +289,49 @@ class ExperimentStore:
         ).fetchall()
         return [self._candidate_from_row(row) for row in rows]
 
+    def all_candidates(self, problem_key: str | None = None) -> list[CandidateRow]:
+        if problem_key is None:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM candidates
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM candidates
+                WHERE problem_key = ?
+                ORDER BY created_at DESC
+                """,
+                (problem_key,),
+            ).fetchall()
+        return [self._candidate_from_row(row) for row in rows]
+
+    def reset_problem(self, problem_key: str) -> None:
+        candidate_ids = [
+            row["candidate_id"]
+            for row in self.conn.execute(
+                "SELECT candidate_id FROM candidates WHERE problem_key = ?",
+                (problem_key,),
+            ).fetchall()
+        ]
+        if candidate_ids:
+            placeholders = ",".join("?" for _ in candidate_ids)
+            self.conn.execute(
+                f"DELETE FROM evaluations WHERE candidate_id IN ({placeholders})",
+                candidate_ids,
+            )
+        self.conn.execute(
+            "DELETE FROM candidates WHERE problem_key = ?",
+            (problem_key,),
+        )
+        self.conn.execute(
+            "DELETE FROM problem_state WHERE problem_key = ?",
+            (problem_key,),
+        )
+        self.conn.commit()
+
     def _candidate_from_row(self, row: sqlite3.Row) -> CandidateRow:
         return CandidateRow(
             candidate_id=row["candidate_id"],

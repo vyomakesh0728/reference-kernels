@@ -80,6 +80,19 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="Show problem state")
     status.add_argument("--problem")
 
+    cleanup = sub.add_parser(
+        "cleanup",
+        help="Prune failed and stale mutation candidates while keeping compact summaries",
+    )
+    cleanup.add_argument("--problem")
+    cleanup.add_argument("--stale-pending-hours", type=float, default=6.0)
+
+    reset_problem = sub.add_parser(
+        "reset-problem",
+        help="Delete one problem's local workspace, candidates, pruned summaries, and DB state",
+    )
+    reset_problem.add_argument("--problem", required=True)
+
     promote = sub.add_parser("promote", help="Promote a stored candidate into the repo")
     promote.add_argument("--problem", required=True)
     promote.add_argument("--candidate", required=True)
@@ -202,6 +215,19 @@ def main(argv: list[str] | None = None) -> int:
                     key: runner.problem_snapshot(key) for key in sorted(config.problems)
                 }
             print(json.dumps(snapshot, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "cleanup":
+            summary = runner.compact_failed_candidates(
+                args.problem,
+                stale_pending_hours=args.stale_pending_hours,
+            )
+            print(json.dumps(summary, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "reset-problem":
+            summary = runner.reset_problem_workspace(args.problem)
+            print(json.dumps(summary, indent=2, sort_keys=True))
             return 0
 
         if args.command == "promote":

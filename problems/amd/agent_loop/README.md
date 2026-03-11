@@ -19,6 +19,7 @@ python3 -m agent_loop baseline --problem mxfp4_mm
 python3 -m agent_loop loop --problem mxfp4_mm --iterations 10 --family triton_explore
 python3 -m agent_loop swarm --rounds 5 --family triton_explore --bootstrap-baseline
 python3 -m agent_loop campaign --mode leaderboard --family triton_explore --bootstrap-baseline --rounds 50 --max-consecutive-non-improve 8
+python3 -m agent_loop cleanup --stale-pending-hours 6
 python3 -m agent_loop status --problem mxfp4_mm
 python3 -m agent_loop promote --problem mxfp4_mm --candidate <candidate-id>
 ```
@@ -103,6 +104,8 @@ Provider behavior:
 
 The Codex path is designed as the no-API-key option. It shells out to `codex exec`, asks for a concise plan, and explicitly allows helper-agent fanout up to the configured `codex_parallel_agents` count before returning a single final `submission.py`.
 Leave `codex_model` empty to let the local Codex CLI use its account-default model.
+If you set `codex_timeout_seconds`, the mutator will fail fast at that limit; if you omit it, `codex exec` runs without a wall-clock timeout.
+For Codex, the mutator now uses an isolated candidate workspace in `workspace-write` mode: it seeds `submission.py` from the kept parent, asks Codex to edit that file in place, then validates the edited file locally before any remote submission.
 
 The seeded Triton generator still provides the search-space skeleton. The current setup mutates both kernel variants and policy profiles:
 
@@ -137,5 +140,15 @@ benchmark section. Lower is better.
 - failed mutation candidates are compacted after evaluation: the loop keeps a small pruned summary
   with meta/critique/metrics for future prompt memory, then deletes the bulky candidate directory
   so dead ends do not accumulate indefinitely.
+- `cleanup` backfills that same pruning logic for older failed candidates and can also drop stale
+  unevaluated mutation directories after a safety threshold with `--stale-pending-hours`.
+- `mxfp4_mm` can run in an AutoKernel-style single-trunk mode:
+  - kept kernel lives at `.agent-loop/problems/mxfp4_mm/working/submission.py`
+  - current trial lives at `.agent-loop/problems/mxfp4_mm/working/attempt/`
+  - every ranked round appends one row to `.agent-loop/problems/mxfp4_mm/working/results.tsv`
+  - detailed per-round records go to `.agent-loop/problems/mxfp4_mm/working/journal.jsonl`
+  - `state.json` tracks the current kept candidate plus keep/revert counts
+  - `candidate.diff` and `scope_check.json` capture the current diff and focused-edit budget check
+  - `max_changed_lines` and `max_edit_hunks` in `agent_loop.toml` can reject broad rewrites as `scope_reject` before burning a ranked submission
 - The local repo task YAMLs are MI300-era. The loop is configured against the live MI355X
   leaderboard slugs and generates submissions against those server-side contracts.

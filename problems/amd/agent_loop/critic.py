@@ -104,6 +104,26 @@ def build_critique(
         ]
         policy_signal = "contract_repair"
         policy_rationale = "The kernel produced incorrect outputs, so correctness must dominate the next mutation."
+    elif result.status == "scope_reject":
+        scope_check = metrics.get("scope_check")
+        changed_lines = None
+        edit_hunks = None
+        if isinstance(scope_check, dict):
+            changed_lines = scope_check.get("lines_changed")
+            edit_hunks = scope_check.get("edit_hunks")
+        summary = "candidate exceeded the focused-edit budget before submission"
+        if isinstance(changed_lines, int) and isinstance(edit_hunks, int):
+            summary = (
+                f"candidate exceeded the focused-edit budget "
+                f"({changed_lines} changed lines, {edit_hunks} hunks)"
+            )
+        failure_kind = failure_kind or "scope_budget_exceeded"
+        next_actions = [
+            "Keep the next mutation localized to one small kernel region instead of rewriting the file.",
+            "Preserve unchanged code verbatim and retry with a smaller diff.",
+        ]
+        policy_signal = "scope_repair"
+        policy_rationale = "The outer loop rejected a broad rewrite, so the next candidate must be narrower."
     else:
         summary = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "submission failed before evaluation"
         next_actions = [

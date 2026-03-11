@@ -11,7 +11,7 @@ improvement_epsilon = 0.0
 
 [llm]
 enabled = true
-provider = "auto"
+provider = "codex_cli"
 model = "gpt-5-mini"
 api_url = "https://api.openai.com/v1/responses"
 api_key_env_var = "OPENAI_API_KEY"
@@ -24,7 +24,7 @@ openrouter_http_referer = ""
 openrouter_title = "reference-kernels-agent-loop"
 reasoning_effort = "medium"
 max_output_tokens = 12000
-fallback_to_triton = true
+fallback_to_triton = false
 codex_cli = "codex"
 codex_model = ""
 codex_sandbox = "read-only"
@@ -38,6 +38,11 @@ gpu = "MI355X"
 mode = "benchmark"
 objective = "geom_mean_ns"
 goal = "min"
+parent_strategy = "latest"
+prune_failures = false
+keep_revert = true
+max_changed_lines = 120
+max_edit_hunks = 4
 mutator_command = "python3 -m agent_loop.llm_mutator --config agent_loop.toml --parent {parent} --output {output} --context {context}"
 
 [problems.moe_mxfp4]
