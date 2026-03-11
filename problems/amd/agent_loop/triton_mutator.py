@@ -19,45 +19,61 @@ SEARCH_SPACE: dict[str, list[dict[str, object]]] = {
             "strategy": "contract_anchor",
         },
         {
-            "variant_name": "triton_dq_mm_64x128x32",
+            "variant_name": "triton_contract_m16n256k128",
             "family": "triton_explore",
-            "strategy": "bf16_dequant_matmul",
-            "BLOCK_M": 64,
-            "BLOCK_N": 128,
-            "BLOCK_K": 32,
-            "GROUP_M": 8,
-            "NUM_WARPS": 4,
-            "NUM_STAGES": 2,
-        },
-        {
-            "variant_name": "triton_dq_mm_64x128x64",
-            "family": "triton_explore",
-            "strategy": "bf16_dequant_matmul",
-            "BLOCK_M": 64,
-            "BLOCK_N": 128,
-            "BLOCK_K": 64,
-            "GROUP_M": 8,
+            "strategy": "contract_bf16_dequant_matmul",
+            "CONTRACT_NATIVE": True,
+            "BLOCK_M": 16,
+            "BLOCK_N": 256,
+            "BLOCK_K": 128,
+            "GROUP_M": 1,
             "NUM_WARPS": 4,
             "NUM_STAGES": 3,
         },
         {
-            "variant_name": "triton_dq_mm_128x128x32",
+            "variant_name": "triton_contract_m32n256k128",
             "family": "triton_explore",
-            "strategy": "bf16_dequant_matmul",
-            "BLOCK_M": 128,
+            "strategy": "contract_bf16_dequant_matmul",
+            "CONTRACT_NATIVE": True,
+            "BLOCK_M": 32,
+            "BLOCK_N": 256,
+            "BLOCK_K": 128,
+            "GROUP_M": 2,
+            "NUM_WARPS": 4,
+            "NUM_STAGES": 3,
+        },
+        {
+            "variant_name": "triton_contract_m64n128k64",
+            "family": "triton_explore",
+            "strategy": "contract_bf16_dequant_matmul",
+            "CONTRACT_NATIVE": True,
+            "BLOCK_M": 64,
             "BLOCK_N": 128,
-            "BLOCK_K": 32,
+            "BLOCK_K": 64,
             "GROUP_M": 4,
             "NUM_WARPS": 8,
             "NUM_STAGES": 2,
         },
         {
-            "variant_name": "triton_dq_mm_128x256x32",
+            "variant_name": "triton_contract_m64n256k128",
             "family": "triton_explore",
-            "strategy": "bf16_dequant_matmul",
-            "BLOCK_M": 128,
+            "strategy": "contract_bf16_dequant_matmul",
+            "CONTRACT_NATIVE": True,
+            "BLOCK_M": 64,
             "BLOCK_N": 256,
-            "BLOCK_K": 32,
+            "BLOCK_K": 128,
+            "GROUP_M": 4,
+            "NUM_WARPS": 8,
+            "NUM_STAGES": 3,
+        },
+        {
+            "variant_name": "triton_contract_m128n128k64",
+            "family": "triton_explore",
+            "strategy": "contract_bf16_dequant_matmul",
+            "CONTRACT_NATIVE": True,
+            "BLOCK_M": 128,
+            "BLOCK_N": 128,
+            "BLOCK_K": 64,
             "GROUP_M": 4,
             "NUM_WARPS": 8,
             "NUM_STAGES": 3,
@@ -70,12 +86,28 @@ SEARCH_SPACE: dict[str, list[dict[str, object]]] = {
             "strategy": "contract_anchor",
         },
         {
+            "variant_name": "routing_swiglu_128",
+            "family": "triton_explore",
+            "strategy": "routing_prototype",
+            "BLOCK_SIZE": 128,
+            "NUM_WARPS": 4,
+            "SORT_BY_EXPERT": True,
+        },
+        {
             "variant_name": "routing_swiglu_256",
             "family": "triton_explore",
             "strategy": "routing_prototype",
             "BLOCK_SIZE": 256,
             "NUM_WARPS": 4,
             "SORT_BY_EXPERT": True,
+        },
+        {
+            "variant_name": "routing_swiglu_256_unsorted",
+            "family": "triton_explore",
+            "strategy": "routing_prototype",
+            "BLOCK_SIZE": 256,
+            "NUM_WARPS": 4,
+            "SORT_BY_EXPERT": False,
         },
         {
             "variant_name": "routing_swiglu_512",
@@ -101,9 +133,21 @@ SEARCH_SPACE: dict[str, list[dict[str, object]]] = {
             "strategy": "contract_anchor",
         },
         {
-            "variant_name": "bf16_decode_b64_v64",
+            "variant_name": "fp8_decode_b32_v64",
             "family": "triton_explore",
-            "strategy": "bf16_decode",
+            "strategy": "fp8_decode",
+            "USE_FP8_INPUTS": True,
+            "BLOCK_N": 32,
+            "BLOCK_DQ": 64,
+            "BLOCK_DV": 64,
+            "NUM_WARPS": 4,
+            "NUM_STAGES": 2,
+        },
+        {
+            "variant_name": "fp8_decode_b64_v64",
+            "family": "triton_explore",
+            "strategy": "fp8_decode",
+            "USE_FP8_INPUTS": True,
             "BLOCK_N": 64,
             "BLOCK_DQ": 64,
             "BLOCK_DV": 64,
@@ -111,9 +155,10 @@ SEARCH_SPACE: dict[str, list[dict[str, object]]] = {
             "NUM_STAGES": 2,
         },
         {
-            "variant_name": "bf16_decode_b128_v64",
+            "variant_name": "fp8_decode_b128_v64",
             "family": "triton_explore",
-            "strategy": "bf16_decode",
+            "strategy": "fp8_decode",
+            "USE_FP8_INPUTS": True,
             "BLOCK_N": 128,
             "BLOCK_DQ": 64,
             "BLOCK_DV": 64,
@@ -121,14 +166,127 @@ SEARCH_SPACE: dict[str, list[dict[str, object]]] = {
             "NUM_STAGES": 2,
         },
         {
-            "variant_name": "bf16_decode_b128_v128",
+            "variant_name": "fp8_decode_b128_v128",
             "family": "triton_explore",
-            "strategy": "bf16_decode",
+            "strategy": "fp8_decode",
+            "USE_FP8_INPUTS": True,
             "BLOCK_N": 128,
             "BLOCK_DQ": 64,
             "BLOCK_DV": 128,
             "NUM_WARPS": 8,
             "NUM_STAGES": 2,
+        },
+    ],
+}
+
+
+POLICY_PROFILES: dict[str, list[dict[str, object]]] = {
+    "mxfp4_mm": [
+        {
+            "name": "contract_repair",
+            "family": "triton_explore",
+            "focus": "preserve shuffled MXFP4 semantics before tuning",
+            "preferred_variants": [
+                "triton_contract_m16n256k128",
+                "triton_contract_m32n256k128",
+            ],
+            "preferred_strategies": ["contract_bf16_dequant_matmul"],
+            "trigger_signals": ["contract_repair", "runtime_repair", "submission_repair"],
+        },
+        {
+            "name": "skinny_longk",
+            "family": "triton_explore",
+            "focus": "prioritize skinny-M long-K ranked cases first",
+            "preferred_variants": [
+                "triton_contract_m16n256k128",
+                "triton_contract_m32n256k128",
+                "triton_contract_m64n256k128",
+            ],
+            "preferred_strategies": ["contract_bf16_dequant_matmul"],
+            "trigger_signals": ["throughput_shift"],
+        },
+        {
+            "name": "balanced_tiles",
+            "family": "triton_explore",
+            "focus": "cover wider shapes once the skinny path is stable",
+            "preferred_variants": [
+                "triton_contract_m64n128k64",
+                "triton_contract_m128n128k64",
+                "triton_contract_m64n256k128",
+            ],
+            "preferred_strategies": ["contract_bf16_dequant_matmul"],
+            "trigger_signals": ["throughput_shift", "latency_repair"],
+        },
+    ],
+    "moe_mxfp4": [
+        {
+            "name": "contract_repair",
+            "family": "triton_explore",
+            "focus": "stabilize routing and shuffled-weight semantics",
+            "preferred_variants": [
+                "routing_swiglu_128",
+                "routing_swiglu_256",
+            ],
+            "preferred_strategies": ["routing_prototype"],
+            "trigger_signals": ["contract_repair", "runtime_repair", "submission_repair"],
+        },
+        {
+            "name": "routing_balance",
+            "family": "triton_explore",
+            "focus": "test safer grouped-routing schedules first",
+            "preferred_variants": [
+                "routing_swiglu_256",
+                "routing_swiglu_256_unsorted",
+                "routing_swiglu_512",
+            ],
+            "preferred_strategies": ["routing_prototype"],
+            "trigger_signals": ["throughput_shift"],
+        },
+        {
+            "name": "routing_throughput",
+            "family": "triton_explore",
+            "focus": "push larger routing/fusion blocks after correctness is stable",
+            "preferred_variants": [
+                "routing_swiglu_512",
+                "routing_swiglu_1024",
+            ],
+            "preferred_strategies": ["routing_prototype"],
+            "trigger_signals": ["throughput_shift", "latency_repair"],
+        },
+    ],
+    "mixed_mla": [
+        {
+            "name": "contract_repair",
+            "family": "triton_explore",
+            "focus": "preserve FP8 MLA decode semantics before widening tiles",
+            "preferred_variants": [
+                "fp8_decode_b32_v64",
+                "fp8_decode_b64_v64",
+            ],
+            "preferred_strategies": ["fp8_decode"],
+            "trigger_signals": ["contract_repair", "runtime_repair", "submission_repair"],
+        },
+        {
+            "name": "latency_small_block",
+            "family": "triton_explore",
+            "focus": "reduce small-batch overhead and keep q_seq_len=1 path lean",
+            "preferred_variants": [
+                "fp8_decode_b32_v64",
+                "fp8_decode_b64_v64",
+            ],
+            "preferred_strategies": ["fp8_decode"],
+            "trigger_signals": ["throughput_shift", "latency_repair"],
+        },
+        {
+            "name": "long_kv_throughput",
+            "family": "triton_explore",
+            "focus": "push bigger tiles on long-KV cases after correctness is stable",
+            "preferred_variants": [
+                "fp8_decode_b128_v64",
+                "fp8_decode_b128_v128",
+            ],
+            "preferred_strategies": ["fp8_decode"],
+            "trigger_signals": ["throughput_shift"],
         },
     ],
 }
@@ -168,14 +326,88 @@ def history_entries(context: dict[str, object]) -> list[dict[str, object]]:
     return [entry for entry in raw if isinstance(entry, dict)]
 
 
+def choose_policy_profile(
+    problem_key: str,
+    attempt: int,
+    parent_meta: dict[str, object] | None,
+    history: list[dict[str, object]],
+    desired_family: str | None = None,
+) -> dict[str, object]:
+    profiles = POLICY_PROFILES[problem_key]
+    if desired_family:
+        filtered = [profile for profile in profiles if profile.get("family") == desired_family]
+        if filtered:
+            profiles = filtered
+
+    usage_counts: Counter[str] = Counter()
+    signal_counts: Counter[str] = Counter()
+    last_profile_name: str | None = None
+    last_status: str | None = None
+    for entry in history:
+        meta = entry.get("meta")
+        if isinstance(meta, dict):
+            policy_profile = meta.get("policy_profile")
+            if isinstance(policy_profile, dict):
+                name = policy_profile.get("name")
+                if isinstance(name, str) and name:
+                    usage_counts[name] += 1
+                    if last_profile_name is None:
+                        last_profile_name = name
+        if last_status is None and isinstance(entry.get("status"), str):
+            last_status = str(entry["status"])
+        critique = entry.get("critique")
+        if isinstance(critique, dict):
+            signal = critique.get("policy_signal")
+            if isinstance(signal, str) and signal:
+                signal_counts[signal] += 1
+
+    target_signal: str | None = None
+    if signal_counts:
+        target_signal = signal_counts.most_common(1)[0][0]
+    parent_profile_name: str | None = None
+    if isinstance(parent_meta, dict):
+        parent_profile = parent_meta.get("policy_profile")
+        if isinstance(parent_profile, dict):
+            name = parent_profile.get("name")
+            if isinstance(name, str) and name:
+                parent_profile_name = name
+
+    def profile_sort_key(profile: dict[str, object]) -> tuple[int, int, int, int, int, str]:
+        name = str(profile.get("name", ""))
+        trigger_signals = profile.get("trigger_signals")
+        signal_match = 0
+        if isinstance(trigger_signals, list) and target_signal in trigger_signals:
+            signal_match = -2
+        reuse_bonus = 0
+        if last_status == "ok" and name == last_profile_name:
+            reuse_bonus = -1
+        elif last_status not in {None, "ok"} and name == last_profile_name:
+            reuse_bonus = 1
+        parent_bonus = -1 if name == parent_profile_name else 0
+        return (
+            signal_match,
+            reuse_bonus,
+            parent_bonus,
+            usage_counts[name],
+            attempt % max(len(profiles), 1),
+            name,
+        )
+
+    return min(profiles, key=profile_sort_key)
+
+
 def choose_variant(
     problem_key: str,
     attempt: int,
     parent_meta: dict[str, object] | None,
     history: list[dict[str, object]],
+    policy_profile: dict[str, object] | None = None,
+    desired_family: str | None = None,
 ) -> tuple[int, dict[str, object]]:
     variants = SEARCH_SPACE[problem_key]
     counts: Counter[int] = Counter()
+    fail_counts: Counter[int] = Counter()
+    ok_counts: Counter[int] = Counter()
     ok_indices: set[int] = set()
     for entry in history:
         meta = entry.get("meta")
@@ -185,13 +417,45 @@ def choose_variant(
                 counts[index] += 1
                 if entry.get("status") == "ok":
                     ok_indices.add(index)
+                    ok_counts[index] += 1
+                else:
+                    fail_counts[index] += 1
 
     anchor_indices = [index for index, variant in enumerate(variants) if variant.get("family") == "anchor"]
     explore_indices = [index for index, variant in enumerate(variants) if variant.get("family") != "anchor"]
+    if desired_family:
+        family_indices = [
+            index for index, variant in enumerate(variants) if variant.get("family") == desired_family
+        ]
+        if family_indices:
+            center = 0
+            if parent_meta and isinstance(parent_meta.get("variant_index"), int):
+                center = int(parent_meta["variant_index"])
+            elif family_indices:
+                center = family_indices[0]
+            return _pick_variant(
+                family_indices,
+                counts,
+                fail_counts,
+                ok_counts,
+                attempt,
+                center,
+                variants,
+                policy_profile=policy_profile,
+            )
 
     if not ok_indices:
         indices = anchor_indices or list(range(len(variants)))
-        return _pick_variant(indices, counts, attempt, anchor_indices[0] if anchor_indices else 0, variants)
+        return _pick_variant(
+            indices,
+            counts,
+            fail_counts,
+            ok_counts,
+            attempt,
+            anchor_indices[0] if anchor_indices else 0,
+            variants,
+            policy_profile=policy_profile,
+        )
 
     center = 0
     if parent_meta and isinstance(parent_meta.get("variant_index"), int):
@@ -199,19 +463,61 @@ def choose_variant(
     elif ok_indices:
         center = min(ok_indices)
     indices = explore_indices or list(range(len(variants)))
-    return _pick_variant(indices, counts, attempt, center, variants)
+    return _pick_variant(
+        indices,
+        counts,
+        fail_counts,
+        ok_counts,
+        attempt,
+        center,
+        variants,
+        policy_profile=policy_profile,
+    )
 
 
 def _pick_variant(
     indices: list[int],
     counts: Counter[int],
+    fail_counts: Counter[int],
+    ok_counts: Counter[int],
     attempt: int,
     center: int,
     variants: list[dict[str, object]],
+    policy_profile: dict[str, object] | None = None,
 ) -> tuple[int, dict[str, object]]:
+    def failure_penalty(index: int) -> int:
+        return max(fail_counts[index] - ok_counts[index], 0)
+
+    preferred_variants: list[str] = []
+    preferred_strategies: list[str] = []
+    if isinstance(policy_profile, dict):
+        raw_variants = policy_profile.get("preferred_variants")
+        if isinstance(raw_variants, list):
+            preferred_variants = [str(value) for value in raw_variants]
+        raw_strategies = policy_profile.get("preferred_strategies")
+        if isinstance(raw_strategies, list):
+            preferred_strategies = [str(value) for value in raw_strategies]
+
+    preferred_variant_rank = {name: idx for idx, name in enumerate(preferred_variants)}
+    preferred_strategy_rank = {name: idx for idx, name in enumerate(preferred_strategies)}
+
+    def profile_rank(index: int) -> tuple[int, int]:
+        variant = variants[index]
+        variant_name = str(variant.get("variant_name", ""))
+        strategy = str(variant.get("strategy", ""))
+        variant_rank = preferred_variant_rank.get(variant_name, len(preferred_variant_rank) + 1)
+        strategy_rank = preferred_strategy_rank.get(strategy, len(preferred_strategy_rank) + 1)
+        return (variant_rank, strategy_rank)
+
     sorted_indices = sorted(
         indices,
-        key=lambda index: (counts[index], _circular_distance(index, center, len(variants)), index),
+        key=lambda index: (
+            failure_penalty(index),
+            profile_rank(index),
+            counts[index],
+            _circular_distance(index, center, len(variants)),
+            index,
+        ),
     )
     if not sorted_indices:
         raise RuntimeError("no variants available")
@@ -230,6 +536,7 @@ def render_submission(
     variant: dict[str, object],
     context: dict[str, object],
     attempt: int,
+    policy_profile: dict[str, object] | None = None,
 ) -> str:
     meta = {
         "problem": problem_key,
@@ -239,6 +546,13 @@ def render_submission(
         "variant_index": variant_index,
         "variant": variant,
     }
+    if isinstance(policy_profile, dict):
+        meta["policy_profile"] = {
+            "name": policy_profile.get("name"),
+            "family": policy_profile.get("family"),
+            "focus": policy_profile.get("focus"),
+            "trigger_signals": policy_profile.get("trigger_signals"),
+        }
     if problem_key == "mxfp4_mm":
         if variant.get("family") == "anchor":
             return render_mxfp4_mm_anchor(meta)
@@ -289,8 +603,6 @@ def render_mxfp4_mm_triton(meta: dict[str, object], variant: dict[str, object]) 
         #!POPCORN leaderboard amd-mxfp4-mm
         #!POPCORN gpu MI355X
         # AGENT_LOOP_META: __META__
-        import weakref
-
         import aiter
         from aiter import QuantType
         from aiter.utility import fp4_utils
@@ -301,7 +613,6 @@ def render_mxfp4_mm_triton(meta: dict[str, object], variant: dict[str, object]) 
 
         CONFIG = __CONFIG__
         SCALE_GROUP = 32
-        _DQ_CACHE: dict[tuple[str, int], tuple[weakref.ReferenceType[torch.Tensor], torch.Tensor]] = {}
 
 
         def _dequantize_matrix(fp4_packed: torch.Tensor, scale_e8m0: torch.Tensor) -> torch.Tensor:
@@ -312,20 +623,16 @@ def render_mxfp4_mm_triton(meta: dict[str, object], variant: dict[str, object]) 
             return (values * scale).to(torch.bfloat16)
 
 
-        def _quantize_and_dequantize(matrix: torch.Tensor, label: str) -> torch.Tensor:
-            key = (label, id(matrix))
-            cached = _DQ_CACHE.get(key)
-            if cached is not None:
-                matrix_ref, value = cached
-                if matrix_ref() is matrix:
-                    return value
-            if len(_DQ_CACHE) > 32:
-                _DQ_CACHE.clear()
-            quant = aiter.get_triton_quant(QuantType.per_1x32)
-            packed, scale = quant(matrix.contiguous(), shuffle=False)
-            dequantized = _dequantize_matrix(packed, scale)
-            _DQ_CACHE[key] = (weakref.ref(matrix), dequantized)
-            return dequantized
+        def _quantize_and_dequantize(matrix: torch.Tensor, label: str, *, shuffle: bool) -> torch.Tensor:
+            del label
+            return _dequantize_matrix(
+                *aiter.get_triton_quant(QuantType.per_1x32)(matrix.contiguous(), shuffle=shuffle)
+            )
+
+
+        def _dequantize_contract_tensor(fp4_packed: torch.Tensor, scale_e8m0: torch.Tensor, label: str) -> torch.Tensor:
+            del label
+            return _dequantize_matrix(fp4_packed.contiguous(), scale_e8m0.contiguous())
 
 
         @triton.jit
@@ -377,9 +684,13 @@ def render_mxfp4_mm_triton(meta: dict[str, object], variant: dict[str, object]) 
 
         def custom_kernel(data: input_t) -> output_t:
             a, b, b_q, b_shuffle, b_scale_sh = data
-            del b_q, b_shuffle, b_scale_sh
-            a_dq = _quantize_and_dequantize(a, "a")
-            b_dq = _quantize_and_dequantize(b, "b")
+            del b_q
+            if CONFIG.get("CONTRACT_NATIVE", False):
+                a_dq = _quantize_and_dequantize(a, "a_contract", shuffle=True)
+                b_dq = _dequantize_contract_tensor(b_shuffle, b_scale_sh, "b_contract")
+            else:
+                a_dq = _quantize_and_dequantize(a, "a", shuffle=False)
+                b_dq = _quantize_and_dequantize(b, "b", shuffle=False)
 
             m, k = a_dq.shape
             n = b_dq.shape[0]
@@ -476,35 +787,29 @@ def render_moe_mxfp4_triton(meta: dict[str, object], variant: dict[str, object])
 
         CONFIG = __CONFIG__
         MXFP4_BLOCK = 32
-        _WEIGHT_CACHE: dict[tuple[int, int, tuple[int, ...], tuple[int, ...], int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
 
         def _dequant_matrix(weight_fp4: torch.Tensor, scale_e8m0: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
             values = fp4_utils.mxfp4_to_f32(weight_fp4)
             scale = fp4_utils.e8m0_to_f32(scale_e8m0)
+            if scale.ndim == 0:
+                scale = scale.reshape(1, 1)
+            elif scale.ndim == 1:
+                if scale.numel() % max(values.shape[0], 1) == 0:
+                    scale = scale.reshape(values.shape[0], -1)
+                else:
+                    scale = scale.reshape(1, -1).expand(values.shape[0], -1)
             scale = scale[: values.shape[0], :].repeat_interleave(MXFP4_BLOCK, dim=1)[:, : values.shape[1]]
             return (values * scale)[:rows, :cols].to(torch.bfloat16)
 
 
-        def _load_cached_weights(
+        def _load_weights(
             gate_up_weight: torch.Tensor,
             down_weight: torch.Tensor,
             gate_up_weight_scale: torch.Tensor,
             down_weight_scale: torch.Tensor,
             config: dict,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            key = (
-                gate_up_weight.data_ptr(),
-                down_weight.data_ptr(),
-                tuple(gate_up_weight.shape),
-                tuple(down_weight.shape),
-                int(config["d_hidden"]),
-                int(config["d_expert"]),
-            )
-            cached = _WEIGHT_CACHE.get(key)
-            if cached is not None:
-                return cached
-
             experts = gate_up_weight.shape[0]
             d_hidden = int(config["d_hidden"])
             d_expert = int(config["d_expert"])
@@ -530,13 +835,11 @@ def render_moe_mxfp4_triton(meta: dict[str, object], variant: dict[str, object])
                 )
                 down_w.append(down_part.contiguous())
 
-            packed = (
+            return (
                 torch.stack(gate_w),
                 torch.stack(up_w),
                 torch.stack(down_w),
             )
-            _WEIGHT_CACHE[key] = packed
-            return packed
 
 
         @triton.jit
@@ -584,7 +887,7 @@ def render_moe_mxfp4_triton(meta: dict[str, object], variant: dict[str, object])
             del gate_up_weight_shuffled, down_weight_shuffled
             del gate_up_weight_scale_shuffled, down_weight_scale_shuffled
 
-            gate_w, up_w, down_w = _load_cached_weights(
+            gate_w, up_w, down_w = _load_weights(
                 gate_up_weight,
                 down_weight,
                 gate_up_weight_scale,
@@ -801,6 +1104,7 @@ def render_mixed_mla_triton(meta: dict[str, object], variant: dict[str, object])
         #!POPCORN gpu MI355X
         # AGENT_LOOP_META: __META__
         import torch
+        from aiter import dtypes as aiter_dtypes
         import triton
         import triton.language as tl
         from task import input_t, output_t
@@ -808,6 +1112,24 @@ def render_mixed_mla_triton(meta: dict[str, object], variant: dict[str, object])
         CONFIG = __CONFIG__
         QK_HEAD_DIM = 576
         V_HEAD_DIM = 512
+        FP8_DTYPE = aiter_dtypes.fp8
+
+
+        def quantize_fp8(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            finfo = torch.finfo(FP8_DTYPE)
+            amax = tensor.abs().amax().clamp(min=1e-12)
+            scale = amax / finfo.max
+            fp8_tensor = (tensor / scale).clamp(min=finfo.min, max=finfo.max).to(FP8_DTYPE)
+            return fp8_tensor, scale.to(torch.float32).reshape(1)
+
+
+        def _apply_scale(tensor: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+            scaled = tensor.to(torch.float32)
+            scale_f32 = scale.to(torch.float32)
+            if scale_f32.numel() == 1:
+                return (scaled * scale_f32.reshape(1)).to(torch.bfloat16)
+            shape = tuple(scale_f32.shape) + (1,) * max(scaled.ndim - scale_f32.ndim, 0)
+            return (scaled * scale_f32.reshape(shape)).to(torch.bfloat16)
 
 
         @triton.jit
@@ -828,6 +1150,8 @@ def render_mixed_mla_triton(meta: dict[str, object], variant: dict[str, object])
             out_stride_h,
             out_stride_d,
             sm_scale,
+            QK_HEAD_DIM: tl.constexpr,
+            V_HEAD_DIM: tl.constexpr,
             BLOCK_N: tl.constexpr,
             BLOCK_DQ: tl.constexpr,
             BLOCK_DV: tl.constexpr,
@@ -886,8 +1210,14 @@ def render_mixed_mla_triton(meta: dict[str, object], variant: dict[str, object])
             if int(config["q_seq_len"]) != 1:
                 raise RuntimeError("This baseline expects q_seq_len == 1")
 
-            kv = kv_data["bf16"].contiguous()
-            q = q.contiguous()
+            if CONFIG.get("USE_FP8_INPUTS", False):
+                q_fp8, q_scale = quantize_fp8(q)
+                kv_fp8, kv_scale = kv_data["fp8"]
+                q = _apply_scale(q_fp8, q_scale).contiguous()
+                kv = _apply_scale(kv_fp8, kv_scale).contiguous()
+            else:
+                kv = kv_data["bf16"].contiguous()
+                q = q.contiguous()
             total_q, num_heads, _ = q.shape
             out = torch.empty((total_q, num_heads, V_HEAD_DIM), dtype=torch.bfloat16, device=q.device)
             grid = (total_q * num_heads, triton.cdiv(V_HEAD_DIM, CONFIG["BLOCK_DV"]))
@@ -908,6 +1238,8 @@ def render_mixed_mla_triton(meta: dict[str, object], variant: dict[str, object])
                 out.stride(1),
                 out.stride(2),
                 float(config["sm_scale"]),
+                QK_HEAD_DIM=QK_HEAD_DIM,
+                V_HEAD_DIM=V_HEAD_DIM,
                 BLOCK_N=CONFIG["BLOCK_N"],
                 BLOCK_DQ=CONFIG["BLOCK_DQ"],
                 BLOCK_DV=CONFIG["BLOCK_DV"],
@@ -931,8 +1263,33 @@ def main() -> int:
     parent_meta = load_parent_meta(Path(args.parent))
     problem_key = str(context["problem"]["key"])
     attempt = candidate_attempt(context)
-    variant_index, variant = choose_variant(problem_key, attempt, parent_meta, history_entries(context))
-    submission = render_submission(problem_key, variant_index, variant, context, attempt)
+    history = history_entries(context)
+    desired_family = context.get("desired_family")
+    if not isinstance(desired_family, str):
+        desired_family = None
+    policy_profile = choose_policy_profile(
+        problem_key,
+        attempt,
+        parent_meta,
+        history,
+        desired_family=desired_family,
+    )
+    variant_index, variant = choose_variant(
+        problem_key,
+        attempt,
+        parent_meta,
+        history,
+        policy_profile=policy_profile,
+        desired_family=desired_family,
+    )
+    submission = render_submission(
+        problem_key,
+        variant_index,
+        variant,
+        context,
+        attempt,
+        policy_profile=policy_profile,
+    )
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

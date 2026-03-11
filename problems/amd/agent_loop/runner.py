@@ -21,10 +21,14 @@ META_RE = re.compile(r"^# AGENT_LOOP_META:\s*(\{.*\})\s*$", re.MULTILINE)
 class LoopSummary:
     problem: str
     candidate_id: str
+    mode: str
     status: str
     objective: float | None
     improved: bool
     promoted: bool
+    variant_family: str | None = None
+    variant_name: str | None = None
+    policy_profile_name: str | None = None
 
 
 class ClosedLoopRunner:
@@ -37,11 +41,11 @@ class ClosedLoopRunner:
 
     def ensure_baseline(self, problem_key: str) -> str:
         problem = self.config.require_problem(problem_key)
-        latest = self.store.latest_candidate(problem_key)
         current_source = problem.submission_path.read_text(encoding="utf-8")
         current_hash = sha256_text(current_source)
-        if latest and latest.source_sha256 == current_hash:
-            return latest.candidate_id
+        existing = self.store.latest_candidate_by_hash(problem_key, current_hash)
+        if existing is not None:
+            return existing.candidate_id
 
         candidate_id = new_candidate_id()
         candidate_dir = self.store.candidate_dir(problem_key, candidate_id)
@@ -99,6 +103,14 @@ class ClosedLoopRunner:
     def run_baseline(self, problem_key: str, mode: str | None = None) -> LoopSummary:
         candidate_id = self.ensure_baseline(problem_key)
         result = self.evaluate_candidate(problem_key, candidate_id, mode=mode)
+        problem = self.config.require_problem(problem_key)
+        selected_mode = mode or problem.mode
+        candidate_meta = self._load_candidate_meta(Path(self._require_candidate(candidate_id).source_path)) or {}
+        variant = candidate_meta.get("variant")
+        variant_family = variant.get("family") if isinstance(variant, dict) else None
+        variant_name = variant.get("variant_name") if isinstance(variant, dict) else None
+        policy_profile = candidate_meta.get("policy_profile")
+        policy_profile_name = policy_profile.get("name") if isinstance(policy_profile, dict) else None
         improved = False
         promoted = False
         if result.status == "ok" and result.objective is not None:
@@ -110,10 +122,14 @@ class ClosedLoopRunner:
         return LoopSummary(
             problem=problem_key,
             candidate_id=candidate_id,
+            mode=selected_mode,
             status=result.status,
             objective=result.objective,
             improved=improved,
             promoted=promoted,
+            variant_family=variant_family if isinstance(variant_family, str) else None,
+            variant_name=variant_name if isinstance(variant_name, str) else None,
+            policy_profile_name=policy_profile_name if isinstance(policy_profile_name, str) else None,
         )
 
     def run_iteration(
@@ -121,11 +137,15 @@ class ClosedLoopRunner:
         problem_key: str,
         hypothesis: str | None = None,
         mutator_command: str | None = None,
+        mode: str | None = None,
+        desired_family: str | None = None,
     ) -> LoopSummary:
         problem = self.config.require_problem(problem_key)
+        selected_mode = mode or problem.mode
         parent = self.store.get_best_candidate(problem_key)
         if parent is None:
-            parent = self._require_candidate(self.ensure_baseline(problem_key))
+            baseline_summary = self.run_baseline(problem_key, mode=selected_mode)
+            parent = self._require_candidate(baseline_summary.candidate_id)
 
         candidate_id = new_candidate_id()
         candidate_dir = self.store.candidate_dir(problem_key, candidate_id)
@@ -139,7 +159,7 @@ class ClosedLoopRunner:
                 "key": problem.key,
                 "leaderboard": problem.leaderboard,
                 "gpu": problem.gpu,
-                "mode": problem.mode,
+                "mode": selected_mode,
                 "objective": problem.objective,
             },
             "parent": {
@@ -152,6 +172,7 @@ class ClosedLoopRunner:
             "workspace_root": str(self.config.workspace.root),
             "history": self._candidate_history(problem_key, limit=12),
             "knowledge_path": str(memory_path),
+            "desired_family": desired_family,
         }
         context_path.write_text(json.dumps(context, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -180,8 +201,14 @@ class ClosedLoopRunner:
             source_path=output_path,
             source_sha256=sha256_text(source_text),
         )
+        candidate_meta = self._load_candidate_meta(output_path) or {}
+        variant = candidate_meta.get("variant")
+        variant_family = variant.get("family") if isinstance(variant, dict) else None
+        variant_name = variant.get("variant_name") if isinstance(variant, dict) else None
+        policy_profile = candidate_meta.get("policy_profile")
+        policy_profile_name = policy_profile.get("name") if isinstance(policy_profile, dict) else None
 
-        result = self.evaluate_candidate(problem_key, candidate_id)
+        result = self.evaluate_candidate(problem_key, candidate_id, mode=selected_mode)
         improved = False
         promoted = False
         best = self.store.get_best_candidate(problem_key)
@@ -194,10 +221,14 @@ class ClosedLoopRunner:
         return LoopSummary(
             problem=problem_key,
             candidate_id=candidate_id,
+            mode=selected_mode,
             status=result.status,
             objective=result.objective,
             improved=improved,
             promoted=promoted,
+            variant_family=variant_family if isinstance(variant_family, str) else None,
+            variant_name=variant_name if isinstance(variant_name, str) else None,
+            policy_profile_name=policy_profile_name if isinstance(policy_profile_name, str) else None,
         )
 
     def promote_candidate(self, problem_key: str, candidate_id: str) -> None:
@@ -313,19 +344,33 @@ class ClosedLoopRunner:
         history = self._candidate_history(problem_key, limit=20)
         status_counts: dict[str, int] = {}
         failure_counts: dict[str, int] = {}
+        policy_signal_counts: dict[str, int] = {}
+        policy_profile_counts: dict[str, int] = {}
         for entry in history:
             status = str(entry.get("status") or "unknown")
             status_counts[status] = status_counts.get(status, 0) + 1
+            meta = entry.get("meta")
+            if isinstance(meta, dict):
+                policy_profile = meta.get("policy_profile")
+                if isinstance(policy_profile, dict):
+                    profile_name = policy_profile.get("name")
+                    if isinstance(profile_name, str) and profile_name:
+                        policy_profile_counts[profile_name] = policy_profile_counts.get(profile_name, 0) + 1
             critique = entry.get("critique")
             if isinstance(critique, dict):
                 failure_kind = critique.get("failure_kind")
                 if isinstance(failure_kind, str) and failure_kind:
                     failure_counts[failure_kind] = failure_counts.get(failure_kind, 0) + 1
+                policy_signal = critique.get("policy_signal")
+                if isinstance(policy_signal, str) and policy_signal:
+                    policy_signal_counts[policy_signal] = policy_signal_counts.get(policy_signal, 0) + 1
 
         payload = {
             "problem": problem_key,
             "status_counts": status_counts,
             "failure_counts": failure_counts,
+            "policy_signal_counts": policy_signal_counts,
+            "policy_profile_counts": policy_profile_counts,
             "history": history,
         }
         path = self._problem_dir(problem_key) / "knowledge.json"

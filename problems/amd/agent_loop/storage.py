@@ -53,8 +53,11 @@ class ExperimentStore:
         self.root = root
         self.db_path = root / "state.sqlite3"
         self.root.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
+        self.conn = sqlite3.connect(self.db_path, timeout=60.0)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=60000")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self._init_schema()
 
     def close(self) -> None:
@@ -226,6 +229,20 @@ class ExperimentStore:
             return None
         return self._candidate_from_row(row)
 
+    def latest_candidate_by_hash(self, problem_key: str, source_sha256: str) -> CandidateRow | None:
+        row = self.conn.execute(
+            """
+            SELECT * FROM candidates
+            WHERE problem_key = ? AND source_sha256 = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (problem_key, source_sha256),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._candidate_from_row(row)
+
     def recent_candidates(self, problem_key: str, limit: int = 10) -> list[CandidateRow]:
         rows = self.conn.execute(
             """
@@ -296,4 +313,3 @@ class ExperimentStore:
             """
         )
         self.conn.commit()
-

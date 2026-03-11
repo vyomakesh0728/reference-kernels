@@ -22,6 +22,7 @@ BENCHMARK_CASE_RE = re.compile(
 MEASURE_RE = re.compile(r"⏱\s*(?P<mean>[0-9.]+)\s*±\s*(?P<std>[0-9.]+)\s*(?P<unit>ns|µs|us|ms|s)")
 MISMATCH_RE = re.compile(r"Number of mismatched elements:\s*(\d+)")
 RUNTIME_ERROR_RE = re.compile(r"RuntimeError:\s*(.+)")
+SECTION_RE = re.compile(r"^##\s+(Benchmarks|Ranked Benchmark):\s*$")
 
 
 @dataclass(frozen=True)
@@ -239,58 +240,170 @@ def _parse_kernelbot_markdown(text: str) -> dict[str, object]:
         parsed["failure_signature"] = runtime_error
         parsed.setdefault("failure_kind", "runtime_error")
 
-    benchmarks: list[dict[str, object]] = []
-    current: dict[str, object] | None = None
-    for line in lines:
-        case_match = BENCHMARK_CASE_RE.match(line.strip())
-        if case_match:
-            if current is not None:
-                benchmarks.append(current)
-            current = {
-                "k": int(case_match.group("k")),
-                "m": int(case_match.group("m")),
-                "n": int(case_match.group("n")),
-                "seed": int(case_match.group("seed")),
-                "status": "fail" if case_match.group("failed") or "failed testing" in case_match.group("suffix") else "pending",
-            }
-            continue
+    benchmark_sections = _parse_benchmark_sections(lines)
+    benchmark_cases = benchmark_sections.get("benchmark", [])
+    ranked_cases = benchmark_sections.get("ranked_benchmark", [])
 
-        if current is None:
-            continue
+    if benchmark_cases:
+        parsed["benchmarks"] = benchmark_cases
+        parsed.update(_summarize_section("benchmark", benchmark_cases))
 
-        measure_match = MEASURE_RE.search(line)
-        if measure_match:
-            mean = float(measure_match.group("mean"))
-            unit = measure_match.group("unit")
-            current["mean_ns"] = _to_ns(mean, unit)
-            current["status"] = "pass"
-            continue
+    if ranked_cases:
+        parsed["ranked_benchmarks"] = ranked_cases
+        parsed.update(_summarize_section("ranked_benchmark", ranked_cases))
 
-        if "failed testing" in line:
-            current["status"] = "fail"
-
-    if current is not None:
-        benchmarks.append(current)
-
-    if benchmarks:
-        parsed["benchmarks"] = benchmarks
-        pass_means = [float(case["mean_ns"]) for case in benchmarks if isinstance(case.get("mean_ns"), (int, float))]
-        pass_count = sum(1 for case in benchmarks if case.get("status") == "pass")
-        fail_count = sum(1 for case in benchmarks if case.get("status") == "fail")
-        parsed["benchmark_case_count"] = len(benchmarks)
-        parsed["benchmark_pass_count"] = pass_count
-        parsed["benchmark_fail_count"] = fail_count
-        if pass_means:
-            parsed["partial_geom_mean_ns"] = _geometric_mean(pass_means)
-            parsed["partial_mean_of_means_ns"] = statistics.fmean(pass_means)
-        if pass_means and fail_count == 0:
-            parsed["geom_mean_ns"] = _geometric_mean(pass_means)
-            parsed["mean_of_means_ns"] = statistics.fmean(pass_means)
+    if "ranked_benchmark_geom_mean_ns" in parsed:
+        parsed["geom_mean_ns"] = parsed["ranked_benchmark_geom_mean_ns"]
+        parsed["mean_of_means_ns"] = parsed["ranked_benchmark_mean_of_means_ns"]
+        parsed["partial_geom_mean_ns"] = parsed["ranked_benchmark_partial_geom_mean_ns"]
+        parsed["partial_mean_of_means_ns"] = parsed["ranked_benchmark_partial_mean_of_means_ns"]
+        parsed["objective_section"] = "ranked_benchmark"
+        if parsed.get("ranked_benchmark_fail_count", 0) == 0:
             parsed["check"] = "pass"
-        elif fail_count > 0:
-            parsed["check"] = "fail"
+    elif "benchmark_geom_mean_ns" in parsed:
+        parsed["geom_mean_ns"] = parsed["benchmark_geom_mean_ns"]
+        parsed["mean_of_means_ns"] = parsed["benchmark_mean_of_means_ns"]
+        parsed["partial_geom_mean_ns"] = parsed["benchmark_partial_geom_mean_ns"]
+        parsed["partial_mean_of_means_ns"] = parsed["benchmark_partial_mean_of_means_ns"]
+        parsed["objective_section"] = "benchmark"
+        if parsed.get("benchmark_fail_count", 0) == 0:
+            parsed["check"] = "pass"
+
+    if parsed.get("ranked_benchmark_fail_count", 0) > 0 or parsed.get("benchmark_fail_count", 0) > 0:
+        parsed["check"] = "fail"
 
     return parsed
+
+
+def _parse_benchmark_sections(lines: list[str]) -> dict[str, list[dict[str, object]]]:
+    sections: dict[str, list[dict[str, object]]] = {
+        "benchmark": [],
+        "ranked_benchmark": [],
+    }
+    current_section: str | None = None
+    in_code = False
+    current_case: dict[str, object] | None = None
+
+    def flush() -> None:
+        nonlocal current_case
+        if current_section and current_case is not None:
+            sections[current_section].append(current_case)
+            current_case = None
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        section_match = SECTION_RE.match(stripped)
+        if section_match:
+            flush()
+            current_section = (
+                "ranked_benchmark"
+                if section_match.group(1) == "Ranked Benchmark"
+                else "benchmark"
+            )
+            in_code = False
+            continue
+
+        if current_section is None:
+            continue
+
+        if stripped == "```":
+            if in_code:
+                flush()
+            in_code = not in_code
+            continue
+
+        if not in_code:
+            continue
+
+        if not stripped:
+            continue
+
+        if "failed testing" in stripped and current_case is not None:
+            current_case["status"] = "fail"
+            continue
+
+        measure_match = MEASURE_RE.search(stripped)
+        if measure_match and current_case is not None:
+            mean = float(measure_match.group("mean"))
+            current_case["mean_ns"] = _to_ns(mean, measure_match.group("unit"))
+            current_case["status"] = "pass"
+            continue
+
+        case_data = _parse_case_line(stripped)
+        if case_data is not None:
+            flush()
+            current_case = case_data
+
+    flush()
+    return sections
+
+
+def _parse_case_line(line: str) -> dict[str, object] | None:
+    if line.startswith("⚡") or line.startswith(">"):
+        return None
+
+    legacy_match = BENCHMARK_CASE_RE.match(line)
+    if legacy_match:
+        return {
+            "k": int(legacy_match.group("k")),
+            "m": int(legacy_match.group("m")),
+            "n": int(legacy_match.group("n")),
+            "seed": int(legacy_match.group("seed")),
+            "status": "fail"
+            if legacy_match.group("failed") or "failed testing" in legacy_match.group("suffix")
+            else "pending",
+        }
+
+    normalized = line
+    initial_status = "pending"
+    if normalized.startswith("❌ "):
+        normalized = normalized[2:].strip()
+        initial_status = "fail"
+    elif normalized.startswith("✅ "):
+        normalized = normalized[2:].strip()
+
+    if ":" not in normalized:
+        return None
+
+    fields: dict[str, object] = {}
+    for chunk in normalized.split(";"):
+        piece = chunk.strip()
+        if not piece or ":" not in piece:
+            continue
+        key, value = piece.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        fields[key] = _coerce_value(value)
+
+    if not fields:
+        return None
+
+    fields["status"] = initial_status
+    return fields
+
+
+def _summarize_section(prefix: str, cases: list[dict[str, object]]) -> dict[str, object]:
+    summary: dict[str, object] = {
+        f"{prefix}_case_count": len(cases),
+    }
+    pass_means = [
+        float(case["mean_ns"])
+        for case in cases
+        if isinstance(case.get("mean_ns"), (int, float))
+    ]
+    pass_count = sum(1 for case in cases if case.get("status") == "pass")
+    fail_count = sum(1 for case in cases if case.get("status") == "fail")
+    summary[f"{prefix}_pass_count"] = pass_count
+    summary[f"{prefix}_fail_count"] = fail_count
+    if pass_means:
+        summary[f"{prefix}_partial_geom_mean_ns"] = _geometric_mean(pass_means)
+        summary[f"{prefix}_partial_mean_of_means_ns"] = statistics.fmean(pass_means)
+        if fail_count == 0:
+            summary[f"{prefix}_geom_mean_ns"] = _geometric_mean(pass_means)
+            summary[f"{prefix}_mean_of_means_ns"] = statistics.fmean(pass_means)
+    return summary
 
 
 def _to_ns(value: float, unit: str) -> float:

@@ -19,6 +19,8 @@ class EvaluationCritique:
     benchmark_pass_count: int
     benchmark_fail_count: int
     workflow_url: str | None
+    policy_signal: str | None
+    policy_rationale: str | None
     next_actions: list[str]
 
 
@@ -35,6 +37,8 @@ def build_critique(
 
     failure_kind = _as_str(metrics.get("failure_kind"))
     failure_signature = _as_str(metrics.get("failure_signature"))
+    policy_signal: str | None = None
+    policy_rationale: str | None = None
 
     summary = f"{result.status} with {benchmark_pass_count}/{benchmark_case_count} benchmark cases passing"
     next_actions: list[str] = []
@@ -50,10 +54,14 @@ def build_critique(
             "Mutate around the best-performing schedule instead of changing semantics.",
             "Keep the live MI355X contract unchanged unless a correctness issue appears.",
         ]
+        policy_signal = "throughput_shift"
+        policy_rationale = "The candidate passed, so the next step is schedule/search refinement."
         if metrics.get("leaderboard_over_reference") is True:
             next_actions.append(
                 "This ranked run beat correctness but exceeded the current ranked reference budget."
             )
+            policy_signal = "latency_repair"
+            policy_rationale = "The candidate is correct but too slow at ranked wall clock."
     elif result.status == "timeout":
         timeout_seconds = metrics.get("timeout_seconds")
         if isinstance(timeout_seconds, (int, float)):
@@ -65,6 +73,8 @@ def build_critique(
             "Treat this candidate as stalled or too slow for the current ranked submission budget.",
             "Prefer the last known-good anchor before retrying more aggressive variants.",
         ]
+        policy_signal = "latency_repair"
+        policy_rationale = "The candidate exceeded the ranked submission budget."
     elif result.status == "runtime_error":
         runtime_error = _as_str(metrics.get("runtime_error")) or "runtime error during evaluation"
         summary = runtime_error
@@ -74,11 +84,15 @@ def build_critique(
                 "Re-check the live task tuple/shape contract before mutating schedule parameters.",
                 "Prefer a contract-faithful anchor variant before exploring aggressive rewrites.",
             ]
+            policy_signal = "contract_repair"
+            policy_rationale = "The failure looks like a live shape or API contract mismatch."
         else:
             next_actions = [
                 "Minimize the kernel to the smallest contract-faithful path and re-run.",
                 "Avoid introducing optional fast-path assumptions until the baseline passes.",
             ]
+            policy_signal = "runtime_repair"
+            policy_rationale = "The kernel failed during execution before we could trust any performance result."
     elif result.status == "check_fail":
         mismatch_count = _as_int(metrics.get("mismatch_count"))
         if mismatch_count:
@@ -88,11 +102,15 @@ def build_critique(
             "Preserve the live input/layout contract exactly before tuning tile sizes.",
             "Remove or harden caches that can survive across benchmark cases.",
         ]
+        policy_signal = "contract_repair"
+        policy_rationale = "The kernel produced incorrect outputs, so correctness must dominate the next mutation."
     else:
         summary = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "submission failed before evaluation"
         next_actions = [
             "Check Popcorn submission stderr and result artifacts for infrastructure or packaging issues.",
         ]
+        policy_signal = "submission_repair"
+        policy_rationale = "The candidate failed before we received a valid evaluation result."
 
     if problem_key == "mxfp4_mm" and failure_kind == "correctness_mismatch":
         next_actions.insert(
@@ -121,6 +139,8 @@ def build_critique(
         benchmark_pass_count=benchmark_pass_count,
         benchmark_fail_count=benchmark_fail_count,
         workflow_url=workflow_url,
+        policy_signal=policy_signal,
+        policy_rationale=policy_rationale,
         next_actions=next_actions,
     )
 

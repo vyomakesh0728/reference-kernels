@@ -19,6 +19,18 @@ class WorkspaceConfig:
 
 
 @dataclass(frozen=True)
+class LLMConfig:
+    enabled: bool
+    provider: str
+    model: str
+    api_url: str
+    api_key_env_var: str
+    reasoning_effort: str
+    max_output_tokens: int
+    fallback_to_triton: bool
+
+
+@dataclass(frozen=True)
 class ProblemConfig:
     key: str
     submission_path: Path
@@ -39,6 +51,7 @@ class AppConfig:
     config_path: Path
     repo_root: Path
     workspace: WorkspaceConfig
+    llm: LLMConfig
     problems: dict[str, ProblemConfig]
 
     def require_problem(self, key: str) -> ProblemConfig:
@@ -62,6 +75,7 @@ def load_config(path: str | Path) -> AppConfig:
     raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
 
     workspace_raw = _require_table(raw, "workspace")
+    llm_raw = _require_table(raw, "llm")
     problems_raw = _require_table(raw, "problems")
 
     workspace = WorkspaceConfig(
@@ -82,6 +96,17 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         promote_on_improve=bool(workspace_raw.get("promote_on_improve", True)),
         improvement_epsilon=float(workspace_raw.get("improvement_epsilon", 0.0)),
+    )
+
+    llm = LLMConfig(
+        enabled=bool(llm_raw.get("enabled", False)),
+        provider=str(llm_raw.get("provider", "openai")),
+        model=str(llm_raw.get("model", "gpt-5-mini")),
+        api_url=str(llm_raw.get("api_url", "https://api.openai.com/v1/responses")),
+        api_key_env_var=str(llm_raw.get("api_key_env_var", "OPENAI_API_KEY")),
+        reasoning_effort=str(llm_raw.get("reasoning_effort", "medium")),
+        max_output_tokens=int(llm_raw.get("max_output_tokens", 12000)),
+        fallback_to_triton=bool(llm_raw.get("fallback_to_triton", True)),
     )
 
     problems: dict[str, ProblemConfig] = {}
@@ -111,5 +136,6 @@ def load_config(path: str | Path) -> AppConfig:
         config_path=config_path,
         repo_root=repo_root,
         workspace=workspace,
+        llm=llm,
         problems=problems,
     )

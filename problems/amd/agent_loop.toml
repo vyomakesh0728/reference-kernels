@@ -9,6 +9,16 @@ leaderboard_timeout_seconds = 600.0
 promote_on_improve = true
 improvement_epsilon = 0.0
 
+[llm]
+enabled = true
+provider = "openai"
+model = "gpt-5-mini"
+api_url = "https://api.openai.com/v1/responses"
+api_key_env_var = "OPENAI_API_KEY"
+reasoning_effort = "medium"
+max_output_tokens = 12000
+fallback_to_triton = true
+
 [problems.mxfp4_mm]
 submission_path = "fp8-mm/submission.py"
 leaderboard = "amd-mxfp4-mm"
@@ -16,7 +26,7 @@ gpu = "MI355X"
 mode = "benchmark"
 objective = "geom_mean_ns"
 goal = "min"
-mutator_command = "python3 -m agent_loop.triton_mutator --parent {parent} --output {output} --context {context}"
+mutator_command = "python3 -m agent_loop.llm_mutator --config agent_loop.toml --parent {parent} --output {output} --context {context}"
 
 [problems.moe_mxfp4]
 submission_path = "moe/submission.py"
@@ -25,7 +35,7 @@ gpu = "MI355X"
 mode = "benchmark"
 objective = "geom_mean_ns"
 goal = "min"
-mutator_command = "python3 -m agent_loop.triton_mutator --parent {parent} --output {output} --context {context}"
+mutator_command = "python3 -m agent_loop.llm_mutator --config agent_loop.toml --parent {parent} --output {output} --context {context}"
 
 [problems.mixed_mla]
 submission_path = "mla-decode/submission.py"
@@ -34,4 +44,4 @@ gpu = "MI355X"
 mode = "benchmark"
 objective = "geom_mean_ns"
 goal = "min"
-mutator_command = "python3 -m agent_loop.triton_mutator --parent {parent} --output {output} --context {context}"
+mutator_command = "python3 -m agent_loop.llm_mutator --config agent_loop.toml --parent {parent} --output {output} --context {context}"

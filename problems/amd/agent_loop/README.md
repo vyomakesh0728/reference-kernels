@@ -16,8 +16,9 @@ From the repo root:
 ```bash
 python3 -m agent_loop healthcheck
 python3 -m agent_loop baseline --problem mxfp4_mm
-python3 -m agent_loop loop --problem mxfp4_mm --iterations 10
-python3 -m agent_loop swarm --rounds 5
+python3 -m agent_loop loop --problem mxfp4_mm --iterations 10 --family triton_explore
+python3 -m agent_loop swarm --rounds 5 --family triton_explore --bootstrap-baseline
+python3 -m agent_loop campaign --mode leaderboard --family triton_explore --bootstrap-baseline --rounds 50 --max-consecutive-non-improve 8
 python3 -m agent_loop status --problem mxfp4_mm
 python3 -m agent_loop promote --problem mxfp4_mm --candidate <candidate-id>
 ```
@@ -53,23 +54,49 @@ The default setup now points at the live MI355X competition leaderboards:
 - `moe_mxfp4 -> amd-moe-mxfp4`
 - `mixed_mla -> amd-mixed-mla`
 
-The bundled mutator is a Triton-oriented generator:
+The default mutator is now an LLM-backed generator with deterministic Triton fallback:
 
 ```toml
-mutator_command = "python3 -m agent_loop.triton_mutator --parent {parent} --output {output} --context {context}"
+mutator_command = "python3 -m agent_loop.llm_mutator --config agent_loop.toml --parent {parent} --output {output} --context {context}"
 ```
 
-It writes fresh `submission.py` candidates with embedded metadata and a small per-problem
-search space. The current seeds are:
+The `llm_mutator`:
 
-- `mxfp4_mm`: AITER quantization plus a Triton matmul over dequantized MXFP4 inputs
-- `moe_mxfp4`: cached MXFP4 dequantization, grouped expert execution, Triton SwiGLU fusion
-- `mixed_mla`: Triton BF16 decode-attention baseline over the live absorbed-query contract
+- reads the parent candidate, recent critique/history, policy profile, and a seeded Triton template
+- asks the configured LLM for a full new `submission.py`
+- compile-checks the result locally
+- falls back to the deterministic Triton generator if the API key is missing, the request fails, or the returned code is invalid
+
+Configuration lives in the `[llm]` table:
+
+```toml
+[llm]
+enabled = true
+provider = "openai"
+model = "gpt-5-mini"
+api_url = "https://api.openai.com/v1/responses"
+api_key_env_var = "OPENAI_API_KEY"
+reasoning_effort = "medium"
+max_output_tokens = 12000
+fallback_to_triton = true
+```
+
+The seeded Triton generator still provides the search-space skeleton. The current setup mutates both kernel variants and policy profiles:
+
+- policy profiles choose which family/shape regime to emphasize next
+- critiques emit structured `policy_signal` values such as `contract_repair`,
+  `throughput_shift`, and `latency_repair`
+- candidate metadata records both the kernel variant and the chosen policy profile
+
+- `mxfp4_mm`: contract-aware MXFP4 exploration around shuffled inputs and Triton matmul schedules
+- `moe_mxfp4`: grouped expert execution with Triton SwiGLU/routing exploration
+- `mixed_mla`: FP8-contract Triton decode-attention exploration over the live absorbed-query path
 
 ## Objective
 
-The default objective is `geom_mean_ns`, computed from the returned
-`benchmark.<i>.mean` values. Lower is better.
+The default objective is `geom_mean_ns`. In leaderboard mode, the parser now prefers the
+`## Ranked Benchmark` section when it is present; otherwise it falls back to the plain
+benchmark section. Lower is better.
 
 ## Notes
 
@@ -79,5 +106,7 @@ The default objective is `geom_mean_ns`, computed from the returned
   `submission_path`. The package does not create git commits on its own.
 - `swarm` runs the configured problems round-robin so we can keep the three search loops moving
   together.
+- `campaign` is the overnight runner: it supports leaderboard-mode round-robin search and stops
+  when each problem hits a configured non-improvement plateau.
 - The local repo task YAMLs are MI300-era. The loop is configured against the live MI355X
   leaderboard slugs and generates submissions against those server-side contracts.
