@@ -124,6 +124,7 @@ For `mxfp4_mm`, the current default is HIP-first:
 - `default_family = "hip_explore"` routes MM experiments through `load_inline` on `gfx950`
 - the seed path stays in one compilation pipeline: Python `submission.py` + HIP C++ only
 - the first HIP seeds are correctness-first tiled bf16 kernels that the loop can evolve toward CDNA4 scaled-MFMA, LDS swizzle, and double buffering
+- HIP candidates are seeded from the clean HIP template and rejected if they keep inherited Triton scaffold
 - this is intentionally closer to an AutoKernel-style microkernel program than a broad codegen search
 
 ## Objective

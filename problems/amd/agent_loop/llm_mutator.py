@@ -97,6 +97,7 @@ def _experiment_protocol(desired_family: str | None) -> list[str]:
         protocol.extend(
             [
                 "Stay in one compilation path: Python submission.py + load_inline + HIP C++ on gfx950.",
+                "Remove inherited Triton scaffold completely; the final HIP candidate should not keep import triton, @triton.jit, or unused Triton helper code.",
                 f"Treat this as a {family} microkernel experiment over one lever at a time: tile shape, LDS movement, double buffering, swizzle, or scaled MFMA replacement.",
             ]
         )
@@ -930,6 +931,17 @@ def _validate_hot_path(
             raise RuntimeError("HIP family candidate did not use load_inline")
         if "gfx950" not in source:
             raise RuntimeError("HIP family candidate did not target gfx950")
+        forbidden_hip_scaffold = (
+            "import triton",
+            "@triton.jit",
+            "triton.language",
+            "triton.cdiv(",
+        )
+        for token in forbidden_hip_scaffold:
+            if token in source:
+                raise RuntimeError(
+                    f"HIP family candidate still contained Triton scaffold token {token!r}"
+                )
 
 
 def _fallback_source(
@@ -1074,7 +1086,11 @@ def _codex_source(
     workspace_dir = Path(candidate_dir_raw)
     workspace_dir.mkdir(parents=True, exist_ok=True)
     workspace_submission = workspace_dir / "submission.py"
-    workspace_submission.write_text(parent_source, encoding="utf-8")
+    desired_family = context.get("desired_family")
+    if not isinstance(desired_family, str):
+        desired_family = None
+    base_source = seed_source if desired_family == "hip_explore" else parent_source
+    workspace_submission.write_text(base_source, encoding="utf-8")
 
     raw_text, response_payload = _call_codex_exec(
         config,
@@ -1098,9 +1114,6 @@ def _codex_source(
     candidate_source = _canonicalize_source(edited_text, seed_source, meta)
     if "def custom_kernel" not in candidate_source:
         raise RuntimeError("Codex output did not define custom_kernel")
-    desired_family = context.get("desired_family")
-    if not isinstance(desired_family, str):
-        desired_family = None
     _validate_hot_path(candidate_source, str(context["problem"]["key"]), desired_family)
     return candidate_source
 
