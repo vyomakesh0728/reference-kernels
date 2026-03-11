@@ -25,6 +25,13 @@ class LLMConfig:
     model: str
     api_url: str
     api_key_env_var: str
+    anthropic_api_url: str
+    anthropic_api_key_env_var: str
+    anthropic_version: str
+    openrouter_api_url: str
+    openrouter_api_key_env_var: str
+    openrouter_http_referer: str | None
+    openrouter_title: str | None
     reasoning_effort: str
     max_output_tokens: int
     fallback_to_triton: bool
@@ -110,6 +117,29 @@ def load_config(path: str | Path) -> AppConfig:
         model=str(llm_raw.get("model", "gpt-5-mini")),
         api_url=str(llm_raw.get("api_url", "https://api.openai.com/v1/responses")),
         api_key_env_var=str(llm_raw.get("api_key_env_var", "OPENAI_API_KEY")),
+        anthropic_api_url=str(
+            llm_raw.get("anthropic_api_url", "https://api.anthropic.com/v1/messages")
+        ),
+        anthropic_api_key_env_var=str(
+            llm_raw.get("anthropic_api_key_env_var", "ANTHROPIC_API_KEY")
+        ),
+        anthropic_version=str(llm_raw.get("anthropic_version", "2023-06-01")),
+        openrouter_api_url=str(
+            llm_raw.get("openrouter_api_url", "https://openrouter.ai/api/v1/chat/completions")
+        ),
+        openrouter_api_key_env_var=str(
+            llm_raw.get("openrouter_api_key_env_var", "OPENROUTER_API_KEY")
+        ),
+        openrouter_http_referer=(
+            str(llm_raw["openrouter_http_referer"])
+            if llm_raw.get("openrouter_http_referer")
+            else None
+        ),
+        openrouter_title=(
+            str(llm_raw["openrouter_title"])
+            if llm_raw.get("openrouter_title")
+            else None
+        ),
         reasoning_effort=str(llm_raw.get("reasoning_effort", "medium")),
         max_output_tokens=int(llm_raw.get("max_output_tokens", 12000)),
         fallback_to_triton=bool(llm_raw.get("fallback_to_triton", True)),

@@ -76,6 +76,13 @@ provider = "auto"
 model = "gpt-5-mini"
 api_url = "https://api.openai.com/v1/responses"
 api_key_env_var = "OPENAI_API_KEY"
+anthropic_api_url = "https://api.anthropic.com/v1/messages"
+anthropic_api_key_env_var = "ANTHROPIC_API_KEY"
+anthropic_version = "2023-06-01"
+openrouter_api_url = "https://openrouter.ai/api/v1/chat/completions"
+openrouter_api_key_env_var = "OPENROUTER_API_KEY"
+openrouter_http_referer = ""
+openrouter_title = "reference-kernels-agent-loop"
 reasoning_effort = "medium"
 max_output_tokens = 12000
 fallback_to_triton = true
@@ -90,6 +97,8 @@ Provider behavior:
 
 - `provider = "auto"`: use OpenAI Responses when `OPENAI_API_KEY` is present, otherwise use local `codex exec`, otherwise fall back to the seeded Triton generator
 - `provider = "openai"`: force the Responses API path
+- `provider = "anthropic"`: use the Anthropic Messages API with `ANTHROPIC_API_KEY`
+- `provider = "openrouter"`: use OpenRouter chat completions with `OPENROUTER_API_KEY`
 - `provider = "codex_cli"`: force local Codex CLI generation
 
 The Codex path is designed as the no-API-key option. It shells out to `codex exec`, asks for a concise plan, and explicitly allows helper-agent fanout up to the configured `codex_parallel_agents` count before returning a single final `submission.py`.

@@ -182,6 +182,63 @@ def _response_text(payload: dict[str, object]) -> str:
     return "\n".join(chunk for chunk in chunks if chunk.strip())
 
 
+def _post_json(
+    url: str,
+    payload: dict[str, object],
+    headers: dict[str, str],
+) -> dict[str, object]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace").strip()
+        detail = body or exc.reason
+        raise RuntimeError(f"http {exc.code}: {detail}") from exc
+
+
+def _anthropic_response_text(payload: dict[str, object]) -> str:
+    chunks: list[str] = []
+    content = payload.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text" and isinstance(item.get("text"), str):
+                chunks.append(item["text"])
+    return "\n".join(chunk for chunk in chunks if chunk.strip())
+
+
+def _openrouter_response_text(payload: dict[str, object]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return ""
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "text" and isinstance(item.get("text"), str):
+                    chunks.append(item["text"])
+            if chunks:
+                return "\n".join(chunks)
+    return ""
+
+
 def _call_openai_responses(
     config: AppConfig,
     system_prompt: str,
@@ -210,20 +267,99 @@ def _call_openai_responses(
     if config.llm.reasoning_effort:
         payload["reasoning"] = {"effort": config.llm.reasoning_effort}
 
-    request = urllib.request.Request(
+    response_payload = _post_json(
         config.llm.api_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
+        payload,
+        {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        method="POST",
     )
-    with urllib.request.urlopen(request, timeout=180) as response:
-        response_payload = json.loads(response.read().decode("utf-8"))
     text = _response_text(response_payload)
     if not text.strip():
         raise RuntimeError("LLM response did not include any output text")
+    return text, response_payload
+
+
+def _call_anthropic_messages(
+    config: AppConfig,
+    system_prompt: str,
+    user_prompt: str,
+) -> tuple[str, dict[str, object]]:
+    api_key = os.environ.get(config.llm.anthropic_api_key_env_var)
+    if not api_key:
+        raise RuntimeError(
+            f"missing API key env var {config.llm.anthropic_api_key_env_var} for Anthropic mutator"
+        )
+
+    payload = {
+        "model": config.llm.model,
+        "max_tokens": config.llm.max_output_tokens,
+        "system": system_prompt,
+        "messages": [
+            {
+                "role": "user",
+                "content": user_prompt,
+            }
+        ],
+    }
+    response_payload = _post_json(
+        config.llm.anthropic_api_url,
+        payload,
+        {
+            "x-api-key": api_key,
+            "anthropic-version": config.llm.anthropic_version,
+            "Content-Type": "application/json",
+        },
+    )
+    text = _anthropic_response_text(response_payload)
+    if not text.strip():
+        raise RuntimeError("Anthropic response did not include any text content")
+    return text, response_payload
+
+
+def _call_openrouter_chat(
+    config: AppConfig,
+    system_prompt: str,
+    user_prompt: str,
+) -> tuple[str, dict[str, object]]:
+    api_key = os.environ.get(config.llm.openrouter_api_key_env_var)
+    if not api_key:
+        raise RuntimeError(
+            f"missing API key env var {config.llm.openrouter_api_key_env_var} for OpenRouter mutator"
+        )
+
+    payload = {
+        "model": config.llm.model,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+            },
+        ],
+        "max_tokens": config.llm.max_output_tokens,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if config.llm.openrouter_http_referer:
+        headers["HTTP-Referer"] = config.llm.openrouter_http_referer
+    if config.llm.openrouter_title:
+        headers["X-Title"] = config.llm.openrouter_title
+
+    response_payload = _post_json(
+        config.llm.openrouter_api_url,
+        payload,
+        headers,
+    )
+    text = _openrouter_response_text(response_payload)
+    if not text.strip():
+        raise RuntimeError("OpenRouter response did not include any message content")
     return text, response_payload
 
 
@@ -356,6 +492,66 @@ def _llm_source(
     return candidate_source
 
 
+def _anthropic_source(
+    config: AppConfig,
+    context: dict[str, object],
+    parent_source: str,
+    seed_source: str,
+    seed_meta: dict[str, object],
+    policy_profile: dict[str, object],
+    variant: dict[str, object],
+) -> str:
+    system_prompt, user_prompt = _build_prompt(
+        config,
+        context,
+        parent_source,
+        seed_source,
+        policy_profile,
+        variant,
+    )
+    raw_text, _ = _call_anthropic_messages(config, system_prompt, user_prompt)
+    meta = dict(seed_meta)
+    meta["generator"] = {
+        "kind": "llm",
+        "provider": "anthropic",
+        "model": config.llm.model,
+    }
+    candidate_source = _canonicalize_source(raw_text, seed_source, meta)
+    if "def custom_kernel" not in candidate_source:
+        raise RuntimeError("Anthropic output did not define custom_kernel")
+    return candidate_source
+
+
+def _openrouter_source(
+    config: AppConfig,
+    context: dict[str, object],
+    parent_source: str,
+    seed_source: str,
+    seed_meta: dict[str, object],
+    policy_profile: dict[str, object],
+    variant: dict[str, object],
+) -> str:
+    system_prompt, user_prompt = _build_prompt(
+        config,
+        context,
+        parent_source,
+        seed_source,
+        policy_profile,
+        variant,
+    )
+    raw_text, _ = _call_openrouter_chat(config, system_prompt, user_prompt)
+    meta = dict(seed_meta)
+    meta["generator"] = {
+        "kind": "llm",
+        "provider": "openrouter",
+        "model": config.llm.model,
+    }
+    candidate_source = _canonicalize_source(raw_text, seed_source, meta)
+    if "def custom_kernel" not in candidate_source:
+        raise RuntimeError("OpenRouter output did not define custom_kernel")
+    return candidate_source
+
+
 def _codex_source(
     config: AppConfig,
     context: dict[str, object],
@@ -445,6 +641,28 @@ def _generate_source(
         try:
             if active_provider == "openai":
                 source = _llm_source(
+                    config,
+                    context,
+                    parent_source,
+                    seed_source,
+                    seed_meta,
+                    policy_profile,
+                    variant,
+                )
+                return source, policy_profile, variant
+            if active_provider == "anthropic":
+                source = _anthropic_source(
+                    config,
+                    context,
+                    parent_source,
+                    seed_source,
+                    seed_meta,
+                    policy_profile,
+                    variant,
+                )
+                return source, policy_profile, variant
+            if active_provider == "openrouter":
+                source = _openrouter_source(
                     config,
                     context,
                     parent_source,
