@@ -41,7 +41,7 @@ def _extract_meta(source: str) -> dict[str, object]:
 def _replace_meta(source: str, meta: dict[str, object]) -> str:
     meta_line = f"# AGENT_LOOP_META: {json.dumps(meta, sort_keys=True)}"
     if META_RE.search(source):
-        return META_RE.sub(meta_line, source, count=1)
+        return META_RE.sub(lambda _: meta_line, source, count=1)
 
     lines = source.splitlines()
     insert_at = 0
@@ -449,6 +449,13 @@ def _compile_check(path: Path) -> None:
     py_compile.compile(str(path), doraise=True)
 
 
+def _compact_reason(reason: str, limit: int = 240) -> str:
+    compact = " ".join(reason.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
 def _fallback_source(
     seed_source: str,
     seed_meta: dict[str, object],
@@ -457,7 +464,7 @@ def _fallback_source(
     meta = dict(seed_meta)
     meta["generator"] = {
         "kind": "template_fallback",
-        "reason": reason,
+        "reason": _compact_reason(reason),
     }
     return _replace_meta(seed_source, meta) + ("" if seed_source.endswith("\n") else "\n")
 
