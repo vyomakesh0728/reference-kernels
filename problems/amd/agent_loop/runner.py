@@ -132,6 +132,50 @@ class ClosedLoopRunner:
             policy_profile_name=policy_profile_name if isinstance(policy_profile_name, str) else None,
         )
 
+    def bootstrap_problem(self, problem_key: str, mode: str | None = None) -> LoopSummary:
+        problem = self.config.require_problem(problem_key)
+        selected_mode = mode or problem.mode
+        candidate_id = self.ensure_baseline(problem_key)
+        cached_eval = self.store.latest_evaluation_for_candidate(candidate_id, selected_mode)
+        if cached_eval is None:
+            return self.run_baseline(problem_key, mode=selected_mode)
+
+        candidate = self._require_candidate(candidate_id)
+        if cached_eval.status == "ok" and cached_eval.objective is not None:
+            best = self.store.get_best_candidate(problem_key)
+            if best is None and self._is_improvement(problem, None, cached_eval.objective):
+                self.store.set_best(
+                    problem_key=problem_key,
+                    candidate_id=candidate_id,
+                    objective=cached_eval.objective,
+                )
+
+        candidate_meta = self._load_candidate_meta(Path(candidate.source_path)) or {}
+        variant = candidate_meta.get("variant")
+        variant_family = variant.get("family") if isinstance(variant, dict) else None
+        variant_name = variant.get("variant_name") if isinstance(variant, dict) else None
+        policy_profile = candidate_meta.get("policy_profile")
+        policy_profile_name = policy_profile.get("name") if isinstance(policy_profile, dict) else None
+        best = self.store.get_best_candidate(problem_key)
+        improved = (
+            cached_eval.status == "ok"
+            and cached_eval.objective is not None
+            and best is not None
+            and best.candidate_id == candidate_id
+        )
+        return LoopSummary(
+            problem=problem_key,
+            candidate_id=candidate_id,
+            mode=selected_mode,
+            status="cached_baseline",
+            objective=cached_eval.objective,
+            improved=improved,
+            promoted=False,
+            variant_family=variant_family if isinstance(variant_family, str) else None,
+            variant_name=variant_name if isinstance(variant_name, str) else None,
+            policy_profile_name=policy_profile_name if isinstance(policy_profile_name, str) else None,
+        )
+
     def run_iteration(
         self,
         problem_key: str,

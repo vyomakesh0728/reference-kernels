@@ -131,5 +131,8 @@ benchmark section. Lower is better.
   together.
 - `campaign` is the overnight runner: it supports leaderboard-mode round-robin search and stops
   when each problem hits a configured non-improvement plateau.
+- `--bootstrap-baseline` is idempotent: it reuses an already evaluated baseline for that mode and
+  only resubmits the repo anchor when the submission source has changed or no cached baseline eval
+  exists yet.
 - The local repo task YAMLs are MI300-era. The loop is configured against the live MI355X
   leaderboard slugs and generates submissions against those server-side contracts.

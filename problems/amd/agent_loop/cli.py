@@ -121,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             selected = args.problems or sorted(config.problems)
             if args.bootstrap_baseline:
                 for problem_key in selected:
-                    summary = runner.run_baseline(problem_key, mode=args.mode)
+                    summary = runner.bootstrap_problem(problem_key, mode=args.mode)
                     print(json.dumps({"stage": "baseline", **summary.__dict__}, indent=2, sort_keys=True))
             for round_index in range(args.rounds):
                 for problem_key in selected:
@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             plateau_counts = {problem_key: 0 for problem_key in selected}
             if args.bootstrap_baseline:
                 for problem_key in selected:
-                    summary = runner.run_baseline(problem_key, mode=args.mode)
+                    summary = runner.bootstrap_problem(problem_key, mode=args.mode)
                     print(json.dumps({"stage": "baseline", **summary.__dict__}, indent=2, sort_keys=True))
             for round_index in range(args.rounds):
                 active = False

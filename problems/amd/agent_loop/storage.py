@@ -48,6 +48,15 @@ class ProblemState:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class EvaluationRow:
+    candidate_id: str
+    mode: str
+    status: str
+    objective: float | None
+    created_at: str
+
+
 class ExperimentStore:
     def __init__(self, root: Path):
         self.root = root
@@ -242,6 +251,31 @@ class ExperimentStore:
         if row is None:
             return None
         return self._candidate_from_row(row)
+
+    def latest_evaluation_for_candidate(
+        self,
+        candidate_id: str,
+        mode: str,
+    ) -> EvaluationRow | None:
+        row = self.conn.execute(
+            """
+            SELECT candidate_id, mode, status, objective, created_at
+            FROM evaluations
+            WHERE candidate_id = ? AND mode = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (candidate_id, mode),
+        ).fetchone()
+        if row is None:
+            return None
+        return EvaluationRow(
+            candidate_id=row["candidate_id"],
+            mode=row["mode"],
+            status=row["status"],
+            objective=row["objective"],
+            created_at=row["created_at"],
+        )
 
     def recent_candidates(self, problem_key: str, limit: int = 10) -> list[CandidateRow]:
         rows = self.conn.execute(
