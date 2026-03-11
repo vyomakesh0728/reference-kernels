@@ -1,6 +1,6 @@
 # This script provides a template for using load_inline to run a HIP kernel for
 import os 
-os.environ['PYTORCH_ROCM_ARCH'] = 'gfx942'
+os.environ['PYTORCH_ROCM_ARCH'] = 'gfx950'
 
 from torch.utils.cpp_extension import load_inline
 from task import input_t, output_t
@@ -68,7 +68,7 @@ module = load_inline(
     cuda_sources=[CUDA_SRC],
     functions=['fp8_mm'],
     verbose=True,
-    extra_cuda_cflags=["--offload-arch=gfx942", "-std=c++20"],
+    extra_cuda_cflags=["--offload-arch=gfx950", "-std=c++20", "-O3"],
 )
 
 
@@ -76,4 +76,3 @@ def custom_kernel(data: input_t) -> output_t:
     a, b, a_scale, b_scale, c = data
     module.fp8_mm(a, b, a_scale, b_scale, c)
     return c
-

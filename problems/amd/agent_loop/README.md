@@ -16,9 +16,10 @@ From the repo root:
 ```bash
 python3 -m agent_loop healthcheck
 python3 -m agent_loop baseline --problem mxfp4_mm
-python3 -m agent_loop loop --problem mxfp4_mm --iterations 10 --family triton_explore
-python3 -m agent_loop swarm --rounds 5 --family triton_explore --bootstrap-baseline
-python3 -m agent_loop campaign --mode leaderboard --family triton_explore --bootstrap-baseline --rounds 50 --max-consecutive-non-improve 8
+python3 -m agent_loop loop --problem mxfp4_mm --iterations 10
+python3 -m agent_loop loop --problem mxfp4_mm --iterations 10 --family hip_explore
+python3 -m agent_loop swarm --rounds 5 --bootstrap-baseline
+python3 -m agent_loop campaign --mode leaderboard --bootstrap-baseline --rounds 50 --max-consecutive-non-improve 8
 python3 -m agent_loop cleanup --stale-pending-hours 6
 python3 -m agent_loop status --problem mxfp4_mm
 python3 -m agent_loop promote --problem mxfp4_mm --candidate <candidate-id>
@@ -55,7 +56,7 @@ The default setup now points at the live MI355X competition leaderboards:
 - `moe_mxfp4 -> amd-moe-mxfp4`
 - `mixed_mla -> amd-mixed-mla`
 
-The default mutator is now an LLM-backed generator with deterministic Triton fallback:
+The default mutator is now an LLM-backed generator with seeded kernel families:
 
 ```toml
 mutator_command = "python3 -m agent_loop.llm_mutator --config agent_loop.toml --parent {parent} --output {output} --context {context}"
@@ -63,10 +64,10 @@ mutator_command = "python3 -m agent_loop.llm_mutator --config agent_loop.toml --
 
 The `llm_mutator`:
 
-- reads the parent candidate, recent critique/history, policy profile, and a seeded Triton template
+- reads the parent candidate, recent critique/history, policy profile, and a seeded kernel template
 - asks the configured generator for a full new `submission.py`
 - compile-checks the result locally
-- falls back to the deterministic Triton generator if the chosen provider is unavailable, the request fails, or the returned code is invalid
+- falls back to the deterministic seed renderer if the chosen provider is unavailable, the request fails, or the returned code is invalid
 
 Configuration lives in the `[llm]` table:
 
@@ -86,7 +87,7 @@ openrouter_http_referer = ""
 openrouter_title = "reference-kernels-agent-loop"
 reasoning_effort = "medium"
 max_output_tokens = 12000
-fallback_to_triton = true
+fallback_to_seed = true
 codex_cli = "codex"
 codex_model = ""
 codex_sandbox = "read-only"
@@ -96,7 +97,7 @@ codex_parallel_agents = 3
 
 Provider behavior:
 
-- `provider = "auto"`: use OpenAI Responses when `OPENAI_API_KEY` is present, otherwise use local `codex exec`, otherwise fall back to the seeded Triton generator
+- `provider = "auto"`: use OpenAI Responses when `OPENAI_API_KEY` is present, otherwise use local `codex exec`, otherwise fall back to the seeded kernel generator
 - `provider = "openai"`: force the Responses API path
 - `provider = "anthropic"`: use the Anthropic Messages API with `ANTHROPIC_API_KEY`
 - `provider = "openrouter"`: use OpenRouter chat completions with `OPENROUTER_API_KEY`
@@ -107,16 +108,23 @@ Leave `codex_model` empty to let the local Codex CLI use its account-default mod
 If you set `codex_timeout_seconds`, the mutator will fail fast at that limit; if you omit it, `codex exec` runs without a wall-clock timeout.
 For Codex, the mutator now uses an isolated candidate workspace in `workspace-write` mode: it seeds `submission.py` from the kept parent, asks Codex to edit that file in place, then validates the edited file locally before any remote submission.
 
-The seeded Triton generator still provides the search-space skeleton. The current setup mutates both kernel variants and policy profiles:
+The seeded generator provides the search-space skeleton. The current setup mutates both kernel variants and policy profiles:
 
 - policy profiles choose which family/shape regime to emphasize next
 - critiques emit structured `policy_signal` values such as `contract_repair`,
   `throughput_shift`, and `latency_repair`
 - candidate metadata records both the kernel variant and the chosen policy profile
 
-- `mxfp4_mm`: contract-aware MXFP4 exploration around shuffled inputs and Triton matmul schedules
-- `moe_mxfp4`: grouped expert execution with Triton SwiGLU/routing exploration
-- `mixed_mla`: FP8-contract Triton decode-attention exploration over the live absorbed-query path
+- `mxfp4_mm`: HIP-first `load_inline` exploration on `gfx950`, with correctness-first tiled bf16 seeds and scaled-MFMA/LDS seed variants
+- `moe_mxfp4`: grouped expert execution with generated-kernel SwiGLU/routing exploration
+- `mixed_mla`: FP8-contract generated decode-attention exploration over the live absorbed-query path
+
+For `mxfp4_mm`, the current default is HIP-first:
+
+- `default_family = "hip_explore"` routes MM experiments through `load_inline` on `gfx950`
+- the seed path stays in one compilation pipeline: Python `submission.py` + HIP C++ only
+- the first HIP seeds are correctness-first tiled bf16 kernels that the loop can evolve toward CDNA4 scaled-MFMA, LDS swizzle, and double buffering
+- this is intentionally closer to an AutoKernel-style microkernel program than a broad codegen search
 
 ## Objective
 
@@ -147,8 +155,11 @@ benchmark section. Lower is better.
   - current trial lives at `.agent-loop/problems/mxfp4_mm/working/attempt/`
   - every ranked round appends one row to `.agent-loop/problems/mxfp4_mm/working/results.tsv`
   - detailed per-round records go to `.agent-loop/problems/mxfp4_mm/working/journal.jsonl`
+  - `experiment.plan.json` captures the round hypothesis, policy, variant, and source inspirations before submission
   - `state.json` tracks the current kept candidate plus keep/revert counts
   - `candidate.diff` and `scope_check.json` capture the current diff and focused-edit budget check
   - `max_changed_lines` and `max_edit_hunks` in `agent_loop.toml` can reject broad rewrites as `scope_reject` before burning a ranked submission
+  - `default_family = "hip_explore"` makes MM default to the HIP `load_inline` path unless you override `--family`
+  - the prompt discipline intentionally borrows from AutoKernel, KernelAgent, ADRS/OpenEvolve, and Atom-of-Thoughts: one experiment, one evaluator, one keep/revert decision
 - The local repo task YAMLs are MI300-era. The loop is configured against the live MI355X
   leaderboard slugs and generates submissions against those server-side contracts.

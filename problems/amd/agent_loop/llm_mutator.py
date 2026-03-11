@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 
 from .config import AppConfig, load_config
-from .triton_mutator import (
+from .kernel_mutator import (
     META_RE,
     candidate_attempt,
     choose_policy_profile,
@@ -71,6 +71,131 @@ AOT_GUIDANCE = [
     "Terminate at the current atomic frontier: if the right next move is still correctness repair, keep the edit correctness-first instead of pretending to optimize throughput.",
     "Operate like an AutoKernel experiment: make one focused kernel edit per iteration so the outer loop can explicitly keep or revert it.",
 ]
+
+
+def _family_label(desired_family: str | None) -> str:
+    if desired_family == "hip_explore":
+        return "HIP"
+    if desired_family == "kernel_explore":
+        return "Kernel"
+    return "GPU"
+
+
+def _default_skill_name(desired_family: str | None) -> str:
+    del desired_family
+    return "$amd-kernel-speedrun"
+
+
+def _experiment_protocol(desired_family: str | None) -> list[str]:
+    family = _family_label(desired_family)
+    protocol = [
+        "AutoKernel discipline: make one atomic kernel edit, let the outer loop keep or revert it, and do not hide multiple independent changes in one round.",
+        "KernelAgent discipline: leave a clear artifact trail for this round so the parent, prompt, diff, result, and summary all describe the same focused experiment.",
+        "ADRS discipline: optimize only against the evaluator contract and measured result, not vague intuition or unverifiable assembly fantasies.",
+    ]
+    if desired_family == "hip_explore":
+        protocol.extend(
+            [
+                "Stay in one compilation path: Python submission.py + load_inline + HIP C++ on gfx950.",
+                f"Treat this as a {family} microkernel experiment over one lever at a time: tile shape, LDS movement, double buffering, swizzle, or scaled MFMA replacement.",
+            ]
+        )
+    elif desired_family == "kernel_explore":
+        protocol.extend(
+            [
+                "Keep the real hot path on the generated kernel and avoid dead scaffold.",
+                "Treat this as one generated-kernel scheduling or dataflow experiment at a time, not a broad rewrite.",
+            ]
+        )
+    return protocol
+
+
+def _source_inspirations(problem_key: str, desired_family: str | None) -> list[dict[str, str]]:
+    inspirations = [
+        {
+            "name": "AutoKernel",
+            "kind": "repo",
+            "idea": "one-kernel keep/revert loop with explicit experiment discipline",
+        },
+        {
+            "name": "KernelAgent",
+            "kind": "repo",
+            "idea": "artifact-rich per-run directories and evaluator-driven iteration",
+        },
+        {
+            "name": "ADRS/OpenEvolve",
+            "kind": "repo",
+            "idea": "treat the evaluator as the ground truth and iterate through compact experiments",
+        },
+        {
+            "name": "Atom of Thoughts",
+            "kind": "paper",
+            "idea": "make one small Markov transition over the parent kernel rather than rewriting everything",
+        },
+    ]
+    if problem_key == "mxfp4_mm" and desired_family == "hip_explore":
+        inspirations.extend(
+            [
+                {
+                    "name": "AMD CDNA4 GEMM Optimization Blog",
+                    "kind": "blog",
+                    "idea": "optimize LDS tiling, double buffering, swizzle, and global-to-LDS movement on CDNA4",
+                },
+                {
+                    "name": "AMD CDNA4 ISA",
+                    "kind": "pdf",
+                    "idea": "scaled MFMA instructions on gfx950 are the long-term target for MXFP4 throughput",
+                },
+                {
+                    "name": "ROCm 7.1 load_inline gist",
+                    "kind": "gist",
+                    "idea": "assume clang++ plus torch 2.10.0+rocm7.1 style load_inline environment targeting gfx950",
+                },
+            ]
+        )
+    return inspirations
+
+
+def _write_experiment_plan(
+    context: dict[str, object],
+    *,
+    policy_profile: dict[str, object],
+    variant: dict[str, object],
+) -> None:
+    candidate_dir = context.get("candidate_dir")
+    if not isinstance(candidate_dir, str) or not candidate_dir:
+        return
+    problem = context.get("problem")
+    if not isinstance(problem, dict):
+        return
+    desired_family = context.get("desired_family")
+    if not isinstance(desired_family, str):
+        desired_family = None
+    variant_name = variant.get("variant_name") if isinstance(variant.get("variant_name"), str) else ""
+    strategy = variant.get("strategy") if isinstance(variant.get("strategy"), str) else ""
+    focus = policy_profile.get("focus") if isinstance(policy_profile.get("focus"), str) else ""
+    hypothesis = f"{focus}; variant={variant_name}; strategy={strategy}".strip("; ")
+    payload = {
+        "problem": problem.get("key"),
+        "leaderboard": problem.get("leaderboard"),
+        "gpu": problem.get("gpu"),
+        "desired_family": desired_family,
+        "attempt": context.get("attempt"),
+        "parent_candidate_id": (context.get("parent") or {}).get("candidate_id") if isinstance(context.get("parent"), dict) else None,
+        "policy_profile": policy_profile,
+        "variant": variant,
+        "hypothesis": hypothesis,
+        "edit_budget": context.get("edit_budget"),
+        "protocol": _experiment_protocol(desired_family),
+        "sources": _source_inspirations(str(problem.get("key")), desired_family),
+        "created_at": datetime.now().astimezone().isoformat(),
+    }
+    path = Path(candidate_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "experiment.plan.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _codex_usage_limit_reset_time(text: str) -> datetime | None:
@@ -229,9 +354,13 @@ def _problem_specific_guidance(
     history: list[dict[str, object]],
 ) -> list[str]:
     guidance: list[str] = []
-    if desired_family == "triton_explore":
+    if desired_family == "kernel_explore":
         guidance.append(
-            "The real hot path in custom_kernel must execute Triton-based logic. Do not leave Triton as dead scaffold while delegating compute to an AITER anchor."
+            "The real hot path in custom_kernel must execute generated-kernel logic. Do not leave dead scaffold while delegating compute to an AITER anchor."
+        )
+    elif desired_family == "hip_explore":
+        guidance.append(
+            "The real hot path in custom_kernel must compile and execute HIP through torch.utils.cpp_extension.load_inline on MI355X/gfx950. Do not route the hot path through an AITER anchor."
         )
 
     repeated_failure = _repeated_failure_hint(history)
@@ -239,25 +368,37 @@ def _problem_specific_guidance(
         guidance.append(repeated_failure)
 
     if problem_key == "mxfp4_mm":
-        guidance.extend(
-            [
-                "Preserve the shuffled MXFP4 contract exactly: quantize A with shuffle=True and consume B_shuffle/B_scale_sh consistently.",
-                "If the shuffled-B interpretation is still unstable, prefer a correctness-first Triton seed that requantizes both A and B from the original bf16 tensors, dequantizes them plainly, and only then runs Triton matmul.",
-                "Do not change both semantic layout and tiling in the same candidate when correctness is failing repeatedly; fix contract/dataflow first, then tune tiles.",
-                "Prefer a minimal Triton matmul path that is actually called from custom_kernel over a larger submission that still routes the hot path through aiter.gemm_a4w4.",
-            ]
-        )
+        if desired_family == "hip_explore":
+            guidance.extend(
+                [
+                    "Target gfx950 explicitly in both PYTORCH_ROCM_ARCH and --offload-arch.",
+                    "Keep the optimization path in one language and one compiler pipeline: Python submission.py + load_inline + HIP C++ only.",
+                    "Assume a ROCm 7.1-style runner with clang++ and torch 2.10.0+rocm7.1 semantics when choosing HIP/load_inline code patterns.",
+                    "Use raw bf16 A/B for the first correctness-first HIP kernels if B_shuffle/B_scale_sh semantics are still unclear; do not fake a HIP path by calling aiter.gemm_a4w4.",
+                    "The next serious optimization frontier is CDNA4 scaled MFMA, especially V_MFMA_SCALE_F32_16X16X128_F8F6F4 and V_MFMA_SCALE_F32_32X32X64_F8F6F4, plus LDS tiling, double buffering, and swizzle.",
+                    "Make one focused HIP edit per iteration: memory hierarchy, tile shape, launch shape, or MFMA inner loop replacement, not all at once.",
+                ]
+            )
+        else:
+            guidance.extend(
+                [
+                    "Preserve the shuffled MXFP4 contract exactly: quantize A with shuffle=True and consume B_shuffle/B_scale_sh consistently.",
+                    "If the shuffled-B interpretation is still unstable, prefer a correctness-first kernel seed that requantizes both A and B from the original bf16 tensors, dequantizes them plainly, and only then runs the generated matmul path.",
+                    "Do not change both semantic layout and tiling in the same candidate when correctness is failing repeatedly; fix contract/dataflow first, then tune tiles.",
+                    "Prefer a minimal generated-kernel matmul path that is actually called from custom_kernel over a larger submission that still routes the hot path through aiter.gemm_a4w4.",
+                ]
+            )
     elif problem_key == "moe_mxfp4":
         guidance.extend(
             [
                 "If correctness is unstable, keep the routing/topk contract fixed and only rewrite one expert-compute stage at a time.",
-                "Avoid leaving the hot path on fused_moe while presenting Triton as unused side code.",
+                "Avoid leaving the hot path on fused_moe while presenting side-code as the hot path.",
             ]
         )
     elif problem_key == "mixed_mla":
         guidance.extend(
             [
-                "Bias toward latency-first rewrites for q_seq_len=1 decode, and keep the hot path on actual Triton decode/attention code rather than mla_decode_fwd.",
+                "Bias toward latency-first rewrites for q_seq_len=1 decode, and keep the hot path on actual generated-kernel decode/attention code rather than mla_decode_fwd.",
                 "Prefer small, correctness-preserving reductions in memory movement over broad rewrites that preserve the same slow structure.",
             ]
         )
@@ -297,9 +438,10 @@ def _build_prompt(
     else:
         budget_text = "- no explicit edit budget provided"
 
+    family_label = _family_label(desired_family)
     if workspace_edit:
         system_prompt = (
-            "You are an expert AMD MI355X Triton kernel engineer working on a real competition submission. "
+            f"You are an expert AMD MI355X {family_label} kernel engineer working on a real competition submission. "
             "Edit the existing submission.py file in place inside the current isolated workspace. "
             "Preserve the live kernel contract, keep the two #!POPCORN header lines, define custom_kernel(data), "
             "and do not use hidden cross-call caches or benchmark-cheating tricks. Favor correctness first, then speed. "
@@ -312,7 +454,7 @@ def _build_prompt(
         ]
     else:
         system_prompt = (
-            "You are an expert AMD MI355X Triton kernel engineer working on a real competition submission. "
+            f"You are an expert AMD MI355X {family_label} kernel engineer working on a real competition submission. "
             "Generate exactly one Python submission file. Return only raw Python source, no markdown fences. "
             "Preserve the live kernel contract, keep the two #!POPCORN header lines, define custom_kernel(data), "
             "and do not use hidden cross-call caches or benchmark-cheating tricks. Favor correctness first, then speed. "
@@ -345,20 +487,23 @@ Knowledge memory:
 Current parent submission:
 {parent_source}
 
-Seed Triton submission to improve:
+Seed submission to improve:
 {seed_source}
 
 Write a new full submission.py candidate for this problem.
 Requirements:
 {chr(10).join(delivery_requirements)}
 - preserve the exact data contract for the problem
-- include Triton code when optimizing Triton paths
+- keep the real hot path in the requested family rather than calling back into an anchor op
 - do not add fake speedups, persistent benchmark caches, or hidden state across evaluations
 - prefer a smaller, correct kernel over a large broken rewrite
 - preserve untouched code where possible and keep the edit localized
 
 Focused edit budget:
 {budget_text}
+
+Experiment protocol:
+{chr(10).join(f"- {line}" for line in _experiment_protocol(desired_family))}
 
 Atom-of-Thoughts operating rules:
 {chr(10).join(f"- {line}" for line in AOT_GUIDANCE)}
@@ -591,7 +736,7 @@ def _call_codex_exec(
         "Edit ./submission.py in place inside the current isolated workspace.",
         "Modify only ./submission.py and keep all other files unchanged.",
         "Your final message should be a short plain-text note describing the single focused edit you made.",
-        "Use $amd-triton-speedrun for the competition workflow, problem-contract rules, and current search discipline.",
+        f"Use {_default_skill_name(None)} for the competition workflow, problem-contract rules, and current search discipline.",
     ]
     if config.llm.codex_use_plan:
         orchestration_bits.append(
@@ -766,7 +911,7 @@ def _validate_hot_path(
     problem_key: str,
     desired_family: str | None,
 ) -> None:
-    if desired_family != "triton_explore":
+    if desired_family not in {"kernel_explore", "hip_explore"}:
         return
     body = _custom_kernel_body(source)
     if body is None:
@@ -778,7 +923,13 @@ def _validate_hot_path(
     }
     for token in forbidden.get(problem_key, []):
         if token in body:
-            raise RuntimeError(f"hot path remained on anchor op {token} instead of Triton")
+            family = "HIP" if desired_family == "hip_explore" else "Kernel"
+            raise RuntimeError(f"hot path remained on anchor op {token} instead of {family}")
+    if desired_family == "hip_explore":
+        if "load_inline(" not in source and "load_inline(" not in body:
+            raise RuntimeError("HIP family candidate did not use load_inline")
+        if "gfx950" not in source:
+            raise RuntimeError("HIP family candidate did not target gfx950")
 
 
 def _fallback_source(
@@ -961,6 +1112,7 @@ def _generate_source(
 ) -> tuple[str, dict[str, object], dict[str, object]]:
     problem_key = str(context["problem"]["key"])
     attempt = candidate_attempt(context)
+    context["attempt"] = attempt
     history = history_entries(context)
     parent_meta = load_parent_meta(parent_path)
     desired_family = context.get("desired_family")
@@ -992,6 +1144,7 @@ def _generate_source(
     )
     seed_meta = _extract_meta(seed_source)
     parent_source = parent_path.read_text(encoding="utf-8")
+    _write_experiment_plan(context, policy_profile=policy_profile, variant=variant)
 
     if not config.llm.enabled:
         return _fallback_source(seed_source, seed_meta, "llm_disabled"), policy_profile, variant
@@ -1058,7 +1211,7 @@ def _generate_source(
             last_error = exc
             continue
 
-    if not config.llm.fallback_to_triton and last_error is not None:
+    if not config.llm.fallback_to_seed and last_error is not None:
         raise last_error
     reason = str(last_error) if last_error is not None else f"unsupported_provider:{provider}"
     return _fallback_source(seed_source, seed_meta, reason), policy_profile, variant

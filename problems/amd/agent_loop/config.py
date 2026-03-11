@@ -34,7 +34,7 @@ class LLMConfig:
     openrouter_title: str | None
     reasoning_effort: str
     max_output_tokens: int
-    fallback_to_triton: bool
+    fallback_to_seed: bool
     codex_cli: str
     codex_model: str | None
     codex_profile: str | None
@@ -54,6 +54,7 @@ class ProblemConfig:
     goal: str
     objective: str
     mutator_command: str | None
+    default_family: str | None
     parent_strategy: str
     prune_failures: bool
     keep_revert: bool
@@ -148,7 +149,7 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         reasoning_effort=str(llm_raw.get("reasoning_effort", "medium")),
         max_output_tokens=int(llm_raw.get("max_output_tokens", 12000)),
-        fallback_to_triton=bool(llm_raw.get("fallback_to_triton", True)),
+        fallback_to_seed=bool(llm_raw.get("fallback_to_seed", llm_raw.get("fallback_to_triton", True))),
         codex_cli=str(llm_raw.get("codex_cli", "codex")),
         codex_model=(
             str(llm_raw["codex_model"]) if llm_raw.get("codex_model") else None
@@ -186,6 +187,9 @@ def load_config(path: str | Path) -> AppConfig:
             objective=str(value.get("objective", "geom_mean_ns")),
             mutator_command=(
                 str(value["mutator_command"]) if value.get("mutator_command") else None
+            ),
+            default_family=(
+                str(value["default_family"]) if value.get("default_family") else None
             ),
             parent_strategy=str(value.get("parent_strategy", "best")),
             prune_failures=bool(value.get("prune_failures", True)),

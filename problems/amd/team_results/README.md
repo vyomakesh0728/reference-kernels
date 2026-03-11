@@ -12,4 +12,4 @@ Current contents:
 
 Important note:
 - The currently promoted branch submissions are contract-faithful AITER-backed anchors
-- Triton mutation code exists in `agent_loop/triton_mutator.py`, but the current ranked-success submissions are not pure Triton kernels yet
+- Kernel exploration code exists in `agent_loop/kernel_mutator.py`, but the current ranked-success submissions are not pure HIP kernels yet

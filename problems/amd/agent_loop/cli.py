@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     campaign.add_argument("--problems", nargs="*")
     campaign.add_argument("--hypothesis-prefix", default="campaign")
     campaign.add_argument("--mode", default="leaderboard")
-    campaign.add_argument("--family", default="triton_explore")
+    campaign.add_argument("--family")
     campaign.add_argument("--sleep-seconds", type=float, default=0.0)
     campaign.add_argument("--max-consecutive-non-improve", "--stall-limit", dest="max_consecutive_non_improve", type=int, default=8)
     campaign.add_argument("--continue-on-error", action="store_true")
@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_parallel.add_argument("--problems", nargs="*")
     campaign_parallel.add_argument("--hypothesis-prefix", default="campaign-parallel")
     campaign_parallel.add_argument("--mode", default="leaderboard")
-    campaign_parallel.add_argument("--family", default="triton_explore")
+    campaign_parallel.add_argument("--family")
     campaign_parallel.add_argument("--sleep-seconds", type=float, default=1.0)
     campaign_parallel.add_argument("--max-consecutive-non-improve", "--stall-limit", dest="max_consecutive_non_improve", type=int, default=20)
     campaign_parallel.add_argument("--continue-on-error", action="store_true")
@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
                     hypothesis=args.hypothesis or f"iteration {iteration + 1}",
                     mutator_command=args.mutator_command,
                     mode=args.mode,
-                    desired_family=args.family,
+                    desired_family=_problem_family(config, args.problem, args.family),
                 )
                 print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
             return 0
@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                         problem_key,
                         hypothesis=f"{args.hypothesis_prefix} round {round_index + 1} {problem_key}",
                         mode=args.mode,
-                        desired_family=args.family,
+                        desired_family=_problem_family(config, problem_key, args.family),
                     )
                     print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
             return 0
@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
                             problem_key,
                             hypothesis=f"{args.hypothesis_prefix} round {round_index + 1} {problem_key}",
                             mode=args.mode,
-                            desired_family=args.family,
+                            desired_family=_problem_family(config, problem_key, args.family),
                         )
                     except Exception as exc:
                         if not args.continue_on_error:
@@ -247,6 +247,12 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def _problem_family(config, problem_key: str, requested_family: str | None) -> str | None:
+    if requested_family:
+        return requested_family
+    return config.require_problem(problem_key).default_family
+
+
 def _run_healthcheck(config, problem_key: str | None) -> int:
     report = {
         "config_path": str(config.config_path),
@@ -273,7 +279,7 @@ def _run_healthcheck(config, problem_key: str | None) -> int:
             "openrouter_title": config.llm.openrouter_title,
             "reasoning_effort": config.llm.reasoning_effort,
             "max_output_tokens": config.llm.max_output_tokens,
-            "fallback_to_triton": config.llm.fallback_to_triton,
+            "fallback_to_seed": config.llm.fallback_to_seed,
             "codex_cli": config.llm.codex_cli,
             "codex_model": config.llm.codex_model,
             "codex_path": shutil.which(config.llm.codex_cli),
@@ -339,13 +345,14 @@ def _launch_parallel_campaigns(config, args) -> int:
             f"{args.hypothesis_prefix}-{problem_key}",
             "--mode",
             args.mode,
-            "--family",
-            args.family,
             "--stall-limit",
             str(args.max_consecutive_non_improve),
             "--sleep-seconds",
             str(args.sleep_seconds),
         ]
+        family = _problem_family(config, problem_key, args.family)
+        if family:
+            command.extend(["--family", family])
         if args.continue_on_error:
             command.append("--continue-on-error")
         if args.bootstrap_baseline:

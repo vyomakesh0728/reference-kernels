@@ -33,8 +33,8 @@ This snapshot records the first successful MI355X ranked submissions for all thr
 - The observed end-to-end ranked submission wall clock was much larger than kernel execution time
 - We are treating `338s` as the current ranked reference budget and `600s` as the client-side timeout budget in `agent_loop.toml`
 
-## Triton note
+## Kernel note
 
-- The agent loop contains real Triton exploration code in `agent_loop/triton_mutator.py`
-- The currently promoted ranked-success submissions are not pure Triton yet
-- We switched to contract-faithful anchors first so the branch has valid leaderboard baselines before more aggressive Triton mutation
+- The agent loop contains real kernel exploration code in `agent_loop/kernel_mutator.py`
+- The currently promoted ranked-success submissions are not pure HIP kernels yet
+- We switched to contract-faithful anchors first so the branch has valid leaderboard baselines before more aggressive low-level kernel work

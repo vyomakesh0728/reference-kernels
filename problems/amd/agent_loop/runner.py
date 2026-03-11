@@ -29,8 +29,11 @@ RESULTS_TSV_HEADER = [
     "objective_us",
     "delta_ns_vs_parent",
     "workflow_url",
+    "variant_family",
     "variant_name",
+    "variant_strategy",
     "policy_profile",
+    "experiment_focus",
     "added_lines",
     "deleted_lines",
     "lines_changed",
@@ -630,9 +633,27 @@ class ClosedLoopRunner:
 
     def _ensure_results_header(self, problem_key: str) -> None:
         path = self._results_tsv_path(problem_key)
-        if path.exists():
+        expected_header = "\t".join(RESULTS_TSV_HEADER)
+        if not path.exists():
+            path.write_text(expected_header + "\n", encoding="utf-8")
             return
-        path.write_text("\t".join(RESULTS_TSV_HEADER) + "\n", encoding="utf-8")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if not lines:
+            path.write_text(expected_header + "\n", encoding="utf-8")
+            return
+        if lines[0] == expected_header:
+            return
+        old_header = lines[0].split("\t")
+        old_index = {name: index for index, name in enumerate(old_header)}
+        rewritten = [expected_header]
+        for line in lines[1:]:
+            fields = line.split("\t")
+            row = []
+            for column in RESULTS_TSV_HEADER:
+                index = old_index.get(column)
+                row.append(fields[index] if index is not None and index < len(fields) else "")
+            rewritten.append("\t".join(row))
+        path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
 
     def _next_experiment_number(self, problem_key: str) -> int:
         path = self._journal_jsonl_path(problem_key)
@@ -795,9 +816,12 @@ class ClosedLoopRunner:
         self._ensure_results_header(problem_key)
         experiment = self._next_experiment_number(problem_key)
         variant = candidate_meta.get("variant") if isinstance(candidate_meta, dict) else None
+        variant_family = variant.get("family") if isinstance(variant, dict) else ""
         variant_name = variant.get("variant_name") if isinstance(variant, dict) else ""
+        variant_strategy = variant.get("strategy") if isinstance(variant, dict) else ""
         policy_profile = candidate_meta.get("policy_profile") if isinstance(candidate_meta, dict) else None
         policy_name = policy_profile.get("name") if isinstance(policy_profile, dict) else ""
+        experiment_focus = policy_profile.get("focus") if isinstance(policy_profile, dict) else ""
         parent_path = Path(parent.source_path) if parent is not None else Path(candidate.source_path)
         added, deleted, changed = self._diff_stats(parent_path, Path(candidate.source_path))
         delta_ns = None
@@ -815,8 +839,11 @@ class ClosedLoopRunner:
             "" if result.objective is None else f"{float(result.objective) / 1_000.0:.6f}",
             "" if delta_ns is None else f"{delta_ns:.6f}",
             self._workflow_url_from_result(result) or "",
+            str(variant_family or ""),
             str(variant_name or ""),
+            str(variant_strategy or ""),
             str(policy_name or ""),
+            str(experiment_focus or ""),
             str(added),
             str(deleted),
             str(changed),
@@ -835,8 +862,11 @@ class ClosedLoopRunner:
             "objective_us": None if result.objective is None else float(result.objective) / 1_000.0,
             "delta_ns_vs_parent": delta_ns,
             "workflow_url": self._workflow_url_from_result(result),
+            "variant_family": variant_family,
             "variant_name": variant_name,
+            "variant_strategy": variant_strategy,
             "policy_profile": policy_name,
+            "experiment_focus": experiment_focus,
             "added_lines": added,
             "deleted_lines": deleted,
             "lines_changed": changed,
@@ -947,6 +977,7 @@ class ClosedLoopRunner:
             "submission.py",
             "context.json",
             "candidate.diff",
+            "experiment.plan.json",
             "prompt.system.txt",
             "prompt.user.txt",
             "scope_check.json",
@@ -974,6 +1005,7 @@ class ClosedLoopRunner:
             shutil.rmtree(evaluation_dir, ignore_errors=True)
         snapshot_files = [
             "submission.py",
+            "experiment.plan.json",
             "evaluation/result.txt",
             "evaluation/parsed_metrics.json",
             "evaluation/critique.json",
