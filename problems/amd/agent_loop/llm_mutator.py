@@ -26,6 +26,10 @@ from .triton_mutator import (
 
 
 CODE_BLOCK_RE = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL)
+CUSTOM_KERNEL_RE = re.compile(
+    r"def\s+custom_kernel\s*\([^)]*\):\n(?P<body>(?:[ \t]+.*(?:\n|$))*)",
+    re.MULTILINE,
+)
 
 
 def _extract_meta(source: str) -> dict[str, object]:
@@ -101,6 +105,62 @@ def _build_history_digest(history: list[dict[str, object]], limit: int = 6) -> s
     return "\n".join(entries) if entries else "(no prior history)"
 
 
+def _repeated_failure_hint(history: list[dict[str, object]], limit: int = 8) -> str | None:
+    counts: dict[str, int] = {}
+    for entry in history[:limit]:
+        critique = entry.get("critique") if isinstance(entry.get("critique"), dict) else {}
+        summary = critique.get("summary")
+        if isinstance(summary, str) and summary:
+            counts[summary] = counts.get(summary, 0) + 1
+    if not counts:
+        return None
+    summary, count = max(counts.items(), key=lambda item: item[1])
+    if count < 2:
+        return None
+    return f"Recent repeated failure pattern ({count}x): {summary}"
+
+
+def _problem_specific_guidance(
+    problem_key: str,
+    desired_family: str | None,
+    history: list[dict[str, object]],
+) -> list[str]:
+    guidance: list[str] = []
+    if desired_family == "triton_explore":
+        guidance.append(
+            "The real hot path in custom_kernel must execute Triton-based logic. Do not leave Triton as dead scaffold while delegating compute to an AITER anchor."
+        )
+
+    repeated_failure = _repeated_failure_hint(history)
+    if repeated_failure:
+        guidance.append(repeated_failure)
+
+    if problem_key == "mxfp4_mm":
+        guidance.extend(
+            [
+                "Preserve the shuffled MXFP4 contract exactly: quantize A with shuffle=True and consume B_shuffle/B_scale_sh consistently.",
+                "Do not change both semantic layout and tiling in the same candidate when correctness is failing repeatedly; fix contract/dataflow first, then tune tiles.",
+                "Prefer a minimal Triton matmul path that is actually called from custom_kernel over a larger submission that still routes the hot path through aiter.gemm_a4w4.",
+            ]
+        )
+    elif problem_key == "moe_mxfp4":
+        guidance.extend(
+            [
+                "If correctness is unstable, keep the routing/topk contract fixed and only rewrite one expert-compute stage at a time.",
+                "Avoid leaving the hot path on fused_moe while presenting Triton as unused side code.",
+            ]
+        )
+    elif problem_key == "mixed_mla":
+        guidance.extend(
+            [
+                "Bias toward latency-first rewrites for q_seq_len=1 decode, and keep the hot path on actual Triton decode/attention code rather than mla_decode_fwd.",
+                "Prefer small, correctness-preserving reductions in memory movement over broad rewrites that preserve the same slow structure.",
+            ]
+        )
+
+    return guidance
+
+
 def _build_prompt(
     config: AppConfig,
     context: dict[str, object],
@@ -113,6 +173,9 @@ def _build_prompt(
     history = history_entries(context)
     knowledge_path = Path(str(context["knowledge_path"]))
     knowledge_text = knowledge_path.read_text(encoding="utf-8") if knowledge_path.exists() else "{}"
+    desired_family = context.get("desired_family")
+    if not isinstance(desired_family, str):
+        desired_family = None
 
     system_prompt = (
         "You are an expert AMD MI355X Triton kernel engineer working on a real competition submission. "
@@ -154,6 +217,9 @@ Requirements:
 - include Triton code when optimizing Triton paths
 - do not add fake speedups, persistent benchmark caches, or hidden state across evaluations
 - prefer a smaller, correct kernel over a large broken rewrite
+
+Problem-specific guidance:
+{chr(10).join(f"- {line}" for line in _problem_specific_guidance(problem["key"], desired_family, history))}
 """
     return system_prompt.strip(), user_prompt.strip()
 
@@ -456,6 +522,27 @@ def _compact_reason(reason: str, limit: int = 240) -> str:
     return compact[: limit - 3] + "..."
 
 
+def _validate_hot_path(
+    source: str,
+    problem_key: str,
+    desired_family: str | None,
+) -> None:
+    if desired_family != "triton_explore":
+        return
+    match = CUSTOM_KERNEL_RE.search(source)
+    if not match:
+        raise RuntimeError("output did not include a readable custom_kernel body")
+    body = match.group("body")
+    forbidden = {
+        "mxfp4_mm": ["aiter.gemm_a4w4("],
+        "moe_mxfp4": ["fused_moe("],
+        "mixed_mla": ["mla_decode_fwd("],
+    }
+    for token in forbidden.get(problem_key, []):
+        if token in body:
+            raise RuntimeError(f"hot path remained on anchor op {token} instead of Triton")
+
+
 def _fallback_source(
     seed_source: str,
     seed_meta: dict[str, object],
@@ -496,6 +583,10 @@ def _llm_source(
     candidate_source = _canonicalize_source(raw_text, seed_source, meta)
     if "def custom_kernel" not in candidate_source:
         raise RuntimeError("LLM output did not define custom_kernel")
+    desired_family = context.get("desired_family")
+    if not isinstance(desired_family, str):
+        desired_family = None
+    _validate_hot_path(candidate_source, str(context["problem"]["key"]), desired_family)
     return candidate_source
 
 
@@ -526,6 +617,10 @@ def _anthropic_source(
     candidate_source = _canonicalize_source(raw_text, seed_source, meta)
     if "def custom_kernel" not in candidate_source:
         raise RuntimeError("Anthropic output did not define custom_kernel")
+    desired_family = context.get("desired_family")
+    if not isinstance(desired_family, str):
+        desired_family = None
+    _validate_hot_path(candidate_source, str(context["problem"]["key"]), desired_family)
     return candidate_source
 
 
@@ -556,6 +651,10 @@ def _openrouter_source(
     candidate_source = _canonicalize_source(raw_text, seed_source, meta)
     if "def custom_kernel" not in candidate_source:
         raise RuntimeError("OpenRouter output did not define custom_kernel")
+    desired_family = context.get("desired_family")
+    if not isinstance(desired_family, str):
+        desired_family = None
+    _validate_hot_path(candidate_source, str(context["problem"]["key"]), desired_family)
     return candidate_source
 
 
@@ -588,6 +687,10 @@ def _codex_source(
     candidate_source = _canonicalize_source(raw_text, seed_source, meta)
     if "def custom_kernel" not in candidate_source:
         raise RuntimeError("Codex output did not define custom_kernel")
+    desired_family = context.get("desired_family")
+    if not isinstance(desired_family, str):
+        desired_family = None
+    _validate_hot_path(candidate_source, str(context["problem"]["key"]), desired_family)
     return candidate_source
 
 
