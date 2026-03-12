@@ -100,6 +100,8 @@ def _experiment_protocol(desired_family: str | None) -> list[str]:
                 "Remove inherited Triton scaffold completely; the final HIP candidate should not keep import triton, @triton.jit, or unused Triton helper code.",
                 "Competition purity rule: do not use alternate streams, async overlap tricks, event/timing hacks, background work, or benchmark-specific hacks that can distort measured microseconds.",
                 "Do not include the lowercase token `stream` anywhere in the final submission source; KernelBot rejects such submissions before execution.",
+                "Benchmark-fidelity rule: optimize for sustained steady-state throughput under the evaluator, not bursty best-case timings. Do not insert sleeps, idle gaps, launch batching tricks, or duty-cycle manipulations that make microseconds look better without improving real kernel throughput.",
+                "Benchmark-fidelity rule: prefer changes that should survive warmed-up, repeated evaluation and robust aggregation; treat sub-10us-style vanity chasing and single-run noise as suspect.",
                 f"Treat this as a {family} microkernel experiment over one lever at a time: tile shape, LDS movement, double buffering, swizzle, or scaled MFMA replacement.",
             ]
         )
@@ -148,6 +150,11 @@ def _source_inspirations(problem_key: str, desired_family: str | None) -> list[d
                     "name": "AMD CDNA4 ISA",
                     "kind": "pdf",
                     "idea": "scaled MFMA instructions on gfx950 are the long-term target for MXFP4 throughput",
+                },
+                {
+                    "name": "StandardKernel High-Fidelity GPU Benchmarking",
+                    "kind": "blog",
+                    "idea": "favor steady-state, contention-free, non-bursty measurements and do not mistake measurement noise for kernel improvement",
                 },
                 {
                     "name": "ROCm 7.1 load_inline gist",
@@ -351,6 +358,19 @@ def _repeated_failure_hint(history: list[dict[str, object]], limit: int = 8) -> 
     return f"Recent repeated failure pattern ({count}x): {summary}"
 
 
+def _history_has_ok_family(history: list[dict[str, object]], *, family: str) -> bool:
+    for entry in history:
+        if entry.get("status") != "ok":
+            continue
+        meta = entry.get("meta")
+        if not isinstance(meta, dict):
+            continue
+        variant = meta.get("variant")
+        if isinstance(variant, dict) and variant.get("family") == family:
+            return True
+    return False
+
+
 def _problem_specific_guidance(
     problem_key: str,
     desired_family: str | None,
@@ -369,6 +389,7 @@ def _problem_specific_guidance(
     repeated_failure = _repeated_failure_hint(history)
     if repeated_failure:
         guidance.append(repeated_failure)
+    hip_ok_seen = _history_has_ok_family(history, family="hip_explore") if desired_family == "hip_explore" else False
 
     if problem_key == "mxfp4_mm":
         if desired_family == "hip_explore":
@@ -377,11 +398,19 @@ def _problem_specific_guidance(
                     "Target gfx950 explicitly in both PYTORCH_ROCM_ARCH and --offload-arch.",
                     "Keep the optimization path in one language and one compiler pipeline: Python submission.py + load_inline + HIP C++ only.",
                     "Assume a ROCm 7.1-style runner with clang++ and torch 2.10.0+rocm7.1 semantics when choosing HIP/load_inline code patterns.",
-                    "Use raw bf16 A/B for the first correctness-first HIP kernels if B_shuffle/B_scale_sh semantics are still unclear; do not fake a HIP path by calling aiter.gemm_a4w4.",
-                    "The next serious optimization frontier is CDNA4 scaled MFMA, especially V_MFMA_SCALE_F32_16X16X128_F8F6F4 and V_MFMA_SCALE_F32_32X32X64_F8F6F4, plus LDS tiling, double buffering, and swizzle.",
+                    "Preserve the shuffled MXFP4 contract semantics even in HIP mode. Before the first HIP correctness pass, a slow reference-oracle path is allowed: requantize logical A and B from the raw bf16 inputs with QuantType.per_1x32, dequantize them logically into float32, and use HIP only for the final float32-accumulate matmul before casting the output back to bf16.",
+                    "Even in that reference-oracle phase, do not drop or delete B_q, B_shuffle, or B_scale_sh. Keep them sanity-checked in custom_kernel so the candidate still respects the live contract inputs.",
+                    "Stay in contract-repair mode until one HIP candidate passes the remote correctness checks; do not pivot into memory-hierarchy tuning or scaled MFMA speculation before that.",
+                    "After the first HIP correctness pass, follow the CDNA4 ladder in order: vectorized ingress, direct global-to-LDS movement when possible, bank-conflict-aware LDS layout/swizzle, software pipelining with double buffering, then scaled MFMA.",
+                    "The long-term matrix-core targets are CDNA4 scaled MFMA instructions, especially V_MFMA_SCALE_F32_16X16X128_F8F6F4 and V_MFMA_SCALE_F32_32X32X64_F8F6F4.",
+                    "When benchmarking candidate kernels, optimize for stable repeated performance under warmed-up evaluation rather than best-case burst timing; do not use sleep/gap tricks or anything that changes duty cycle without improving sustained throughput.",
                     "Make one focused HIP edit per iteration: memory hierarchy, tile shape, launch shape, or MFMA inner loop replacement, not all at once.",
                 ]
             )
+            if not hip_ok_seen:
+                guidance.append(
+                    "No HIP candidate has passed remote correctness yet. Lock this round to contract repair only and keep the variant within correctness-first hip_shared_bf16 seeds."
+                )
         else:
             guidance.extend(
                 [
@@ -933,6 +962,20 @@ def _validate_hot_path(
             raise RuntimeError("HIP family candidate did not use load_inline")
         if "gfx950" not in source:
             raise RuntimeError("HIP family candidate did not target gfx950")
+        if problem_key == "mxfp4_mm":
+            if "QuantType.per_1x32" not in source:
+                raise RuntimeError("mxfp4_mm HIP candidate did not use QuantType.per_1x32")
+            sanitized_body = re.sub(r"^\s*del[^\n]*$", "", body, flags=re.MULTILINE)
+            if "b_shuffle" not in sanitized_body or "b_scale_sh" not in sanitized_body or "b_q" not in sanitized_body:
+                raise RuntimeError("mxfp4_mm HIP candidate did not keep the live contract tensors visible in custom_kernel")
+            if re.search(r"^\s*del[^\n]*\bb_shuffle\b", body, flags=re.MULTILINE):
+                raise RuntimeError("mxfp4_mm HIP candidate illegally discarded required contract tensor 'b_shuffle'")
+            if re.search(r"^\s*del[^\n]*\bb_scale_sh\b", body, flags=re.MULTILINE):
+                raise RuntimeError("mxfp4_mm HIP candidate illegally discarded required contract tensor 'b_scale_sh'")
+            if re.search(r"^\s*del[^\n]*\bb_q\b", body, flags=re.MULTILINE):
+                raise RuntimeError("mxfp4_mm HIP candidate illegally discarded required contract tensor 'b_q'")
+            if "shuffle=True" not in source and "shuffle=False" not in source:
+                raise RuntimeError("mxfp4_mm HIP candidate did not make its quantization mode explicit")
         lower_source = source.lower()
         forbidden_purity_tokens = (
             "stream",

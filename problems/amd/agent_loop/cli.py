@@ -10,6 +10,7 @@ import sys
 import time
 
 from .config import load_config
+from .harness import KernelHarness
 from .runner import ClosedLoopRunner
 
 
@@ -59,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     campaign.add_argument("--family")
     campaign.add_argument("--sleep-seconds", type=float, default=0.0)
     campaign.add_argument("--max-consecutive-non-improve", "--stall-limit", dest="max_consecutive_non_improve", type=int, default=8)
+    campaign.add_argument("--max-check-fails", type=int, default=3)
     campaign.add_argument("--continue-on-error", action="store_true")
     campaign.add_argument("--bootstrap-baseline", action="store_true")
 
@@ -73,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_parallel.add_argument("--family")
     campaign_parallel.add_argument("--sleep-seconds", type=float, default=1.0)
     campaign_parallel.add_argument("--max-consecutive-non-improve", "--stall-limit", dest="max_consecutive_non_improve", type=int, default=20)
+    campaign_parallel.add_argument("--max-check-fails", type=int, default=3)
     campaign_parallel.add_argument("--continue-on-error", action="store_true")
     campaign_parallel.add_argument("--bootstrap-baseline", action="store_true")
     campaign_parallel.add_argument("--stagger-seconds", type=float, default=2.0)
@@ -97,6 +100,32 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--problem", required=True)
     promote.add_argument("--candidate", required=True)
 
+    harness_run = sub.add_parser(
+        "harness-run",
+        help="Run a KernelBench-style staged harness over one submission source",
+    )
+    harness_run.add_argument("--problem", required=True)
+    harness_run.add_argument("--source")
+    harness_run.add_argument("--family")
+    harness_run.add_argument("--label", default="")
+    harness_run.add_argument("--stages", default="test,benchmark,leaderboard")
+    harness_run.add_argument("--continue-after-fail", action="store_true")
+
+    harness_resume = sub.add_parser(
+        "harness-resume",
+        help="Resume a previously created harness run directory",
+    )
+    harness_resume.add_argument("--problem", required=True)
+    harness_resume.add_argument("--run-dir")
+    harness_resume.add_argument("--continue-after-fail", action="store_true")
+
+    harness_summary = sub.add_parser(
+        "harness-summary",
+        help="Summarize a harness run directory or the latest run for a problem",
+    )
+    harness_summary.add_argument("--problem", required=True)
+    harness_summary.add_argument("--run-dir")
+
     return parser
 
 
@@ -104,6 +133,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     config = load_config(args.config)
+
+    if args.command in {"harness-run", "harness-resume", "harness-summary"}:
+        return _run_harness_command(config, args)
 
     if args.command == "healthcheck":
         return _run_healthcheck(config, args.problem)
@@ -120,12 +152,18 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "loop":
             for iteration in range(args.iterations):
+                desired_family = _problem_family(config, args.problem, args.family)
+                selected_mode = runner.recommended_mode(
+                    args.problem,
+                    requested_mode=args.mode or config.require_problem(args.problem).mode,
+                    desired_family=desired_family,
+                )
                 summary = runner.run_iteration(
                     args.problem,
                     hypothesis=args.hypothesis or f"iteration {iteration + 1}",
                     mutator_command=args.mutator_command,
-                    mode=args.mode,
-                    desired_family=_problem_family(config, args.problem, args.family),
+                    mode=selected_mode,
+                    desired_family=desired_family,
                 )
                 print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
             return 0
@@ -138,11 +176,17 @@ def main(argv: list[str] | None = None) -> int:
                     print(json.dumps({"stage": "baseline", **summary.__dict__}, indent=2, sort_keys=True))
             for round_index in range(args.rounds):
                 for problem_key in selected:
+                    desired_family = _problem_family(config, problem_key, args.family)
+                    selected_mode = runner.recommended_mode(
+                        problem_key,
+                        requested_mode=args.mode or config.require_problem(problem_key).mode,
+                        desired_family=desired_family,
+                    )
                     summary = runner.run_iteration(
                         problem_key,
                         hypothesis=f"{args.hypothesis_prefix} round {round_index + 1} {problem_key}",
-                        mode=args.mode,
-                        desired_family=_problem_family(config, problem_key, args.family),
+                        mode=selected_mode,
+                        desired_family=desired_family,
                     )
                     print(json.dumps(summary.__dict__, indent=2, sort_keys=True))
             return 0
@@ -150,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "campaign":
             selected = args.problems or sorted(config.problems)
             plateau_counts = {problem_key: 0 for problem_key in selected}
+            check_fail_counts = {problem_key: 0 for problem_key in selected}
             if args.bootstrap_baseline:
                 for problem_key in selected:
                     summary = runner.bootstrap_problem(problem_key, mode=args.mode)
@@ -159,13 +204,21 @@ def main(argv: list[str] | None = None) -> int:
                 for problem_key in selected:
                     if plateau_counts[problem_key] >= args.max_consecutive_non_improve:
                         continue
+                    if check_fail_counts[problem_key] >= args.max_check_fails:
+                        continue
                     active = True
+                    desired_family = _problem_family(config, problem_key, args.family)
+                    selected_mode = runner.recommended_mode(
+                        problem_key,
+                        requested_mode=args.mode or config.require_problem(problem_key).mode,
+                        desired_family=desired_family,
+                    )
                     try:
                         summary = runner.run_iteration(
                             problem_key,
                             hypothesis=f"{args.hypothesis_prefix} round {round_index + 1} {problem_key}",
-                            mode=args.mode,
-                            desired_family=_problem_family(config, problem_key, args.family),
+                            mode=selected_mode,
+                            desired_family=desired_family,
                         )
                     except Exception as exc:
                         if not args.continue_on_error:
@@ -179,17 +232,38 @@ def main(argv: list[str] | None = None) -> int:
                                     "status": "runner_error",
                                     "error": str(exc),
                                     "plateau_count": plateau_counts[problem_key],
+                                    "check_fail_count": check_fail_counts[problem_key],
                                 },
                                 indent=2,
                                 sort_keys=True,
                             )
                         )
                     else:
+                        if summary.status == "check_fail":
+                            check_fail_counts[problem_key] += 1
+                        else:
+                            check_fail_counts[problem_key] = 0
                         plateau_counts[problem_key] = 0 if summary.improved else plateau_counts[problem_key] + 1
                         payload = dict(summary.__dict__)
                         payload["round"] = round_index + 1
                         payload["plateau_count"] = plateau_counts[problem_key]
+                        payload["check_fail_count"] = check_fail_counts[problem_key]
                         print(json.dumps(payload, indent=2, sort_keys=True))
+                        if check_fail_counts[problem_key] >= args.max_check_fails:
+                            print(
+                                json.dumps(
+                                    {
+                                        "status": "campaign_halted",
+                                        "reason": "max_check_fails_reached",
+                                        "problem": problem_key,
+                                        "round": round_index + 1,
+                                        "max_check_fails": args.max_check_fails,
+                                        "last_candidate_id": summary.candidate_id,
+                                    },
+                                    indent=2,
+                                    sort_keys=True,
+                                )
+                            )
                     if args.sleep_seconds > 0:
                         time.sleep(args.sleep_seconds)
                 if not active:
@@ -197,8 +271,9 @@ def main(argv: list[str] | None = None) -> int:
                         json.dumps(
                             {
                                 "status": "campaign_complete",
-                                "reason": "all problems reached plateau threshold",
+                                "reason": "all problems reached plateau threshold or check-fail threshold",
                                 "max_consecutive_non_improve": args.max_consecutive_non_improve,
+                                "max_check_fails": args.max_check_fails,
                             },
                             indent=2,
                             sort_keys=True,
@@ -251,6 +326,42 @@ def _problem_family(config, problem_key: str, requested_family: str | None) -> s
     if requested_family:
         return requested_family
     return config.require_problem(problem_key).default_family
+
+
+def _run_harness_command(config, args) -> int:
+    harness = KernelHarness(config)
+    if args.command == "harness-run":
+        problem = config.require_problem(args.problem)
+        source_path = Path(args.source) if args.source else problem.submission_path
+        stages = [stage.strip() for stage in args.stages.split(",") if stage.strip()]
+        run_dir = harness.create_run(
+            args.problem,
+            source_path=source_path,
+            stages=stages,
+            family=args.family,
+            label=args.label,
+        )
+        summary = harness.resume_run(run_dir, continue_after_fail=args.continue_after_fail)
+        print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "harness-resume":
+        run_dir = Path(args.run_dir) if args.run_dir else harness.latest_run_dir(args.problem)
+        if run_dir is None:
+            raise SystemExit(f"no harness run found for {args.problem}")
+        summary = harness.resume_run(run_dir, continue_after_fail=args.continue_after_fail)
+        print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "harness-summary":
+        run_dir = Path(args.run_dir) if args.run_dir else harness.latest_run_dir(args.problem)
+        if run_dir is None:
+            raise SystemExit(f"no harness run found for {args.problem}")
+        summary = harness.summary(run_dir)
+        print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    raise SystemExit(f"unknown harness command: {args.command}")
 
 
 def _run_healthcheck(config, problem_key: str | None) -> int:
@@ -347,6 +458,8 @@ def _launch_parallel_campaigns(config, args) -> int:
             args.mode,
             "--stall-limit",
             str(args.max_consecutive_non_improve),
+            "--max-check-fails",
+            str(args.max_check_fails),
             "--sleep-seconds",
             str(args.sleep_seconds),
         ]

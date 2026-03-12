@@ -13,6 +13,7 @@ import subprocess
 from .config import AppConfig, ProblemConfig
 from .critic import build_critique, load_critique, write_critique
 from .evaluator import EvaluationResult, run_popcorn_submission
+from .kernel_mutator import render_submission
 from .storage import ExperimentStore, new_candidate_id, sha256_text
 
 
@@ -181,6 +182,23 @@ class ClosedLoopRunner:
             policy_profile_name=policy_profile_name if isinstance(policy_profile_name, str) else None,
         )
 
+    def recommended_mode(
+        self,
+        problem_key: str,
+        *,
+        requested_mode: str,
+        desired_family: str | None,
+    ) -> str:
+        if requested_mode != "leaderboard":
+            return requested_mode
+        if problem_key != "mxfp4_mm" or desired_family != "hip_explore":
+            return requested_mode
+        if not self._family_has_ok_evaluation(problem_key, family="hip_explore", mode="test"):
+            return "test"
+        if not self._family_has_ok_evaluation(problem_key, family="hip_explore", mode="benchmark"):
+            return "benchmark"
+        return requested_mode
+
     def bootstrap_problem(self, problem_key: str, mode: str | None = None) -> LoopSummary:
         problem = self.config.require_problem(problem_key)
         selected_mode = mode or problem.mode
@@ -296,14 +314,6 @@ class ClosedLoopRunner:
                 f"problem '{problem.key}' does not define mutator_command in the config"
             )
 
-        scope_check = self._check_candidate_scope(
-            problem=problem,
-            parent_path=Path(parent.source_path),
-            candidate_path=output_path,
-            candidate_dir=candidate_dir,
-        )
-        self._sync_attempt_snapshot(problem_key, candidate_id, candidate_dir)
-
         source_text = output_path.read_text(encoding="utf-8")
         self.store.add_candidate(
             candidate_id=candidate_id,
@@ -320,6 +330,22 @@ class ClosedLoopRunner:
         variant_name = variant.get("variant_name") if isinstance(variant, dict) else None
         policy_profile = candidate_meta.get("policy_profile")
         policy_profile_name = policy_profile.get("name") if isinstance(policy_profile, dict) else None
+        scope_parent_path, scope_parent_label = self._scope_parent_for_candidate(
+            problem_key=problem_key,
+            parent_path=Path(parent.source_path),
+            parent_meta=self._load_candidate_meta(Path(parent.source_path)) or {},
+            candidate_meta=candidate_meta,
+            candidate_dir=candidate_dir,
+            context=context,
+        )
+        scope_check = self._check_candidate_scope(
+            problem=problem,
+            parent_path=scope_parent_path,
+            candidate_path=output_path,
+            candidate_dir=candidate_dir,
+            compare_label=scope_parent_label,
+        )
+        self._sync_attempt_snapshot(problem_key, candidate_id, candidate_dir)
 
         if not scope_check["passed"]:
             return self._record_scope_reject(
@@ -511,6 +537,26 @@ class ClosedLoopRunner:
             if latest is not None and Path(latest.source_path).exists():
                 return latest
         return fallback
+
+    def _family_has_ok_evaluation(self, problem_key: str, *, family: str, mode: str) -> bool:
+        for row in self.store.all_candidates(problem_key):
+            source_path = Path(row.source_path)
+            meta = self._load_candidate_meta(source_path)
+            if meta is None:
+                pruned_summary = self._load_pruned_candidate_summary(problem_key, row.candidate_id)
+                if isinstance(pruned_summary, dict):
+                    pruned_meta = pruned_summary.get("meta")
+                    if isinstance(pruned_meta, dict):
+                        meta = pruned_meta
+            if not isinstance(meta, dict):
+                continue
+            variant = meta.get("variant")
+            if not isinstance(variant, dict) or variant.get("family") != family:
+                continue
+            evaluation = self.store.latest_evaluation_for_candidate(row.candidate_id, mode)
+            if evaluation is not None and evaluation.status == "ok":
+                return True
+        return False
 
     def _run_mutator(
         self,
@@ -706,6 +752,7 @@ class ClosedLoopRunner:
         parent_path: Path,
         candidate_path: Path,
         candidate_dir: Path,
+        compare_label: str | None = None,
     ) -> dict[str, object]:
         diff_lines = self._diff_lines(parent_path, candidate_path)
         diff_text = "\n".join(diff_lines).rstrip()
@@ -715,24 +762,29 @@ class ClosedLoopRunner:
         )
         added, deleted, changed = self._diff_stats_from_lines(diff_lines)
         hunk_count = self._diff_hunk_count(diff_lines)
+        effective_max_changed_lines = problem.max_changed_lines
+        effective_max_edit_hunks = problem.max_edit_hunks
+        if compare_label and compare_label.startswith("hip_seed:") and effective_max_edit_hunks is not None:
+            effective_max_edit_hunks = max(effective_max_edit_hunks, 8)
         violations: list[str] = []
-        if problem.max_changed_lines is not None and changed > problem.max_changed_lines:
+        if effective_max_changed_lines is not None and changed > effective_max_changed_lines:
             violations.append(
-                f"changed lines {changed} exceed budget {problem.max_changed_lines}"
+                f"changed lines {changed} exceed budget {effective_max_changed_lines}"
             )
-        if problem.max_edit_hunks is not None and hunk_count > problem.max_edit_hunks:
+        if effective_max_edit_hunks is not None and hunk_count > effective_max_edit_hunks:
             violations.append(
-                f"edit hunks {hunk_count} exceed budget {problem.max_edit_hunks}"
+                f"edit hunks {hunk_count} exceed budget {effective_max_edit_hunks}"
             )
         payload = {
             "problem": problem.key,
+            "compare_base": compare_label or str(parent_path),
             "passed": not violations,
             "added_lines": added,
             "deleted_lines": deleted,
             "lines_changed": changed,
             "edit_hunks": hunk_count,
-            "max_changed_lines": problem.max_changed_lines,
-            "max_edit_hunks": problem.max_edit_hunks,
+            "max_changed_lines": effective_max_changed_lines,
+            "max_edit_hunks": effective_max_edit_hunks,
             "violations": violations,
         }
         (candidate_dir / "scope_check.json").write_text(
@@ -740,6 +792,48 @@ class ClosedLoopRunner:
             encoding="utf-8",
         )
         return payload
+
+    def _scope_parent_for_candidate(
+        self,
+        *,
+        problem_key: str,
+        parent_path: Path,
+        parent_meta: dict[str, object],
+        candidate_meta: dict[str, object],
+        candidate_dir: Path,
+        context: dict[str, object],
+    ) -> tuple[Path, str]:
+        variant = candidate_meta.get("variant")
+        candidate_family = variant.get("family") if isinstance(variant, dict) else None
+        parent_variant = parent_meta.get("variant")
+        parent_family = parent_variant.get("family") if isinstance(parent_variant, dict) else None
+        if (
+            problem_key == "mxfp4_mm"
+            and candidate_family == "hip_explore"
+            and parent_family != "hip_explore"
+            and isinstance(variant, dict)
+        ):
+            try:
+                variant_index = int(candidate_meta.get("variant_index", 0))
+                attempt = int(candidate_meta.get("attempt", 0))
+                seed_source = render_submission(
+                    problem_key,
+                    variant_index,
+                    variant,
+                    context,
+                    attempt,
+                    policy_profile=candidate_meta.get("policy_profile")
+                    if isinstance(candidate_meta.get("policy_profile"), dict)
+                    else None,
+                )
+                seed_path = candidate_dir / "scope_parent.py"
+                seed_path.write_text(seed_source, encoding="utf-8")
+                variant_name = variant.get("variant_name")
+                label = f"hip_seed:{variant_name}" if isinstance(variant_name, str) and variant_name else "hip_seed"
+                return seed_path, label
+            except Exception:
+                return parent_path, str(parent_path)
+        return parent_path, str(parent_path)
 
     def _workflow_url_from_result(self, result: EvaluationResult) -> str | None:
         workflow_url = result.metrics.get("workflow_url")
@@ -955,6 +1049,8 @@ class ClosedLoopRunner:
             hypothesis=hypothesis,
             candidate_meta=candidate_meta,
         )
+        if self._should_prune_candidate(problem_key, candidate, result):
+            self._prune_candidate_artifacts(problem_key, candidate, result, critique)
         return LoopSummary(
             problem=problem_key,
             candidate_id=candidate.candidate_id,

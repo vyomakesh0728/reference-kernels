@@ -112,6 +112,38 @@ SEARCH_SPACE: dict[str, list[dict[str, object]]] = {
             "NUM_STAGES": 3,
         },
         {
+            "variant_name": "hip_reference_oracle_naive",
+            "family": "hip_explore",
+            "strategy": "hip_reference_oracle",
+            "ARCH": "gfx950",
+            "REFERENCE_INPUTS": True,
+            "NAIVE_KERNEL": True,
+            "USE_PROVIDED_BQ": False,
+            "A_QUANT_SHUFFLE": False,
+            "TILE_M": 16,
+            "TILE_N": 16,
+            "TILE_K": 32,
+            "DOUBLE_BUFFER": False,
+            "LDS_SWIZZLE": False,
+            "USE_SCALE_MFMA_SEED": False,
+        },
+        {
+            "variant_name": "hip_reference_tiled_m16n32k64",
+            "family": "hip_explore",
+            "strategy": "hip_reference_oracle",
+            "ARCH": "gfx950",
+            "REFERENCE_INPUTS": True,
+            "NAIVE_KERNEL": False,
+            "USE_PROVIDED_BQ": False,
+            "A_QUANT_SHUFFLE": False,
+            "TILE_M": 16,
+            "TILE_N": 32,
+            "TILE_K": 64,
+            "DOUBLE_BUFFER": False,
+            "LDS_SWIZZLE": False,
+            "USE_SCALE_MFMA_SEED": False,
+        },
+        {
             "variant_name": "hip_shared_bf16_m16n16k32",
             "family": "hip_explore",
             "strategy": "hip_shared_bf16",
@@ -308,12 +340,14 @@ POLICY_PROFILES: dict[str, list[dict[str, object]]] = {
         {
             "name": "hip_contract_reference",
             "family": "hip_explore",
-            "focus": "use load_inline on gfx950 with a correctness-first HIP kernel over logical bf16 A/B tensors",
+            "focus": "use load_inline on gfx950 with a correctness-first HIP kernel that preserves shuffled MXFP4 A/B contract semantics",
             "preferred_variants": [
+                "hip_reference_tiled_m16n32k64",
+                "hip_reference_oracle_naive",
                 "hip_shared_bf16_m16n16k32",
                 "hip_shared_bf16_m16n32k64",
             ],
-            "preferred_strategies": ["hip_shared_bf16"],
+            "preferred_strategies": ["hip_reference_oracle", "hip_shared_bf16"],
             "trigger_signals": ["contract_repair", "runtime_repair", "submission_repair"],
         },
         {
@@ -461,6 +495,26 @@ def choose_policy_profile(
         if filtered:
             profiles = filtered
 
+    if problem_key == "mxfp4_mm" and desired_family == "hip_explore":
+        hip_ok_seen = False
+        for entry in history:
+            if entry.get("status") != "ok":
+                continue
+            meta = entry.get("meta")
+            if not isinstance(meta, dict):
+                continue
+            variant = meta.get("variant")
+            if isinstance(variant, dict) and variant.get("family") == "hip_explore":
+                hip_ok_seen = True
+                break
+        if not hip_ok_seen:
+            locked = next(
+                (profile for profile in profiles if str(profile.get("name")) == "hip_contract_reference"),
+                None,
+            )
+            if locked is not None:
+                return locked
+
     usage_counts: Counter[str] = Counter()
     signal_counts: Counter[str] = Counter()
     last_profile_name: str | None = None
@@ -550,6 +604,31 @@ def choose_variant(
             index for index, variant in enumerate(variants) if variant.get("family") == desired_family
         ]
         if family_indices:
+            if problem_key == "mxfp4_mm" and desired_family == "hip_explore":
+                hip_ok_seen = False
+                for entry in history:
+                    if entry.get("status") != "ok":
+                        continue
+                    meta = entry.get("meta")
+                    if not isinstance(meta, dict):
+                        continue
+                    hist_variant = meta.get("variant")
+                    if isinstance(hist_variant, dict) and hist_variant.get("family") == "hip_explore":
+                        hip_ok_seen = True
+                        break
+                if not hip_ok_seen and isinstance(policy_profile, dict):
+                    preferred = {
+                        str(name)
+                        for name in policy_profile.get("preferred_variants", [])
+                        if isinstance(name, str)
+                    }
+                    locked_indices = [
+                        index
+                        for index in family_indices
+                        if str(variants[index].get("variant_name", "")) in preferred
+                    ]
+                    if locked_indices:
+                        family_indices = locked_indices
             center = 0
             if parent_meta and isinstance(parent_meta.get("variant_index"), int):
                 center = int(parent_meta["variant_index"])
@@ -867,11 +946,15 @@ def render_mxfp4_mm_hip(meta: dict[str, object], variant: dict[str, object]) -> 
         os.environ["PYTORCH_ROCM_ARCH"] = "__ARCH__"
         os.environ.setdefault("CXX", "clang++")
 
+        import aiter
+        from aiter import QuantType
+        from aiter.utility import fp4_utils
         import torch
         from torch.utils.cpp_extension import load_inline
         from task import input_t, output_t
 
         CONFIG = __CONFIG__
+        SCALE_GROUP = 32
 
         CPP_WRAPPER = '''
         void mxfp4_mm_hip(torch::Tensor a, torch::Tensor b, torch::Tensor c);
@@ -881,6 +964,7 @@ def render_mxfp4_mm_hip(meta: dict[str, object], variant: dict[str, object]) -> 
         #include <torch/extension.h>
         #include <hip/hip_runtime.h>
         #include <hip/amd_detail/amd_hip_bf16.h>
+        #include <type_traits>
 
         constexpr int TILE_M = __TILE_M__;
         constexpr int TILE_N = __TILE_N__;
@@ -888,24 +972,27 @@ def render_mxfp4_mm_hip(meta: dict[str, object], variant: dict[str, object]) -> 
         constexpr bool DOUBLE_BUFFER = __DOUBLE_BUFFER__;
         constexpr bool LDS_SWIZZLE = __LDS_SWIZZLE__;
         constexpr bool USE_SCALE_MFMA_SEED = __USE_SCALE_MFMA_SEED__;
+        constexpr bool REFERENCE_INPUTS = __REFERENCE_INPUTS__;
+        constexpr bool NAIVE_KERNEL = __NAIVE_KERNEL__;
 
         // HIP-first seed for MI355X/gfx950.
         // This keeps the entire path in one language and one compiler pipeline.
-        // The current kernel is a correctness-first tiled bf16 baseline that the agent can
-        // evolve toward CDNA4 scaled-MFMA + LDS double-buffering without leaving HIP.
+        // The first reference modes reconstruct the MXFP4 math in Python, then execute the final
+        // bf16 matmul in HIP. The naive variant is for semantic debugging only; the tiled variant
+        // is the first realistic correctness-first submission candidate.
+        // After the first passing HIP check, the agent can evolve this toward tiled shared-memory
+        // kernels and eventually scaled-MFMA without changing the Python/load_inline contract.
         // Seed target instruction for future rewrites: __MFMA_OP__
 
+        template <typename input_t>
         __global__ void mxfp4_mm_kernel(
-            const __hip_bfloat16* a,
-            const __hip_bfloat16* b,
+            const input_t* a,
+            const input_t* b,
             __hip_bfloat16* c,
             int m,
             int n,
             int k
         ) {
-            __shared__ __hip_bfloat16 a_tile[TILE_M][TILE_K];
-            __shared__ __hip_bfloat16 b_tile[TILE_N][TILE_K];
-
             const int local_x = threadIdx.x;
             const int local_y = threadIdx.y;
             const int row = blockIdx.y * TILE_M + local_y;
@@ -913,23 +1000,35 @@ def render_mxfp4_mm_hip(meta: dict[str, object], variant: dict[str, object]) -> 
 
             float acc = 0.0f;
 
+        if (NAIVE_KERNEL) {
+            if (row < m && col < n) {
+                for (int kk = 0; kk < k; ++kk) {
+                    acc += static_cast<float>(a[row * k + kk]) * static_cast<float>(b[col * k + kk]);
+                }
+            }
+        } else {
+            __shared__ input_t a_tile[TILE_M][TILE_K];
+            __shared__ input_t b_tile[TILE_N][TILE_K];
+
             for (int tile_k = 0; tile_k < k; tile_k += TILE_K) {
                 for (int load_k = local_x; load_k < TILE_K; load_k += blockDim.x) {
                     const int global_k = tile_k + load_k;
                     a_tile[local_y][load_k] =
-                        (row < m && global_k < k) ? a[row * k + global_k] : __hip_bfloat16(0.0f);
+                        (row < m && global_k < k) ? a[row * k + global_k] : input_t(0.0f);
                 }
                 for (int load_k = local_y; load_k < TILE_K; load_k += blockDim.y) {
                     const int global_k = tile_k + load_k;
                     b_tile[local_x][load_k] =
-                        (col < n && global_k < k) ? b[col * k + global_k] : __hip_bfloat16(0.0f);
+                        (col < n && global_k < k) ? b[col * k + global_k] : input_t(0.0f);
                 }
 
                 __syncthreads();
 
-                #pragma unroll 1
-                for (int kk = 0; kk < TILE_K; ++kk) {
-                    acc += static_cast<float>(a_tile[local_y][kk]) * static_cast<float>(b_tile[local_x][kk]);
+                if (row < m && col < n) {
+                    #pragma unroll 1
+                    for (int kk = 0; kk < TILE_K; ++kk) {
+                        acc += static_cast<float>(a_tile[local_y][kk]) * static_cast<float>(b_tile[local_x][kk]);
+                    }
                 }
 
                 __syncthreads();
@@ -941,10 +1040,11 @@ def render_mxfp4_mm_hip(meta: dict[str, object], variant: dict[str, object]) -> 
                     // the Python/load_inline contract.
                 }
             }
+        }
 
-            if (row < m && col < n) {
-                c[row * n + col] = static_cast<__hip_bfloat16>(acc);
-            }
+        if (row < m && col < n) {
+            c[row * n + col] = static_cast<__hip_bfloat16>(acc);
+        }
         }
 
         void mxfp4_mm_hip(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
@@ -953,19 +1053,35 @@ def render_mxfp4_mm_hip(meta: dict[str, object], variant: dict[str, object]) -> 
             const int k = static_cast<int>(a.size(1));
             dim3 block(TILE_N, TILE_M);
             dim3 grid((n + TILE_N - 1) / TILE_N, (m + TILE_M - 1) / TILE_M);
-            hipLaunchKernelGGL(
-                mxfp4_mm_kernel,
-                grid,
-                block,
-                0,
-                0,
-                reinterpret_cast<const __hip_bfloat16*>(a.data_ptr<at::BFloat16>()),
-                reinterpret_cast<const __hip_bfloat16*>(b.data_ptr<at::BFloat16>()),
-                reinterpret_cast<__hip_bfloat16*>(c.data_ptr<at::BFloat16>()),
-                m,
-                n,
-                k
-            );
+            if constexpr (REFERENCE_INPUTS) {
+                hipLaunchKernelGGL(
+                    HIP_KERNEL_NAME(mxfp4_mm_kernel<float>),
+                    grid,
+                    block,
+                    0,
+                    0,
+                    a.data_ptr<float>(),
+                    b.data_ptr<float>(),
+                    reinterpret_cast<__hip_bfloat16*>(c.data_ptr<at::BFloat16>()),
+                    m,
+                    n,
+                    k
+                );
+            } else {
+                hipLaunchKernelGGL(
+                    HIP_KERNEL_NAME(mxfp4_mm_kernel<__hip_bfloat16>),
+                    grid,
+                    block,
+                    0,
+                    0,
+                    reinterpret_cast<const __hip_bfloat16*>(a.data_ptr<at::BFloat16>()),
+                    reinterpret_cast<const __hip_bfloat16*>(b.data_ptr<at::BFloat16>()),
+                    reinterpret_cast<__hip_bfloat16*>(c.data_ptr<at::BFloat16>()),
+                    m,
+                    n,
+                    k
+                );
+            }
         }
         '''
 
@@ -991,11 +1107,41 @@ def render_mxfp4_mm_hip(meta: dict[str, object], variant: dict[str, object]) -> 
             return _MODULE
 
 
+        def _dequantize_logical_mxfp4(fp4_packed: torch.Tensor, scale_e8m0: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+            values = fp4_utils.mxfp4_to_f32(fp4_packed.contiguous())[:rows, :cols]
+            scales = scale_e8m0.contiguous()[:rows]
+            scales = scales.repeat_interleave(SCALE_GROUP, dim=1)[:, :cols]
+            scales_f32 = fp4_utils.e8m0_to_f32(scales)
+            return (values * scales_f32).to(torch.float32).contiguous()
+
+
+        def _reference_oracle_inputs(
+            a: torch.Tensor,
+            b: torch.Tensor,
+            b_q: torch.Tensor,
+            b_scale_sh: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            quant = aiter.get_triton_quant(QuantType.per_1x32)
+            a_q, a_scale = quant(a.contiguous(), shuffle=bool(CONFIG.get("A_QUANT_SHUFFLE", False)))
+            a_ref = _dequantize_logical_mxfp4(a_q, a_scale, rows=a.shape[0], cols=a.shape[1])
+            _, b_scale = quant(b.contiguous(), shuffle=False)
+            if CONFIG.get("USE_PROVIDED_BQ", False):
+                b_ref = _dequantize_logical_mxfp4(b_q, b_scale_sh, rows=b.shape[0], cols=b.shape[1])
+            else:
+                b_ref = _dequantize_logical_mxfp4(b_q, b_scale, rows=b.shape[0], cols=b.shape[1])
+            return a_ref, b_ref
+
+
         def custom_kernel(data: input_t) -> output_t:
             a, b, b_q, b_shuffle, b_scale_sh = data
-            del b_q, b_shuffle, b_scale_sh
-            a_in = a.contiguous()
-            b_in = b.contiguous()
+            torch._assert(b_q.shape[0] == b.shape[0], "B_q row count must match logical B")
+            torch._assert(b_shuffle.shape[0] == b.shape[0], "B_shuffle row count must match logical B")
+            torch._assert(b_scale_sh.numel() > 0, "B_scale_sh must be present for the live contract")
+            if CONFIG.get("REFERENCE_INPUTS", False):
+                a_in, b_in = _reference_oracle_inputs(a, b, b_q, b_scale_sh)
+            else:
+                a_in = a.contiguous()
+                b_in = b.contiguous()
             c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
             _module().mxfp4_mm_hip(a_in, b_in, c)
             return c
@@ -1012,6 +1158,8 @@ def render_mxfp4_mm_hip(meta: dict[str, object], variant: dict[str, object]) -> 
         .replace("__DOUBLE_BUFFER__", "true" if variant.get("DOUBLE_BUFFER") else "false")
         .replace("__LDS_SWIZZLE__", "true" if variant.get("LDS_SWIZZLE") else "false")
         .replace("__USE_SCALE_MFMA_SEED__", "true" if variant.get("USE_SCALE_MFMA_SEED") else "false")
+        .replace("__REFERENCE_INPUTS__", "true" if variant.get("REFERENCE_INPUTS") else "false")
+        .replace("__NAIVE_KERNEL__", "true" if variant.get("NAIVE_KERNEL") else "false")
         .replace("__MFMA_OP__", str(variant.get("MFMA_OP", "none")))
     )
 

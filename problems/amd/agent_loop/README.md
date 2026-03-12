@@ -23,7 +23,15 @@ python3 -m agent_loop campaign --mode leaderboard --bootstrap-baseline --rounds 
 python3 -m agent_loop cleanup --stale-pending-hours 6
 python3 -m agent_loop status --problem mxfp4_mm
 python3 -m agent_loop promote --problem mxfp4_mm --candidate <candidate-id>
+python3 -m agent_loop harness-run --problem mxfp4_mm --source .agent-loop/problems/mxfp4_mm/manual/hip_reference_tiled_retry_20260312-074121/submission.py --label manual-hip-ref
+python3 -m agent_loop harness-summary --problem mxfp4_mm
+python3 -m agent_loop harness-resume --problem mxfp4_mm
 ```
+
+For `mxfp4_mm`, treat HIP `submission.py` files as the only KernelBot-facing artifacts.
+If you need a semantic control, keep it as a separate local oracle file such as
+`.agent-loop/problems/mxfp4_mm/manual/torch_reference_oracle_f32/oracle.py`;
+do not treat a `torch.mm` control as a real submission candidate.
 
 ## Config
 
@@ -126,6 +134,7 @@ For `mxfp4_mm`, the current default is HIP-first:
 - the first HIP seeds are correctness-first tiled bf16 kernels that the loop can evolve toward CDNA4 scaled-MFMA, LDS swizzle, and double buffering
 - HIP candidates are seeded from the clean HIP template and rejected if they keep inherited Triton scaffold
 - HIP candidates are also rejected if they contain purity-breaking tokens such as alternate `stream` usage, event/timing hacks, or inherited Triton scaffold
+- HIP optimization is benchmark-fidelity constrained: the loop should prefer steady-state sustained throughput improvements and reject duty-cycle, stream, or timing-manipulation tricks that can distort measured microseconds
 - this is intentionally closer to an AutoKernel-style microkernel program than a broad codegen search
 
 ## Objective
@@ -144,6 +153,15 @@ benchmark section. Lower is better.
   together.
 - `campaign` is the overnight runner: it supports leaderboard-mode round-robin search and stops
   when each problem hits a configured non-improvement plateau.
+- `harness-run`, `harness-resume`, and `harness-summary` add a KernelBench-v3-inspired staged
+  harness around one submission source:
+  - every harness run gets its own artifact directory under `.agent-loop/harness_runs/<problem>/`
+  - the submission source is copied into the run directory as `submission.py`
+  - stages are explicit and ordered, typically `test -> benchmark -> leaderboard`
+  - each stage records `result.txt`, `stdout.txt`, `stderr.txt`, and `parsed_metrics.json`
+  - stage targets are named like `kernelbot-test`, `kernelbot-benchmark`, and `kernelbot-ranked`
+  - `harness-resume` continues from the first non-`ok` stage, and `harness-summary` prints a
+    compact JSON view of the run state
 - `--bootstrap-baseline` is idempotent: it reuses an already evaluated baseline for that mode and
   only resubmits the repo anchor when the submission source has changed or no cached baseline eval
   exists yet.
