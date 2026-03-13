@@ -59,6 +59,8 @@ PYTHON_START_MARKERS = (
 )
 CODEX_USAGE_LIMIT_RE = re.compile(r"you've hit your usage limit", re.IGNORECASE)
 CODEX_TRY_AGAIN_RE = re.compile(r"try again at\s+([0-9]{1,2}:[0-9]{2}\s*[AP]M)", re.IGNORECASE)
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LOCAL_SKILLS_ROOT = REPO_ROOT / "skills"
 AOT_GUIDANCE = [
     "Use an Atom-of-Thoughts style internal process: treat the current parent submission as the current Markov state, not as a transcript to copy verbatim.",
     "Preserve an answer-equivalence invariant: every next state must keep the exact live contract, semantics, and correctness behavior of the original task.",
@@ -83,7 +85,7 @@ def _family_label(desired_family: str | None) -> str:
 
 def _default_skill_name(desired_family: str | None) -> str:
     del desired_family
-    return "$amd-kernel-speedrun"
+    return str(LOCAL_SKILLS_ROOT / "amd-kernel-speedrun" / "SKILL.md")
 
 
 def _experiment_protocol(desired_family: str | None) -> list[str]:
@@ -768,7 +770,8 @@ def _call_codex_exec(
         "Edit ./submission.py in place inside the current isolated workspace.",
         "Modify only ./submission.py and keep all other files unchanged.",
         "Your final message should be a short plain-text note describing the single focused edit you made.",
-        f"Use {_default_skill_name(None)} for the competition workflow, problem-contract rules, and current search discipline.",
+        f"Read {_default_skill_name(None)} for the competition workflow, problem-contract rules, and current search discipline.",
+        f"For mxfp4_mm live correctness work, also read {LOCAL_SKILLS_ROOT / 'amd-live-reference-correctness' / 'SKILL.md'}.",
     ]
     if config.llm.codex_use_plan:
         orchestration_bits.append(

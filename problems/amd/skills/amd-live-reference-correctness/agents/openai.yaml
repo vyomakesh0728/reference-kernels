@@ -1,0 +1,4 @@
+interface:
+  display_name: "AMD Live Correctness"
+  short_description: "Recover live KernelBot reference correctness"
+  default_prompt: "Open skills/amd-live-reference-correctness/SKILL.md to debug mxfp4_mm live-reference mismatches and plan the next HIP correctness experiment."

@@ -9,6 +9,7 @@ It is intentionally separate from `.agent-loop/`:
 Current contents:
 - `ranked/2026-03-10/summary.md`: human-readable snapshot of the first successful ranked submissions
 - `ranked/2026-03-10/*.txt`: raw leaderboard-mode outputs copied from the local agent workspace
+- `hip/2026-03-13/summary.md`: first green HIP correctness and benchmark milestone for `mxfp4_mm`
 
 Important note:
 - The currently promoted branch submissions are contract-faithful AITER-backed anchors

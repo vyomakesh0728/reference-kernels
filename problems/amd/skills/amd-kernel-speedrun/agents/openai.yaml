@@ -1,0 +1,4 @@
+interface:
+  display_name: "AMD Kernel Speedrun"
+  short_description: "MI355X kernel competition workflow"
+  default_prompt: "Use $amd-kernel-speedrun to generate and iterate a competition-ready HIP or Triton kernel candidate."
