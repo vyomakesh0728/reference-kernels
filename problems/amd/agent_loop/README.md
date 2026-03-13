@@ -23,6 +23,7 @@ python3 -m agent_loop campaign --mode leaderboard --bootstrap-baseline --rounds 
 python3 -m agent_loop cleanup --stale-pending-hours 6
 python3 -m agent_loop status --problem mxfp4_mm
 python3 -m agent_loop promote --problem mxfp4_mm --candidate <candidate-id>
+python3 -m agent_loop handroll-campaign --problem mxfp4_mm --rounds 5 --stages test,benchmark
 python3 -m agent_loop harness-run --problem mxfp4_mm --source .agent-loop/problems/mxfp4_mm/manual/hip_reference_tiled_retry_20260312-074121/submission.py --label manual-hip-ref
 python3 -m agent_loop harness-summary --problem mxfp4_mm
 python3 -m agent_loop harness-resume --problem mxfp4_mm
@@ -153,6 +154,9 @@ benchmark section. Lower is better.
   together.
 - `campaign` is the overnight runner: it supports leaderboard-mode round-robin search and stops
   when each problem hits a configured non-improvement plateau.
+- `handroll-campaign` is the phase-2 MM optimizer: it starts from the tracked working seed,
+  applies one curated hand-rolled optimization move at a time, runs `test -> benchmark`, and
+  keeps or reverts automatically based on the benchmark objective.
 - `harness-run`, `harness-resume`, and `harness-summary` add a KernelBench-v3-inspired staged
   harness around one submission source:
   - every harness run gets its own artifact directory under `.agent-loop/harness_runs/<problem>/`

@@ -32,7 +32,7 @@ codex_use_plan = true
 codex_parallel_agents = 3
 
 [problems.mxfp4_mm]
-submission_path = "fp8-mm/submission.py"
+submission_path = "fp8-mm/hip_phase2_working.py"
 leaderboard = "amd-mxfp4-mm"
 gpu = "MI355X"
 mode = "benchmark"

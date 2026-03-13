@@ -1,0 +1,4 @@
+interface:
+  display_name: "Optimization Skill"
+  short_description: "CDNA4 phase-2 HIP optimization playbook"
+  default_prompt: "Use optimization-skill to optimize a green HIP kernel on MI355X/gfx950 without breaking correctness."

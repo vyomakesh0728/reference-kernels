@@ -10,6 +10,7 @@ import sys
 import time
 
 from .config import load_config
+from .handroll import HandrolledOptimizer
 from .harness import KernelHarness
 from .runner import ClosedLoopRunner
 
@@ -126,6 +127,16 @@ def build_parser() -> argparse.ArgumentParser:
     harness_summary.add_argument("--problem", required=True)
     harness_summary.add_argument("--run-dir")
 
+    handroll = sub.add_parser(
+        "handroll-campaign",
+        help="Run a hand-rolled keep/revert optimization loop from the current tracked working seed",
+    )
+    handroll.add_argument("--problem", required=True)
+    handroll.add_argument("--rounds", type=int, default=1)
+    handroll.add_argument("--sleep-seconds", type=float, default=0.0)
+    handroll.add_argument("--stages", default="test,benchmark")
+    handroll.add_argument("--leaderboard-on-improve", action="store_true")
+
     return parser
 
 
@@ -136,6 +147,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command in {"harness-run", "harness-resume", "harness-summary"}:
         return _run_harness_command(config, args)
+
+    if args.command == "handroll-campaign":
+        optimizer = HandrolledOptimizer(config)
+        records = optimizer.run_campaign(
+            problem_key=args.problem,
+            rounds=args.rounds,
+            stages=[item.strip() for item in args.stages.split(",") if item.strip()],
+            sleep_seconds=args.sleep_seconds,
+            leaderboard_on_improve=bool(args.leaderboard_on_improve),
+        )
+        for record in records:
+            print(json.dumps(record, indent=2, sort_keys=True))
+        return 0
 
     if args.command == "healthcheck":
         return _run_healthcheck(config, args.problem)

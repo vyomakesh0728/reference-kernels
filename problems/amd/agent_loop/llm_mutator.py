@@ -88,6 +88,23 @@ def _default_skill_name(desired_family: str | None) -> str:
     return str(LOCAL_SKILLS_ROOT / "amd-kernel-speedrun" / "SKILL.md")
 
 
+def _relevant_skill_paths(problem_key: str, desired_family: str | None) -> list[str]:
+    skill_paths = [str(LOCAL_SKILLS_ROOT / "amd-kernel-speedrun" / "SKILL.md")]
+    if problem_key == "mxfp4_mm":
+        skill_paths.append(str(LOCAL_SKILLS_ROOT / "amd-live-reference-correctness" / "SKILL.md"))
+    if desired_family == "hip_explore":
+        skill_paths.append(str(LOCAL_SKILLS_ROOT / "optimization-skill" / "SKILL.md"))
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for path in skill_paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        ordered.append(path)
+    return ordered
+
+
 def _experiment_protocol(desired_family: str | None) -> list[str]:
     family = _family_label(desired_family)
     protocol = [
@@ -471,6 +488,7 @@ def _build_prompt(
         budget_text = "\n".join(budget_lines)
     else:
         budget_text = "- no explicit edit budget provided"
+    skill_paths = _relevant_skill_paths(str(problem["key"]), desired_family)
 
     family_label = _family_label(desired_family)
     if workspace_edit:
@@ -532,6 +550,9 @@ Requirements:
 - do not add fake speedups, persistent benchmark caches, or hidden state across evaluations
 - prefer a smaller, correct kernel over a large broken rewrite
 - preserve untouched code where possible and keep the edit localized
+
+Read these repo-local skill files before editing:
+{chr(10).join(f"- {path}" for path in skill_paths)}
 
 Focused edit budget:
 {budget_text}
@@ -771,7 +792,7 @@ def _call_codex_exec(
         "Modify only ./submission.py and keep all other files unchanged.",
         "Your final message should be a short plain-text note describing the single focused edit you made.",
         f"Read {_default_skill_name(None)} for the competition workflow, problem-contract rules, and current search discipline.",
-        f"For mxfp4_mm live correctness work, also read {LOCAL_SKILLS_ROOT / 'amd-live-reference-correctness' / 'SKILL.md'}.",
+        "Also follow any additional repo-local skill files explicitly referenced in the USER prompt.",
     ]
     if config.llm.codex_use_plan:
         orchestration_bits.append(
