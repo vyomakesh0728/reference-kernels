@@ -10,7 +10,7 @@ os.environ["PYTORCH_ROCM_ARCH"] = "gfx950"
 os.environ.setdefault("CXX", "clang++")
 
 import aiter
-from aiter import QuantType
+from aiter import QuantType, dtypes
 from aiter.utility import fp4_utils
 import torch
 from torch.utils.cpp_extension import load_inline
@@ -495,6 +495,23 @@ def _reference_oracle_inputs(
     return a_ref, b_ref
 
 
+def _get_corrected_a_preshuffle(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    b_q: torch.Tensor,
+    b_scale_sh: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    quant = _quant()
+    a_q_raw, a_scale_raw = quant(a.contiguous(), shuffle=False)
+    a_scale_f32 = _expand_scales(a_scale_raw, rows=a.shape[0], cols=a.shape[1])
+    a_ref_vals = fp4_utils.mxfp4_to_f32(a_q_raw.contiguous())[: a.shape[0], : a.shape[1]].to(torch.float32)
+    rules, _ = _get_b_contract(b, b_q, b_scale_sh)
+    norm_a = (a.to(torch.float32) / a_scale_f32).contiguous()
+    a_corrected_vals = _apply_adjustment_rules(norm_a, a_ref_vals, rules)
+    a_corrected = (a_corrected_vals * a_scale_f32).to(torch.float32).contiguous()
+    return quant(a_corrected, shuffle=True)
+
+
 def _select_kernel_regime(m: int, k: int) -> str:
     if m <= 16:
         return "tiny_m"
@@ -508,6 +525,16 @@ def custom_kernel(data: input_t) -> output_t:
     torch._assert(b_q.shape[0] == b.shape[0], "B_q row count must match logical B")
     torch._assert(b_shuffle.shape[0] == b.shape[0], "B_shuffle row count must match logical B")
     torch._assert(b_scale_sh.numel() > 0, "B_scale_sh must be present for the live contract")
+    if a.shape[0] in (16, 64):
+        a_q_sh, a_scale_sh = _get_corrected_a_preshuffle(a, b, b_q, b_scale_sh)
+        return aiter.gemm_a4w4(
+            a_q_sh.contiguous(),
+            b_shuffle.contiguous(),
+            a_scale_sh.contiguous(),
+            b_scale_sh.contiguous(),
+            dtype=dtypes.bf16,
+            bpreshuffle=True,
+        )
     a_in, b_in = _reference_oracle_inputs(a, b, b_q, b_scale_sh)
     regime = _select_kernel_regime(a_in.shape[0], a_in.shape[1])
     use_mfma_medium = (

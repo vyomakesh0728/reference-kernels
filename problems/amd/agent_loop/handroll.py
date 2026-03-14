@@ -20,6 +20,7 @@ CPP_WRAPPER_RE = re.compile(r'CPP_WRAPPER = """.*?^"""', re.DOTALL | re.MULTILIN
 class HandrolledMove:
     name: str
     description: str
+    family: str = "generic"
 
 
 class HandrolledOptimizer:
@@ -42,13 +43,14 @@ class HandrolledOptimizer:
         state = self._load_state(problem_key)
         if state is None:
             state = self._initialize_state(problem_key=problem_key, stages=stages)
+        else:
+            self._ensure_failure_memory(problem_key, state)
 
         moves = self._moves_for_problem(problem_key)
         records: list[dict[str, object]] = []
 
         for _ in range(rounds):
-            move = moves[state["move_cursor"] % len(moves)]
-            state["move_cursor"] += 1
+            move = self._select_next_move(moves, state)
             state["round"] += 1
 
             round_dir = self._round_dir(problem_key, int(state["round"]), move.name)
@@ -87,6 +89,7 @@ class HandrolledOptimizer:
             )
             summary = self.harness.resume_run(run_dir)
             benchmark_objective = self._stage_objective(summary, "benchmark")
+            self._update_failure_memory(problem_key, state, move, summary)
             keep = self._should_keep(summary, benchmark_objective, float(state["best_objective_ns"]))
 
             if keep:
@@ -102,6 +105,7 @@ class HandrolledOptimizer:
             record = {
                 "round": int(state["round"]),
                 "move": move.name,
+                "family": move.family,
                 "description": move.description,
                 "candidate_path": str(candidate_path),
                 "run_dir": str(run_dir),
@@ -110,6 +114,7 @@ class HandrolledOptimizer:
                 "benchmark_objective_ns": benchmark_objective,
                 "decision": "keep" if keep else "revert",
                 "best_objective_ns": float(state["best_objective_ns"]),
+                "blocked_families": list(state.get("blocked_families", [])),
                 "created_at": datetime.now(UTC).isoformat(),
             }
             self._append_journal(problem_key, record)
@@ -150,6 +155,8 @@ class HandrolledOptimizer:
             "best_run_dir": str(baseline_run),
             "best_move": "baseline",
             "best_round": 0,
+            "family_failure_counts": {},
+            "blocked_families": [],
         }
         self._write_state(problem_key, state)
         self._append_journal(
@@ -157,6 +164,7 @@ class HandrolledOptimizer:
             {
                 "round": 0,
                 "move": "baseline",
+                "family": "baseline",
                 "description": "baseline benchmark for hand-rolled campaign",
                 "candidate_path": str(problem.submission_path),
                 "run_dir": str(baseline_run),
@@ -175,12 +183,24 @@ class HandrolledOptimizer:
             return []
         return [
             HandrolledMove(
-                name="mfma_scale_exact_m32",
-                description="Route only the exact m=32 regime through the native FP4 scaled-MFMA 32x32x64 path on gfx950, repacking the already-correct oracle tensors into packed fp4x2 plus E8M0 scales.",
+                name="deaiter_exact_m16_scaled_mfma",
+                description="Replace the exact m=16 AITER branch with the native FP4 scaled-MFMA 16x16x128 path while preserving the corrected live contract reconstruction.",
+                family="deaiter_m16",
             ),
             HandrolledMove(
-                name="mfma_scale_exact_m32_launch_bounds",
-                description="Add launch-bounds guidance to the exact-m32 native FP4 scaled-MFMA path after the first packed low-precision kernel is stable.",
+                name="deaiter_exact_m64_scaled_split16",
+                description="Replace the exact m=64 AITER branch with four native FP4 scaled-MFMA 16-row slices so the hot regime stays on a custom low-precision path instead of asm dispatch.",
+                family="deaiter_m64",
+            ),
+            HandrolledMove(
+                name="deaiter_exact_m256_native_hip",
+                description="Replace the large-shape torch.mm fallback for exact m=256 with the current native HIP tiled path to start removing non-native engines from the trunk.",
+                family="deaiter_m256",
+            ),
+            HandrolledMove(
+                name="deaiter_native_regime_dispatch_scaled_v1",
+                description="Remove the AITER exact-m16/exact-m64 branches and the large torch.mm fallback together, routing the current benchmark regimes through native scaled-MFMA or native HIP kernels only.",
+                family="deaiter_combo",
             ),
         ]
 
@@ -194,12 +214,17 @@ class HandrolledOptimizer:
         if move.name == "lds_pad_banks":
             return self._apply_lds_padding(updated)
 
-        if move.name == "mfma_scale_exact_m32":
-            return self._apply_mfma_scale_exact_m32(updated)
+        if move.name == "deaiter_exact_m16_scaled_mfma":
+            return self._apply_deaiter_exact_m16_scaled_mfma(updated)
 
-        if move.name == "mfma_scale_exact_m32_launch_bounds":
-            updated = self._apply_mfma_scale_exact_m32(updated)
-            return self._apply_mfma_scale_launch_bounds(updated, kernel_name="mxfp4_mm_kernel_mfma_scale_exact_m32")
+        if move.name == "deaiter_exact_m64_scaled_split16":
+            return self._apply_deaiter_exact_m64_scaled_split16(updated)
+
+        if move.name == "deaiter_exact_m256_native_hip":
+            return self._apply_deaiter_exact_m256_native_hip(updated)
+
+        if move.name == "deaiter_native_regime_dispatch_scaled_v1":
+            return self._apply_deaiter_native_regime_dispatch_scaled_v1(updated)
 
         if move.name == "b_tile_transpose_safe":
             return self._apply_b_tile_transpose(updated)
@@ -247,6 +272,100 @@ def _select_kernel_regime(m: int, k: int) -> str:
             1,
         )
         return source_text
+
+    def _replace_exact_aiter_guard(self, source_text: str, guard: str) -> str:
+        updated, count = re.subn(
+            r"if a\.shape\[0\] in \(16, 64\):",
+            guard,
+            source_text,
+            count=1,
+        )
+        if count != 1:
+            raise RuntimeError("failed to locate exact-m16/m64 AITER guard")
+        return updated
+
+    def _inject_after_contract_asserts(self, source_text: str, block: str) -> str:
+        anchor = '    torch._assert(b_scale_sh.numel() > 0, "B_scale_sh must be present for the live contract")\n'
+        if anchor not in source_text:
+            raise RuntimeError("failed to locate contract assert anchor for custom_kernel injection")
+        return source_text.replace(anchor, anchor + block, 1)
+
+    def _apply_deaiter_exact_m16_scaled_mfma(self, source_text: str) -> str:
+        updated = self._apply_mfma_scale_exact_m16(source_text)
+        updated = self._replace_exact_aiter_guard(updated, "if a.shape[0] == 64:")
+        return updated
+
+    def _apply_deaiter_exact_m64_scaled_split16(self, source_text: str) -> str:
+        updated = self._apply_mfma_scale_exact_m16(source_text)
+        if "import json\n" not in updated:
+            updated = updated.replace("import hashlib\n", "import hashlib\nimport json\n", 1)
+        updated = self._replace_exact_aiter_guard(updated, "if a.shape[0] == 16:")
+        helper_anchor = "\ndef custom_kernel(data: input_t) -> output_t:\n"
+        if "def _log_m64_numeric_diagnostics(" not in updated:
+            helper = '''
+
+def _log_m64_numeric_diagnostics(
+    *,
+    a_shape: tuple[int, int],
+    b_rows: int,
+    candidate: torch.Tensor,
+    anchor: torch.Tensor,
+) -> None:
+    seen = globals().setdefault("_M64_DIAG_SEEN", set())
+    shape_key = (int(a_shape[0]), int(b_rows), int(a_shape[1]))
+    if shape_key in seen:
+        return
+    seen.add(shape_key)
+
+    candidate_f32 = candidate.to(torch.float32)
+    anchor_f32 = anchor.to(torch.float32)
+    abs_diff = (candidate_f32 - anchor_f32).abs()
+    rel_diff = abs_diff / anchor_f32.abs().clamp_min(1e-6)
+
+    def bucket_counts(tensor: torch.Tensor, thresholds: list[float]) -> dict[str, int]:
+        out: dict[str, int] = {}
+        prev = 0
+        total = tensor.numel()
+        for threshold in thresholds:
+            count = int((tensor <= threshold).sum().item())
+            out[f"<= {threshold:g}"] = count - prev
+            prev = count
+        out[f"> {thresholds[-1]:g}"] = total - prev
+        return out
+
+    tol_counts = {}
+    for atol, rtol in ((1e-3, 1e-3), (1e-3, 1e-2), (1e-3, 2e-2), (5e-3, 5e-2)):
+        ok = abs_diff <= (atol + rtol * anchor_f32.abs())
+        tol_counts[f"atol={atol:g},rtol={rtol:g}"] = int(ok.sum().item())
+
+    payload = {
+        "m64_scaled_diag": {
+            "shape": {"m": shape_key[0], "n": shape_key[1], "k": shape_key[2]},
+            "mae": float(abs_diff.mean().item()),
+            "max_abs": float(abs_diff.max().item()),
+            "mean_rel": float(rel_diff.mean().item()),
+            "max_rel": float(rel_diff.max().item()),
+            "abs_hist": bucket_counts(abs_diff, [1e-3, 1e-2, 1e-1, 0.5, 1.0, 2.0, 4.0, 8.0]),
+            "rel_hist": bucket_counts(rel_diff, [1e-3, 1e-2, 5e-2, 1e-1, 2e-1, 5e-1, 1.0]),
+            "tol_counts": tol_counts,
+            "numel": int(abs_diff.numel()),
+        }
+    }
+    print(json.dumps(payload, sort_keys=True))
+'''
+            updated = updated.replace(helper_anchor, helper + helper_anchor, 1)
+        block = """    if a.shape[0] == 64 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:\n        b_packed, b_scale = _get_b_contract_mfma_fp4(b, b_q, b_scale_sh)\n        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)\n        inflight = globals().setdefault(\"_MFMA_SCALE_INFLIGHT\", [])\n        chunks = []\n        for offset in (0, 16, 32, 48):\n            a_slice = a.narrow(0, offset, 16).contiguous()\n            a_chunk, a_scale_chunk = _get_a_contract_mfma_fp4(a_slice, b, b_q, b_scale_sh)\n            c_chunk = c.narrow(0, offset, 16)\n            chunks.append((a_chunk, a_scale_chunk, c_chunk))\n        inflight.append((chunks, b_packed, b_scale))\n        if len(inflight) > 64:\n            del inflight[:-64]\n        for a_chunk, a_scale_chunk, c_chunk in chunks:\n            _module().mxfp4_mm_hip_mfma_scale_exact_m16(a_chunk, b_packed, a_scale_chunk, b_scale, c_chunk)\n        a_q_sh, a_scale_sh = _get_corrected_a_preshuffle(a, b, b_q, b_scale_sh)\n        anchor = aiter.gemm_a4w4(\n            a_q_sh.contiguous(),\n            b_shuffle.contiguous(),\n            a_scale_sh.contiguous(),\n            b_scale_sh.contiguous(),\n            dtype=dtypes.bf16,\n            bpreshuffle=True,\n        )\n        _log_m64_numeric_diagnostics(\n            a_shape=(int(a.shape[0]), int(a.shape[1])),\n            b_rows=int(b.shape[0]),\n            candidate=c,\n            anchor=anchor,\n        )\n        return anchor\n"""
+        return self._inject_after_contract_asserts(updated, block)
+
+    def _apply_deaiter_exact_m256_native_hip(self, source_text: str) -> str:
+        block = """    if a.shape[0] == 256:\n        a_in, b_in = _reference_oracle_inputs(a, b, b_q, b_scale_sh)\n        c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)\n        _module().mxfp4_mm_hip(a_in, b_in, c)\n        return c\n"""
+        return self._inject_after_contract_asserts(source_text, block)
+
+    def _apply_deaiter_native_regime_dispatch_scaled_v1(self, source_text: str) -> str:
+        updated = self._apply_mfma_scale_exact_m16(source_text)
+        updated = self._replace_exact_aiter_guard(updated, "if False:")
+        block = """    if a.shape[0] == 16 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:\n        a_packed, a_scale = _get_a_contract_mfma_fp4(a, b, b_q, b_scale_sh)\n        b_packed, b_scale = _get_b_contract_mfma_fp4(b, b_q, b_scale_sh)\n        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)\n        inflight = globals().setdefault(\"_MFMA_SCALE_INFLIGHT\", [])\n        inflight.append((a_packed, a_scale, b_packed, b_scale))\n        if len(inflight) > 64:\n            del inflight[:-64]\n        _module().mxfp4_mm_hip_mfma_scale_exact_m16(a_packed, b_packed, a_scale, b_scale, c)\n        return c\n    if a.shape[0] == 64 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:\n        a_packed, a_scale = _get_a_contract_mfma_fp4(a, b, b_q, b_scale_sh)\n        b_packed, b_scale = _get_b_contract_mfma_fp4(b, b_q, b_scale_sh)\n        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)\n        inflight = globals().setdefault(\"_MFMA_SCALE_INFLIGHT\", [])\n        chunks = []\n        for offset in (0, 16, 32, 48):\n            a_chunk = a_packed[offset:offset + 16].contiguous()\n            a_scale_chunk = a_scale[offset:offset + 16].contiguous()\n            c_chunk = c.narrow(0, offset, 16)\n            chunks.append((a_chunk, a_scale_chunk, c_chunk))\n        inflight.append((chunks, b_packed, b_scale))\n        if len(inflight) > 64:\n            del inflight[:-64]\n        for a_chunk, a_scale_chunk, c_chunk in chunks:\n            _module().mxfp4_mm_hip_mfma_scale_exact_m16(a_chunk, b_packed, a_scale_chunk, b_scale, c_chunk)\n        return c\n    if a.shape[0] == 256:\n        a_in, b_in = _reference_oracle_inputs(a, b, b_q, b_scale_sh)\n        c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)\n        _module().mxfp4_mm_hip(a_in, b_in, c)\n        return c\n"""
+        return self._inject_after_contract_asserts(updated, block)
 
     def _apply_medium_variant(self, source_text: str, *, tile_n: int, tile_k: int, variant_suffix: str) -> str:
         if f"mxfp4_mm_kernel_{variant_suffix}" in source_text:
@@ -1150,7 +1269,10 @@ void mxfp4_mm_hip_mfma_scale_exact_m16(torch::Tensor a_packed, torch::Tensor b_p
         a_packed, a_scale = _get_a_contract_mfma_fp4(a, b, b_q, b_scale_sh)
         b_packed, b_scale = _get_b_contract_mfma_fp4(b, b_q, b_scale_sh)
         c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
-        globals()["_LAST_MFMA_SCALE_TENSORS"] = (a_packed, a_scale, b_packed, b_scale, c)
+        inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
+        inflight.append((a_packed, a_scale, b_packed, b_scale))
+        if len(inflight) > 16:
+            del inflight[:-16]
         _module().mxfp4_mm_hip_mfma_scale_exact_m16(a_packed, b_packed, a_scale, b_scale, c)
         return c
     use_mfma_medium = (
@@ -1177,6 +1299,57 @@ void mxfp4_mm_hip_mfma_scale_exact_m16(torch::Tensor a_packed, torch::Tensor b_p
             f"__launch_bounds__(64)\n__global__ void {kernel_name}(",
             1,
         )
+
+    def _apply_mfma_scale_big_inflight(self, source_text: str, *, limit: int = 256) -> str:
+        return source_text.replace(
+            "        if len(inflight) > 16:\n            del inflight[:-16]\n",
+            f"        if len(inflight) > {limit}:\n            del inflight[:-{limit}]\n",
+        )
+
+    def _apply_mfma_scale_sync_debug(self, source_text: str, *, kernel_name: str) -> str:
+        return source_text.replace(
+            f"        _module().{kernel_name}(a_packed, b_packed, a_scale, b_scale, c)\n        return c\n",
+            f"        _module().{kernel_name}(a_packed, b_packed, a_scale, b_scale, c)\n        torch.cuda.synchronize()\n        return c\n",
+            1,
+        )
+
+    def _apply_mfma_scale_exact_m32_split_m16(self, source_text: str) -> str:
+        updated = self._apply_mfma_scale_exact_m16(source_text)
+        anchor = """    use_mfma_scale = (
+        regime == "medium_m"
+        and a_in.shape[0] == 16
+        and (a_in.shape[1] % 128) == 0
+        and (b_in.shape[0] % 16) == 0
+    )
+"""
+        insert = """    use_mfma_scale_split_m32 = (
+        regime == "medium_m"
+        and a_in.shape[0] == 32
+        and (a_in.shape[1] % 128) == 0
+        and (b_in.shape[0] % 16) == 0
+    )
+    if use_mfma_scale_split_m32:
+        a_packed, a_scale = _get_a_contract_mfma_fp4(a, b, b_q, b_scale_sh)
+        b_packed, b_scale = _get_b_contract_mfma_fp4(b, b_q, b_scale_sh)
+        c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
+        inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
+        a_top = a_packed[:16].contiguous()
+        a_bottom = a_packed[16:32].contiguous()
+        a_scale_top = a_scale[:16].contiguous()
+        a_scale_bottom = a_scale[16:32].contiguous()
+        c_top = c.narrow(0, 0, 16)
+        c_bottom = c.narrow(0, 16, 16)
+        inflight.append((a_top, a_scale_top, a_bottom, a_scale_bottom, b_packed, b_scale, c_top, c_bottom))
+        if len(inflight) > 64:
+            del inflight[:-64]
+        _module().mxfp4_mm_hip_mfma_scale_exact_m16(a_top, b_packed, a_scale_top, b_scale, c_top)
+        _module().mxfp4_mm_hip_mfma_scale_exact_m16(a_bottom, b_packed, a_scale_bottom, b_scale, c_bottom)
+        return c
+
+"""
+        if anchor not in updated:
+            raise RuntimeError("failed to locate exact-m16 native scaled block anchor for split-m32 insertion")
+        return updated.replace(anchor, insert + anchor, 1)
 
     def _apply_mfma_scale_exact_m32(self, source_text: str) -> str:
         updated = source_text
@@ -1381,7 +1554,10 @@ void mxfp4_mm_hip_mfma_scale_exact_m32(torch::Tensor a_packed, torch::Tensor b_p
         a_packed, a_scale = _get_a_contract_mfma_fp4(a, b, b_q, b_scale_sh)
         b_packed, b_scale = _get_b_contract_mfma_fp4(b, b_q, b_scale_sh)
         c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
-        globals()["_LAST_MFMA_SCALE_TENSORS"] = (a_packed, a_scale, b_packed, b_scale, c)
+        inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
+        inflight.append((a_packed, a_scale, b_packed, b_scale))
+        if len(inflight) > 16:
+            del inflight[:-16]
         _module().mxfp4_mm_hip_mfma_scale_exact_m32(a_packed, b_packed, a_scale, b_scale, c)
         return c
     use_mfma_medium = (
@@ -1571,3 +1747,70 @@ void mxfp4_mm_hip_mfma_scale_exact_m32(torch::Tensor a_packed, torch::Tensor b_p
     def _append_journal(self, problem_key: str, record: dict[str, object]) -> None:
         with self._journal_path(problem_key).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def _family_for_move_name(self, move_name: str) -> str:
+        if move_name.startswith("mfma_scale_exact_m32_split_m16"):
+            return "native_scale_m32_split16"
+        if move_name.startswith("mfma_scale_exact_m32"):
+            return "native_scale_m32_direct"
+        if move_name.startswith("mfma_scale_exact_m16"):
+            return "native_scale_m16"
+        return move_name
+
+    def _ensure_failure_memory(self, problem_key: str, state: dict[str, object]) -> None:
+        if "family_failure_counts" in state and "blocked_families" in state:
+            return
+        counts: dict[str, int] = {}
+        journal_path = self._journal_path(problem_key)
+        if journal_path.exists():
+            for line in journal_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                family = str(record.get("family") or self._family_for_move_name(str(record.get("move", ""))))
+                if self._record_has_benchmark_only_failure(record):
+                    counts[family] = counts.get(family, 0) + 1
+        state["family_failure_counts"] = counts
+        state["blocked_families"] = sorted(
+            family for family, count in counts.items() if count >= 2 and family != "baseline"
+        )
+
+    def _select_next_move(self, moves: list[HandrolledMove], state: dict[str, object]) -> HandrolledMove:
+        blocked = set(str(item) for item in state.get("blocked_families", []))
+        cursor = int(state["move_cursor"])
+        for offset in range(len(moves)):
+            move = moves[(cursor + offset) % len(moves)]
+            if move.family not in blocked:
+                state["move_cursor"] = cursor + offset + 1
+                return move
+        move = moves[cursor % len(moves)]
+        state["move_cursor"] = cursor + 1
+        return move
+
+    def _update_failure_memory(
+        self,
+        problem_key: str,
+        state: dict[str, object],
+        move: HandrolledMove,
+        summary: HarnessSummary,
+    ) -> None:
+        self._ensure_failure_memory(problem_key, state)
+        record = {
+            "test_status": self._stage_status(summary, "test"),
+            "benchmark_status": self._stage_status(summary, "benchmark"),
+        }
+        if not self._record_has_benchmark_only_failure(record):
+            return
+        counts = dict(state.get("family_failure_counts", {}))
+        counts[move.family] = int(counts.get(move.family, 0)) + 1
+        state["family_failure_counts"] = counts
+        blocked = set(str(item) for item in state.get("blocked_families", []))
+        if counts[move.family] >= 2 and move.family != "baseline":
+            blocked.add(move.family)
+        state["blocked_families"] = sorted(blocked)
+
+    def _record_has_benchmark_only_failure(self, record: dict[str, object]) -> bool:
+        if record.get("test_status") != "ok":
+            return False
+        benchmark_status = record.get("benchmark_status")
+        return benchmark_status in {"runtime_error", "check_fail", "submit_error"}
