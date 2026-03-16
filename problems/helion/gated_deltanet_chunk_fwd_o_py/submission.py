@@ -9,17 +9,17 @@ import helion.language as hl
 # Autotune locally for each shape, then paste the best config here.
 SHAPE_CONFIGS: dict[tuple, helion.Config] = {
     # Test shapes
-    (1, 64, 2, 64, 64): helion.Config(block_sizes=[], num_warps=1, num_stages=1),  # TODO: use any config that passes correctness check
-    (2, 128, 4, 64, 64): helion.Config(block_sizes=[], num_warps=1, num_stages=1),  # TODO: use any config that passes correctness check
-    (1, 256, 4, 64, 128): helion.Config(block_sizes=[], num_warps=1, num_stages=1),  # TODO: use any config that passes correctness check
+    (1, 64, 2, 64, 64): helion.Config(block_sizes=[], num_warps=8, num_stages=2),  # TODO: use any config that passes correctness check
+    (2, 128, 4, 64, 64): helion.Config(block_sizes=[], num_warps=8, num_stages=2),  # TODO: use any config that passes correctness check
+    (1, 256, 4, 64, 128): helion.Config(block_sizes=[], num_warps=8, num_stages=2),  # TODO: use any config that passes correctness check
     # Benchmark shapes
-    (1, 64, 1, 64, 64): helion.Config(block_sizes=[], num_warps=1, num_stages=1),  # TODO: replace with your autotuned config
-    (2, 512, 3, 64, 64): helion.Config(block_sizes=[], num_warps=1, num_stages=1),  # TODO: replace with your autotuned config
-    (2, 1024, 3, 64, 64): helion.Config(block_sizes=[], num_warps=1, num_stages=1),  # TODO: replace with your autotuned config
-    (3, 1024, 4, 100, 100): helion.Config(block_sizes=[], num_warps=1, num_stages=1),  # TODO: replace with your autotuned config
-    (4, 1024, 4, 128, 128): helion.Config(block_sizes=[], num_warps=1, num_stages=1),  # TODO: replace with your autotuned config
-    (2, 1536, 4, 128, 128): helion.Config(block_sizes=[], num_warps=1, num_stages=1),  # TODO: replace with your autotuned config
-    (4, 2048, 8, 64, 64): helion.Config(block_sizes=[], num_warps=1, num_stages=1),  # TODO: replace with your autotuned config
+    (1, 64, 1, 64, 64): helion.Config(block_sizes=[], num_warps=8, num_stages=2),  # TODO: replace with your autotuned config
+    (2, 512, 3, 64, 64): helion.Config(block_sizes=[], num_warps=8, num_stages=2),  # TODO: replace with your autotuned config
+    (2, 1024, 3, 64, 64): helion.Config(block_sizes=[], num_warps=8, num_stages=2),  # TODO: replace with your autotuned config
+    (3, 1024, 4, 100, 100): helion.Config(block_sizes=[], num_warps=8, num_stages=2),  # TODO: replace with your autotuned config
+    (4, 1024, 4, 128, 128): helion.Config(block_sizes=[], num_warps=8, num_stages=2),  # TODO: replace with your autotuned config
+    (2, 1536, 4, 128, 128): helion.Config(block_sizes=[], num_warps=8, num_stages=2),  # TODO: replace with your autotuned config
+    (4, 2048, 8, 64, 64): helion.Config(block_sizes=[], num_warps=8, num_stages=2),  # TODO: replace with your autotuned config
 }
 
 
@@ -54,22 +54,21 @@ def _make_kernel(config: helion.Config):
             c_idx = tile_t.begin // C
 
             g_vals = g[b_idx, tile_t, h_idx]
-            q_s = q[b_idx, tile_t, h_idx, :] * torch.exp(g_vals)[:, None]
-            k_s = k[b_idx, tile_t, h_idx, :] * torch.exp(-g_vals)[:, None]
+            q_tile = q[b_idx, tile_t, h_idx, :]
+            k_tile = k[b_idx, tile_t, h_idx, :]
+            v_tile = v[b_idx, tile_t, h_idx, :]
 
-            sim1 = hl.dot(q_s, k_s.T)
-            sim2 = hl.dot(q_s, k_s.T)
-            sim = (sim1 + sim2) * 0.5
+            # intra-chunk: q @ k^T * exp(g_i - g_j), with causal mask
+            qk = hl.dot(q_tile, k_tile.T)
             idx = hl.arange(tile_t.block_size)
-            mask = idx[:, None] >= idx[None, :]
-            sim = torch.where(mask, sim, 0.0)
-            local1 = hl.dot(sim.to(v.dtype), v[b_idx, tile_t, h_idx, :])
-            local2 = hl.dot(sim.to(v.dtype), v[b_idx, tile_t, h_idx, :])
-            local_out = (local1 + local2) * 0.5
+            g_diff = g_vals[:, None] - g_vals[None, :]
+            causal_mask = idx[:, None] >= idx[None, :]
+            sim = torch.where(causal_mask, qk * torch.exp(g_diff), 0.0)
+            local_out = hl.dot(sim.to(v.dtype), v_tile)
 
-            glob1 = hl.dot(q_s, h[b_idx, c_idx, h_idx, :, :])
-            glob2 = hl.dot(q_s, h[b_idx, c_idx, h_idx, :, :])
-            global_out = (glob1 + glob2) * 0.5
+            # inter-chunk: (q @ h) * exp(g)
+            q_s = q_tile * torch.exp(g_vals)[:, None]
+            global_out = hl.dot(q_s, h[b_idx, c_idx, h_idx, :, :])
 
             out[b_idx, tile_t, h_idx, :] = ((global_out + local_out) * scale).to(out.dtype)
 

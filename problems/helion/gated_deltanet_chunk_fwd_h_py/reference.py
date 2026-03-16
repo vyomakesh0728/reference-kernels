@@ -19,8 +19,9 @@ def _chunk_scaled_dot_kkt_fwd_eager(k, g_cumsum, beta, chunk_size):
     g_c = g_cumsum.float().reshape(B, NT, C, H).permute(0, 1, 3, 2)
     beta_c = beta.float().reshape(B, NT, C, H).permute(0, 1, 3, 2)
     kkt = k_c @ k_c.transpose(-1, -2)
-    g_diff = g_c.unsqueeze(-1) - g_c.unsqueeze(-2)
     strict_lower = torch.tril(torch.ones(C, C, device=k.device), diagonal=-1)
+    g_diff = g_c.unsqueeze(-1) - g_c.unsqueeze(-2)
+    g_diff = g_diff * strict_lower
     A = kkt * beta_c.unsqueeze(-1) * torch.exp(g_diff) * strict_lower
     return A.permute(0, 1, 3, 2, 4).reshape(B, T, H, C).to(torch.float32)
 
@@ -95,8 +96,8 @@ def check_implementation(data, output):
     exp_h, exp_v = expected
     got_h, got_v = output
 
-    reasons_h = verbose_allclose(got_h.float(), exp_h.float(), rtol=1e-2, atol=1e-2)
-    reasons_v = verbose_allclose(got_v.float(), exp_v.float(), rtol=1e-2, atol=1e-2)
+    reasons_h = verbose_allclose(got_h.float(), exp_h.float(), rtol=1e-3, atol=1e-3)
+    reasons_v = verbose_allclose(got_v.float(), exp_v.float(), rtol=1e-3, atol=1e-3)
 
     reasons = []
     if reasons_h:
