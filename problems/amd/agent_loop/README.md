@@ -74,9 +74,17 @@ mutator_command = "python3 -m agent_loop.llm_mutator --config agent_loop.toml --
 The `llm_mutator`:
 
 - reads the parent candidate, recent critique/history, policy profile, and a seeded kernel template
+- optionally injects grounded AMD retrieval context from `amd_kernel_rag` when an index is available
 - asks the configured generator for a full new `submission.py`
 - compile-checks the result locally
 - falls back to the deterministic seed renderer if the chosen provider is unavailable, the request fails, or the returned code is invalid
+
+Optional retrieval hook:
+
+- build the index from `/Users/v/reference-kernels/problems/amd` with `python3 -m amd_kernel_rag.cli build`
+- the default discovery path is `.agent-loop/retrieval/amd-kernel-rag/`, with a fallback to `retrieval/amd-kernel-rag/`
+- you can override discovery with `AMD_KERNEL_RAG_INDEX_DIR=/absolute/path/to/index`
+- when present, each candidate directory gets `rag_context.json` and `rag_context.txt` before the mutator runs
 
 Configuration lives in the `[llm]` table:
 

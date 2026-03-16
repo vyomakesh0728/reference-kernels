@@ -17,7 +17,7 @@ from torch.utils.cpp_extension import load_inline
 from task import input_t, output_t
 
 CONFIG = {
-    "variant_name": "native_scaled_bundle_m16_m32_m64_m256_v1",
+    "variant_name": "native_scaled_all_regimes_v1",
     "family": "hip_explore",
     "strategy": "hip_reference_oracle",
     "ARCH": "gfx950",
@@ -780,11 +780,25 @@ def custom_kernel(data: input_t) -> output_t:
     torch._assert(b_q.shape[0] == b.shape[0], "B_q row count must match logical B")
     torch._assert(b_shuffle.shape[0] == b.shape[0], "B_shuffle row count must match logical B")
     torch._assert(b_scale_sh.numel() > 0, "B_scale_sh must be present for the live contract")
-    a_in, b_in = _reference_oracle_inputs(a, b, b_q, b_scale_sh)
-    regime = _select_kernel_regime(a_in.shape[0], a_in.shape[1])
-    if a_in.shape[0] == 64 and (a_in.shape[1] % 64) == 0 and (b_in.shape[0] % 32) == 0:
+    if a.shape[0] == 256 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
         b_packed, b_scale = _get_b_contract_mfma_fp4(b, b_q, b_scale_sh)
-        c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
+        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+        inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
+        chunks = []
+        for offset in range(0, 256, 32):
+            a_slice = a.narrow(0, offset, 32).contiguous()
+            a_chunk, a_scale_chunk = _get_a_contract_mfma_fp4(a_slice, b, b_q, b_scale_sh)
+            c_chunk = c.narrow(0, offset, 32)
+            chunks.append((a_chunk, a_scale_chunk, c_chunk))
+        inflight.append((chunks, b_packed, b_scale))
+        if len(inflight) > 64:
+            del inflight[:-64]
+        for a_chunk, a_scale_chunk, c_chunk in chunks:
+            _module().mxfp4_mm_hip_mfma_scale_exact_m32(a_chunk, b_packed, a_scale_chunk, b_scale, c_chunk)
+        return c
+    if a.shape[0] == 64 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
+        b_packed, b_scale = _get_b_contract_mfma_fp4(b, b_q, b_scale_sh)
+        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
         inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
         chunks = []
         for offset in (0, 32):
@@ -798,32 +812,28 @@ def custom_kernel(data: input_t) -> output_t:
         for a_chunk, a_scale_chunk, c_chunk in chunks:
             _module().mxfp4_mm_hip_mfma_scale_exact_m32(a_chunk, b_packed, a_scale_chunk, b_scale, c_chunk)
         return c
-    if a_in.shape[0] == 32 and (a_in.shape[1] % 64) == 0 and (b_in.shape[0] % 32) == 0:
+    if a.shape[0] == 32 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
         a_packed, a_scale = _get_a_contract_mfma_fp4(a, b, b_q, b_scale_sh)
         b_packed, b_scale = _get_b_contract_mfma_fp4(b, b_q, b_scale_sh)
-        c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
+        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
         inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
         inflight.append((a_packed, a_scale, b_packed, b_scale))
         if len(inflight) > 64:
             del inflight[:-64]
         _module().mxfp4_mm_hip_mfma_scale_exact_m32(a_packed, b_packed, a_scale, b_scale, c)
         return c
-    use_mfma_scale = (
-        regime == "medium_m"
-        and a_in.shape[0] == 16
-        and (a_in.shape[1] % 128) == 0
-        and (b_in.shape[0] % 16) == 0
-    )
-    if use_mfma_scale:
+    if a.shape[0] == 16 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:
         a_packed, a_scale = _get_a_contract_mfma_fp4(a, b, b_q, b_scale_sh)
         b_packed, b_scale = _get_b_contract_mfma_fp4(b, b_q, b_scale_sh)
-        c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
+        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
         inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
         inflight.append((a_packed, a_scale, b_packed, b_scale))
         if len(inflight) > 64:
             del inflight[:-64]
         _module().mxfp4_mm_hip_mfma_scale_exact_m16(a_packed, b_packed, a_scale, b_scale, c)
         return c
+    a_in, b_in = _reference_oracle_inputs(a, b, b_q, b_scale_sh)
+    regime = _select_kernel_regime(a_in.shape[0], a_in.shape[1])
     use_mfma_medium = (
         regime == "medium_m"
         and a_in.shape[0] == 16

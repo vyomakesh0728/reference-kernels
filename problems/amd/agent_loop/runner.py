@@ -15,6 +15,7 @@ from .critic import build_critique, load_critique, write_critique
 from .evaluator import EvaluationResult, run_popcorn_submission
 from .kernel_mutator import render_submission
 from .storage import ExperimentStore, new_candidate_id, sha256_text
+from amd_kernel_rag.integration import maybe_write_prompt_context
 
 
 META_RE = re.compile(r"^# AGENT_LOOP_META:\s*(\{.*\})\s*$", re.MULTILINE)
@@ -272,6 +273,16 @@ class ClosedLoopRunner:
         memory_path = self._write_problem_memory(problem_key)
 
         hypothesis_text = hypothesis or "llm/generated mutation"
+        parent_source_text = Path(parent.source_path).read_text(encoding="utf-8")
+        history = self._candidate_history(problem_key, limit=12)
+        rag_context_path = maybe_write_prompt_context(
+            workspace_root=self.config.workspace.root,
+            candidate_dir=candidate_dir,
+            problem_key=problem_key,
+            parent_source=parent_source_text,
+            history=history,
+            hypothesis=hypothesis_text,
+        )
         context = {
             "problem": {
                 "key": problem.key,
@@ -292,11 +303,13 @@ class ClosedLoopRunner:
             },
             "repo_submission_path": str(problem.submission_path),
             "workspace_root": str(self.config.workspace.root),
-            "history": self._candidate_history(problem_key, limit=12),
+            "history": history,
             "knowledge_path": str(memory_path),
             "desired_family": desired_family,
             "working_submission_path": str(self._working_dir(problem_key) / "submission.py"),
         }
+        if rag_context_path is not None:
+            context["rag_context_path"] = str(rag_context_path)
         context_path.write_text(json.dumps(context, indent=2, sort_keys=True), encoding="utf-8")
 
         command = mutator_command or problem.mutator_command

@@ -471,6 +471,12 @@ def _build_prompt(
     history = history_entries(context)
     knowledge_path = Path(str(context["knowledge_path"]))
     knowledge_text = knowledge_path.read_text(encoding="utf-8") if knowledge_path.exists() else "{}"
+    rag_context_path_raw = context.get("rag_context_path")
+    rag_context_text = ""
+    if isinstance(rag_context_path_raw, str):
+        rag_context_path = Path(rag_context_path_raw)
+        if rag_context_path.exists():
+            rag_context_text = rag_context_path.read_text(encoding="utf-8")
     desired_family = context.get("desired_family")
     if not isinstance(desired_family, str):
         desired_family = None
@@ -535,6 +541,9 @@ Recent history digest:
 
 Knowledge memory:
 {knowledge_text}
+
+Retrieved reference context:
+{rag_context_text or "(no retrieval index or no relevant grounded context was available for this round)"}
 
 Current parent submission:
 {parent_source}

@@ -1,0 +1,269 @@
+[
+  {
+    "id": "q01-mfma-scale-operands",
+    "query": "What operands does __builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4 take and in what order?",
+    "relevant_any_of": [
+      {
+        "path_contains": "BuiltinsAMDGPU.td",
+        "text_contains": "mfma_scale_f32_32x32x64_f8f6f4"
+      },
+      {
+        "path_contains": "IntrinsicsAMDGPU.td",
+        "text_contains": "mfma_scale_f32_32x32x64_f8f6f4"
+      }
+    ],
+    "why_hard": "The query mixes a clang builtin spelling with low-level operand-order intent, so the retriever has to bridge builtin and intrinsic definitions."
+  },
+  {
+    "id": "q02-workitem-id",
+    "query": "Which builtin gives lane or workitem id x on AMDGPU? __builtin_amdgcn_workitem_id_x details",
+    "relevant_any_of": [
+      {
+        "path_contains": "BuiltinsAMDGPU.td",
+        "text_contains": "__builtin_amdgcn_workitem_id_x"
+      }
+    ],
+    "why_hard": "The answer hides in a large builtin table and can be diluted by nearby builtin families."
+  },
+  {
+    "id": "q03-ds-bpermute",
+    "query": "Where is llvm.amdgcn.ds.bpermute defined and what is the intrinsic spelling?",
+    "relevant_any_of": [
+      {
+        "path_contains": "IntrinsicsAMDGPU.td",
+        "text_contains": "ds_bpermute"
+      }
+    ],
+    "why_hard": "The user query uses the dotted LLVM name while the tablegen source often uses underscore variants."
+  },
+  {
+    "id": "q04-waitcnt",
+    "query": "AMDGPU s_waitcnt vmcnt lgkmcnt explanation and usage rules",
+    "relevant_any_of": [
+      {
+        "path_contains": "AMDGPUUsage",
+        "text_contains": "waitcnt"
+      }
+    ],
+    "why_hard": "This is concept-oriented and easily drifts toward unrelated ISA text unless the usage guide stays highly ranked."
+  },
+  {
+    "id": "q05-flat-buffer-addressing",
+    "query": "Difference between flat buffer and global memory operations in AMDGPU usage docs",
+    "relevant_any_of": [
+      {
+        "path_contains": "AMDGPUUsage",
+        "text_contains": "flat"
+      },
+      {
+        "path_contains": "AMDGPUUsage",
+        "text_contains": "buffer"
+      }
+    ],
+    "why_hard": "The query is broad and requires the docs chunker to keep addressing-family context intact."
+  },
+  {
+    "id": "q06-sema-builtin-errors",
+    "query": "OpenCL Sema tests for AMDGPU builtin argument checking",
+    "relevant_any_of": [
+      {
+        "path_contains": "clang/test/SemaOpenCL"
+      }
+    ],
+    "why_hard": "There are many OpenCL test files, so directory-level recall matters."
+  },
+  {
+    "id": "q07-codegen-barrier",
+    "query": "How clang lowers __builtin_amdgcn_s_barrier in CodeGenOpenCL tests",
+    "relevant_any_of": [
+      {
+        "path_contains": "clang/test/CodeGenOpenCL",
+        "text_contains": "s_barrier"
+      }
+    ],
+    "why_hard": "The query combines a builtin spelling and a test-suite location, which tends to fragment lexical matches."
+  },
+  {
+    "id": "q08-v-mfma-examples",
+    "query": "LLVM AMDGPU codegen tests with v_mfma examples for bf16 or fp8",
+    "relevant_any_of": [
+      {
+        "path_contains": "llvm/test/CodeGen/AMDGPU",
+        "text_contains": "v_mfma"
+      }
+    ],
+    "why_hard": "The test tree is large and heavily repetitive, so ranking the right mfma snippet is non-trivial."
+  },
+  {
+    "id": "q09-cdna4-gemm-blog",
+    "query": "CDNA4 GEMM kernels scaled MFMA block scaling ROCm blog",
+    "relevant_any_of": [
+      {
+        "source_contains": "rocm-cdna4-gemm-blog"
+      }
+    ],
+    "why_hard": "The query is phrased as a concept summary rather than an exact title."
+  },
+  {
+    "id": "q10-amd-brr-blog",
+    "query": "Hazy AMD BRR blog on bandwidth reduction and AMD kernels",
+    "relevant_any_of": [
+      {
+        "source_contains": "hazy-amd-brr-blog"
+      }
+    ],
+    "why_hard": "The blog title is short and acronym-heavy, which can hurt dense recall if the corpus is mostly code."
+  },
+  {
+    "id": "q11-hk-blog",
+    "query": "Hazy HK blog for hierarchical kernels and AMD kernel research",
+    "relevant_any_of": [
+      {
+        "source_contains": "hazy-hk-blog"
+      }
+    ],
+    "why_hard": "This is jargon-heavy and acronym-like, so the system has to retain blog title and nearby context."
+  },
+  {
+    "id": "q12-gcnasm-opcode",
+    "query": "gcnasm opcode examples and AMD assembly encoding reference",
+    "relevant_any_of": [
+      {
+        "source_contains": "gcnasm"
+      }
+    ],
+    "why_hard": "The repo mixes implementation and examples, so broad lexical queries can land on tooling code instead of the useful examples."
+  },
+  {
+    "id": "q13-memory-fault-session",
+    "query": "Which local session summary mentions exact m64 direct native scaled MFMA memory fault benchmark failures?",
+    "relevant_any_of": [
+      {
+        "path_contains": "session-summary.md",
+        "text_contains": "memory fault"
+      }
+    ],
+    "why_hard": "This is a local-debugging query that should surface current repo memory, not just public LLVM docs."
+  },
+  {
+    "id": "q14-b-scale-sh-probe",
+    "query": "Which local note says b_scale_sh matches Triton-style shuffled raw scale?",
+    "relevant_any_of": [
+      {
+        "text_contains": "b_scale_sh matches Triton-style shuffled raw scale"
+      }
+    ],
+    "why_hard": "The target is a very specific sentence inside local notes, so chunk boundaries have to preserve the exact phrase."
+  },
+  {
+    "id": "q15-handroll-mfma-scale",
+    "query": "Where in our handrolled AMD code do we call __builtin_amdgcn_mfma_scale builtins?",
+    "relevant_any_of": [
+      {
+        "path_contains": "agent_loop/handroll.py",
+        "text_contains": "__builtin_amdgcn_mfma_scale"
+      }
+    ],
+    "why_hard": "The query targets local code examples, which should beat generic llvm docs for agent context."
+  },
+  {
+    "id": "q16-fp8-mm-builtin-example",
+    "query": "Local fp8-mm HIP example with __builtin_amdgcn_mfma_f32_16x16x32_bf16",
+    "relevant_any_of": [
+      {
+        "path_contains": "fp8-mm/hip_phase2_working.py",
+        "text_contains": "__builtin_amdgcn_mfma_f32_16x16x32_bf16"
+      }
+    ],
+    "why_hard": "This must retrieve a concrete local code example instead of a more abstract builtin definition."
+  },
+  {
+    "id": "q17-readfirstlane",
+    "query": "Definition of __builtin_amdgcn_readfirstlane and any related LLVM builtin entry",
+    "relevant_any_of": [
+      {
+        "path_contains": "BuiltinsAMDGPU.td",
+        "text_contains": "__builtin_amdgcn_readfirstlane"
+      }
+    ],
+    "why_hard": "The builtin sits among many similar lane and exec helpers."
+  },
+  {
+    "id": "q18-raw-ptr-buffer-load",
+    "query": "Where is llvm.amdgcn.raw.ptr.buffer.load defined?",
+    "relevant_any_of": [
+      {
+        "path_contains": "IntrinsicsAMDGPU.td",
+        "text_contains": "raw_ptr_buffer_load"
+      }
+    ],
+    "why_hard": "The intrinsic name contains dots in the query and underscores in the source."
+  },
+  {
+    "id": "q19-wavefront-size",
+    "query": "AMDGPU usage docs wavefront size and wave32 wave64 details",
+    "relevant_any_of": [
+      {
+        "path_contains": "AMDGPUUsage",
+        "text_contains": "wavefront"
+      }
+    ],
+    "why_hard": "Wavefront text appears in many sections, so chunk locality matters."
+  },
+  {
+    "id": "q20-gcnasm-mfma",
+    "query": "Does gcnasm include MFMA or matrix instruction examples?",
+    "relevant_any_of": [
+      {
+        "source_contains": "gcnasm",
+        "text_contains": "mfma"
+      }
+    ],
+    "why_hard": "The repo may mention MFMA sparsely, so this exposes source coverage gaps quickly."
+  },
+  {
+    "id": "q21-kernel-mutator-scaled-mfma",
+    "query": "Our agent_loop kernel mutator focus on replacing tiled inner loop with CDNA4 scaled MFMA intrinsics",
+    "relevant_any_of": [
+      {
+        "path_contains": "agent_loop/kernel_mutator.py",
+        "text_contains": "scaled MFMA intrinsics"
+      }
+    ],
+    "why_hard": "This is long local phrasing that should hit a very specific strategy string."
+  },
+  {
+    "id": "q22-mixed-builtin-intrinsic-mapping",
+    "query": "Map __builtin_amdgcn names to llvm.amdgcn intrinsic names for kernel engineering",
+    "relevant_any_of": [
+      {
+        "path_contains": "BuiltinsAMDGPU.td"
+      },
+      {
+        "path_contains": "IntrinsicsAMDGPU.td"
+      }
+    ],
+    "why_hard": "The right answer usually needs both source families, so hybrid recall across adjacent chunks matters."
+  },
+  {
+    "id": "q23-codegen-amdgpu-tree",
+    "query": "Where are the LLVM AMDGPU codegen tests in the llvm-project tree?",
+    "relevant_any_of": [
+      {
+        "path_contains": "llvm/test/CodeGen/AMDGPU"
+      }
+    ],
+    "why_hard": "Directory-discovery questions are easy to miss when indexes over-emphasize leaf chunks."
+  },
+  {
+    "id": "q24-memory-fault-operands",
+    "query": "Find local notes about operand issues or scale_a scale_b experiments related to GPU memory faults",
+    "relevant_any_of": [
+      {
+        "path_contains": "session-summary.md",
+        "text_contains": "scale_a = 127"
+      }
+    ],
+    "why_hard": "This is the kind of failure-memory query we want agents to answer from repo-local evidence instead of guessing."
+  }
+]
