@@ -497,12 +497,24 @@ def _build_prompt(
     skill_paths = _relevant_skill_paths(str(problem["key"]), desired_family)
 
     family_label = _family_label(desired_family)
+    purity_clause = (
+        "Reject any hidden or cross-call cache, illegal_cache pattern, pointer replay, output replay, "
+        "stale-tensor reuse, pointer-address keyed memoization, shape/stride/seed keyed memoization, "
+        "or any scheme that reuses prior outputs or intermediates instead of recomputing from the current input. "
+        "Every output must be derived from the current call's tensors only."
+    )
+    purity_requirements = [
+        "- reject any hidden or cross-call cache, illegal_cache pattern, pointer replay, output replay, or stale-output reuse",
+        "- do not cache or memoize by data_ptr(), storage pointer, shape tuple, stride tuple, seed, or any other proxy for prior outputs",
+        "- do not keep global/module/static/LRU tensors or intermediates that can survive across calls or evaluations",
+        "- every output must be recomputed from the current input tensors within the current call",
+    ]
     if workspace_edit:
         system_prompt = (
             f"You are an expert AMD MI355X {family_label} kernel engineer working on a real competition submission. "
             "Edit the existing submission.py file in place inside the current isolated workspace. "
             "Preserve the live kernel contract, keep the two #!POPCORN header lines, define custom_kernel(data), "
-            "and do not use hidden cross-call caches or benchmark-cheating tricks. Favor correctness first, then speed. "
+            f"and {purity_clause} Favor correctness first, then speed. "
             "Use Codex helper agents only for internal analysis, then finish with a short plain-text summary of the one focused edit you made."
         )
         delivery_requirements = [
@@ -515,7 +527,7 @@ def _build_prompt(
             f"You are an expert AMD MI355X {family_label} kernel engineer working on a real competition submission. "
             "Generate exactly one Python submission file. Return only raw Python source, no markdown fences. "
             "Preserve the live kernel contract, keep the two #!POPCORN header lines, define custom_kernel(data), "
-            "and do not use hidden cross-call caches or benchmark-cheating tricks. Favor correctness first, then speed. "
+            f"and {purity_clause} Favor correctness first, then speed. "
             "Use Codex helper agents only for internal analysis, then return a single final submission.py."
         )
         delivery_requirements = [
@@ -557,6 +569,9 @@ Requirements:
 - preserve the exact data contract for the problem
 - keep the real hot path in the requested family rather than calling back into an anchor op
 - do not add fake speedups, persistent benchmark caches, or hidden state across evaluations
+- purity rule: every output must be recomputed from the current input within the current call
+- reject any idea that depends on pointer identity, allocator stability, stale outputs, or replaying prior computation
+{chr(10).join(purity_requirements)}
 - prefer a smaller, correct kernel over a large broken rewrite
 - preserve untouched code where possible and keep the edit localized
 
