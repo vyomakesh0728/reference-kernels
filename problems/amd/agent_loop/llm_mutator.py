@@ -508,6 +508,8 @@ def _build_prompt(
         "- do not cache or memoize by data_ptr(), storage pointer, shape tuple, stride tuple, seed, or any other proxy for prior outputs",
         "- do not keep global/module/static/LRU tensors or intermediates that can survive across calls or evaluations",
         "- every output must be recomputed from the current input tensors within the current call",
+        "- do not call popcorn-cli, kernelbot, agent_loop harness-run, or any other remote submission path from generated code or helper scripts",
+        "- do not spend remote quota directly; only the coordinator may decide when a candidate is submitted",
     ]
     if workspace_edit:
         system_prompt = (
@@ -571,6 +573,7 @@ Requirements:
 - do not add fake speedups, persistent benchmark caches, or hidden state across evaluations
 - purity rule: every output must be recomputed from the current input within the current call
 - reject any idea that depends on pointer identity, allocator stability, stale outputs, or replaying prior computation
+- do not embed or trigger popcorn-cli, harness-run, kernelbot, or any remote-evaluation command; this candidate only edits submission code and local artifacts
 {chr(10).join(purity_requirements)}
 - prefer a smaller, correct kernel over a large broken rewrite
 - preserve untouched code where possible and keep the edit localized

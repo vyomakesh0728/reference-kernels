@@ -1,0 +1,4 @@
+interface:
+  display_name: "AMD Kernel Loop"
+  short_description: "MI355X kernel competition workflow"
+  default_prompt: "Use $amd-mi355x-kernel-loop to optimize an AMD MI355X competition kernel in this repo with retrieval-grounded, quota-aware remote evaluation."

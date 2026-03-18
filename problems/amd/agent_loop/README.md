@@ -27,6 +27,9 @@ python3 -m agent_loop handroll-campaign --problem mxfp4_mm --rounds 5 --stages t
 python3 -m agent_loop harness-run --problem mxfp4_mm --source .agent-loop/problems/mxfp4_mm/manual/hip_reference_tiled_retry_20260312-074121/submission.py --label manual-hip-ref
 python3 -m agent_loop harness-summary --problem mxfp4_mm
 python3 -m agent_loop harness-resume --problem mxfp4_mm
+python3 -m agent_loop mxfp4-closed-loop status --report
+python3 -m agent_loop mxfp4-closed-loop preflight --variant v47 --source .agent-loop/manual/native_scaled_pure_thin_shscale_v47/submission.py --lane A --hypothesis "thin shuffled-scale direct-contract check"
+python3 -m agent_loop mxfp4-closed-loop submit --variant v47 --source .agent-loop/manual/native_scaled_pure_thin_shscale_v47/submission.py --lane A --stage test
 ```
 
 For `mxfp4_mm`, treat HIP `submission.py` files as the only KernelBot-facing artifacts.
@@ -165,6 +168,23 @@ benchmark section. Lower is better.
 - `handroll-campaign` is the phase-2 MM optimizer: it starts from the tracked working seed,
   applies one curated hand-rolled optimization move at a time, runs `test -> benchmark`, and
   keeps or reverts automatically based on the benchmark objective.
+- `mxfp4-closed-loop` is the quota-aware coordinator for the pure/legal `mxfp4_mm` race:
+  - safe immutable baseline is [v44](/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_pure_compiled_bscale_v44/submission.py)
+  - experiment ledger lives at `.agent-loop/closed_loop/mxfp4_mm/experiment_ledger.jsonl`
+  - preflight reports live under `.agent-loop/closed_loop/mxfp4_mm/preflight/`
+  - the coordinator owns the remote budget and is the only path allowed to spend `test`, `benchmark`, or `leaderboard` quota
+  - default mode is now remote-first: local preflight is static-only unless you explicitly request a Docker runtime
+  - `benchmark` and `test` share the same hourly bucket operationally, with 2 slots reserved as contingency
+  - new-candidate budget is capped at 2 remote `test` and 2 remote `benchmark` submissions per hour
+  - `leaderboard` is capped at 1/hour and blocked before minute 45 unless you explicitly override the code
+  - local preflight is required before any remote submission
+  - leaderboard promotion is conservative: passing remote `test`, passing remote `benchmark`, at least 10% geomean improvement over the promoted safe baseline, and no single shape regressing by more than 5% unless the overall geomean improves by at least 15%
+  - Docker preflight profiles live in `agent_loop/docker/`:
+    - `Dockerfile.amd-parity-full`: ROCm 7.1 HIP SDK (`hiplibsdk`, `--no-dkms`) + torch 2.10.0+rocm7.1 + pinned `aiter` parity image
+    - `Dockerfile.amd-compile-fast`: lighter ROCm/Torch compile image using the same minimal HIP SDK install for candidates that do not import `aiter`
+  - local Docker preflight is forced to `linux/amd64` so ROCm package resolution matches the x86_64 competition environment even on Apple Silicon hosts
+  - use `amd-parity-full` by default for current `mxfp4_mm` candidates because the promoted legal path still imports `aiter`
+  - if Docker parity is slow or flaky, use the default `--runtime none` path and let the remote cluster be the runtime/JIT validator after static local checks pass
 - `harness-run`, `harness-resume`, and `harness-summary` add a KernelBench-v3-inspired staged
   harness around one submission source:
   - every harness run gets its own artifact directory under `.agent-loop/harness_runs/<problem>/`

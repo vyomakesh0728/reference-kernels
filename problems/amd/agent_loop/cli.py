@@ -12,6 +12,7 @@ import time
 from .config import load_config
 from .handroll import HandrolledOptimizer
 from .harness import KernelHarness
+from .mxfp4_closed_loop import Mxfp4ClosedLoopCoordinator, default_source_path
 from .runner import ClosedLoopRunner
 
 
@@ -137,6 +138,54 @@ def build_parser() -> argparse.ArgumentParser:
     handroll.add_argument("--stages", default="test,benchmark")
     handroll.add_argument("--leaderboard-on-improve", action="store_true")
 
+    mxfp4_loop = sub.add_parser(
+        "mxfp4-closed-loop",
+        help="Quota-aware coordinator workflow for the mxfp4_mm competition",
+    )
+    mxfp4_sub = mxfp4_loop.add_subparsers(dest="mxfp4_command", required=True)
+
+    mxfp4_status = mxfp4_sub.add_parser("status", help="Show budget and ledger state")
+    mxfp4_status.add_argument("--report", action="store_true", help="Include the full experiment report")
+
+    mxfp4_register = mxfp4_sub.add_parser("register", help="Register or update one candidate in the experiment ledger")
+    mxfp4_register.add_argument("--variant", required=True)
+    mxfp4_register.add_argument("--source")
+    mxfp4_register.add_argument("--lane", default="unknown")
+    mxfp4_register.add_argument("--hypothesis", default="")
+    mxfp4_register.add_argument("--expected-gain", default="")
+    mxfp4_register.add_argument("--next-patch", default="")
+    mxfp4_register.add_argument("--note", action="append", default=[])
+
+    mxfp4_preflight = mxfp4_sub.add_parser("preflight", help="Run local preflight for one candidate")
+    mxfp4_preflight.add_argument("--variant", required=True)
+    mxfp4_preflight.add_argument("--source")
+    mxfp4_preflight.add_argument("--lane", default="unknown")
+    mxfp4_preflight.add_argument("--hypothesis", default="")
+    mxfp4_preflight.add_argument("--expected-gain", default="")
+    mxfp4_preflight.add_argument("--next-patch", default="")
+    mxfp4_preflight.add_argument(
+        "--profile",
+        default="amd-parity-full",
+        choices=["amd-parity-full", "amd-compile-fast"],
+    )
+    mxfp4_preflight.add_argument(
+        "--runtime",
+        default="none",
+        choices=["auto", "docker", "podman", "none"],
+    )
+    mxfp4_preflight.add_argument("--build-image", action="store_true")
+
+    mxfp4_submit = mxfp4_sub.add_parser("submit", help="Spend coordinator-controlled remote quota on one stage")
+    mxfp4_submit.add_argument("--variant", required=True)
+    mxfp4_submit.add_argument("--source")
+    mxfp4_submit.add_argument("--lane", default="unknown")
+    mxfp4_submit.add_argument("--hypothesis", default="")
+    mxfp4_submit.add_argument("--expected-gain", default="")
+    mxfp4_submit.add_argument("--next-patch", default="")
+    mxfp4_submit.add_argument("--stage", required=True, choices=["test", "benchmark", "leaderboard"])
+    mxfp4_submit.add_argument("--label", default="")
+    mxfp4_submit.add_argument("--continue-after-fail", action="store_true")
+
     return parser
 
 
@@ -147,6 +196,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command in {"harness-run", "harness-resume", "harness-summary"}:
         return _run_harness_command(config, args)
+
+    if args.command == "mxfp4-closed-loop":
+        return _run_mxfp4_closed_loop(config, args)
 
     if args.command == "handroll-campaign":
         optimizer = HandrolledOptimizer(config)
@@ -386,6 +438,61 @@ def _run_harness_command(config, args) -> int:
         return 0
 
     raise SystemExit(f"unknown harness command: {args.command}")
+
+
+def _run_mxfp4_closed_loop(config, args) -> int:
+    coordinator = Mxfp4ClosedLoopCoordinator(config)
+    source_path = default_source_path(config, getattr(args, "source", None))
+
+    if args.mxfp4_command == "status":
+        payload = coordinator.report() if args.report else coordinator.status()
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    if args.mxfp4_command == "register":
+        payload = coordinator.register_candidate(
+            variant=args.variant,
+            source_path=source_path,
+            lane=args.lane,
+            hypothesis=args.hypothesis,
+            expected_gain=args.expected_gain,
+            next_patch=args.next_patch,
+            notes=args.note,
+        )
+        print(json.dumps(payload.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.mxfp4_command == "preflight":
+        payload = coordinator.preflight(
+            variant=args.variant,
+            source_path=source_path,
+            lane=args.lane,
+            hypothesis=args.hypothesis,
+            expected_gain=args.expected_gain,
+            next_patch=args.next_patch,
+            profile=args.profile,
+            runtime=args.runtime,
+            build_image=bool(args.build_image),
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    if args.mxfp4_command == "submit":
+        payload = coordinator.submit(
+            variant=args.variant,
+            source_path=source_path,
+            lane=args.lane,
+            hypothesis=args.hypothesis,
+            expected_gain=args.expected_gain,
+            next_patch=args.next_patch,
+            stage=args.stage,
+            label=args.label,
+            continue_after_fail=bool(args.continue_after_fail),
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    raise SystemExit(f"unknown mxfp4 closed-loop command: {args.mxfp4_command}")
 
 
 def _run_healthcheck(config, problem_key: str | None) -> int:

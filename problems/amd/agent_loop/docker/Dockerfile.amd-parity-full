@@ -1,0 +1,71 @@
+ARG TARGETPLATFORM=linux/amd64
+FROM --platform=${TARGETPLATFORM} ghcr.io/actions/actions-runner:latest
+
+ENV CXX=clang++
+ENV DEBIAN_FRONTEND=noninteractive
+
+ARG GPU_ARCH="gfx950"
+ENV GPU_ARCH_LIST=${GPU_ARCH}
+ENV PYTORCH_ROCM_ARCH=${GPU_ARCH}
+ENV ROCM_PATH=/opt/rocm
+ENV LD_LIBRARY_PATH=/opt/rocm/lib
+
+RUN sudo apt-get update -y \
+    && sudo apt-get install -y --no-install-recommends \
+    software-properties-common \
+    curl \
+    ca-certificates \
+    git \
+    jq \
+    sudo \
+    unzip \
+    zip \
+    cmake \
+    ninja-build \
+    clang \
+    lld \
+    wget \
+    psmisc \
+    python3-venv \
+    python3-pip \
+    python3-setuptools \
+    python3-wheel \
+    python3-dev \
+    && sudo rm -rf /var/lib/apt/lists/*
+
+RUN curl -s https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh | sudo bash \
+    && sudo apt-get install -y git-lfs \
+    && sudo rm -rf /var/lib/apt/lists/*
+
+RUN sudo groupadd -g 109 render || true
+
+RUN sudo apt-get update -y \
+    && sudo usermod -a -G render,video runner \
+    && wget https://repo.radeon.com/amdgpu-install/7.1/ubuntu/noble/amdgpu-install_7.1.70100-1_all.deb \
+    && sudo apt-get install -y ./amdgpu-install_7.1.70100-1_all.deb \
+    && rm -f amdgpu-install_7.1.70100-1_all.deb \
+    && sudo apt-get update -y \
+    && sudo amdgpu-install -y --usecase=hiplibsdk --no-dkms \
+    && sudo rm -rf /var/lib/apt/lists/*
+
+RUN sudo pip install --break-system-packages --no-cache-dir \
+    torch==2.10.0+rocm7.1 \
+    --index-url https://download.pytorch.org/whl/rocm7.1
+
+ARG PREBUILD_KERNELS=1
+RUN git clone --recursive https://github.com/ROCm/aiter.git /home/runner/aiter \
+    && cd /home/runner/aiter \
+    && git checkout f3be04a12a0cfd6b5e2c7a94edc774f1bc24460d \
+    && sudo pip install --break-system-packages --no-cache-dir -r requirements.txt \
+    && sudo MAX_JOBS=64 PREBUILD_KERNELS=${PREBUILD_KERNELS} GPU_ARCHS=${GPU_ARCH_LIST} python3 setup.py develop
+
+RUN sudo mkdir -p /home/runner/aiter/aiter/jit/build \
+    && sudo chown -R runner:runner /home/runner/aiter/aiter/jit/build
+
+RUN sudo pip install --break-system-packages --no-cache-dir \
+    ninja \
+    numpy \
+    packaging \
+    wheel
+
+WORKDIR /workspace
