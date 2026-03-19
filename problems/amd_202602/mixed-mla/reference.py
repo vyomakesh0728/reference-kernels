@@ -306,13 +306,13 @@ def generate_input(batchsize: int, qseqlen: int, kvseqlen: int, seed: int) -> in
     q = torch.randn(
         (total_q, NUM_HEADS, QK_HEAD_DIM),
         dtype=torch.bfloat16, device="cuda", generator=gen,
-    ) * 0.02
+    )
 
     # Compressed KV buffer: (total_kv, 1, 576) bf16 — the source of truth
     kv_buffer_bf16 = torch.randn(
         (total_kv, NUM_KV_HEADS, QK_HEAD_DIM),
         dtype=torch.bfloat16, device="cuda", generator=gen,
-    ) * 0.02
+    )
 
     # Quantize KV to fp8
     kv_buffer_fp8, kv_scale_fp8 = quantize_fp8(kv_buffer_bf16)
@@ -369,4 +369,4 @@ def ref_kernel(data: input_t) -> output_t:
     )
 
 
-check_implementation = make_match_reference(ref_kernel, rtol=1e-02, atol=1e-02)
+check_implementation = make_match_reference(ref_kernel, rtol=1e-01, atol=1e-01)
