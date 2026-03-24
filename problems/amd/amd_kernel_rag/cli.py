@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 
 from .__init__ import DEFAULT_INDEX_RELATIVE_DIR
+from .dense_profiles import DEFAULT_DENSE_PROFILE, VALID_DENSE_PROFILES
 from .eval import run_benchmark, write_report
 from .index import build_index, index_summary
 from .retriever import HybridRetriever
@@ -33,6 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--manifest", help="Optional source manifest JSON")
     build.add_argument("--refresh-sources", action="store_true")
     build.add_argument("--skip-dense", action="store_true")
+    build.add_argument(
+        "--dense-profile",
+        choices=VALID_DENSE_PROFILES,
+        default=DEFAULT_DENSE_PROFILE,
+        help="Dense embedding subset profile. Defaults to the free-plan mxfp4-mm subset.",
+    )
     build.add_argument("--embed-batch-size", type=int, default=32)
 
     summary = sub.add_parser("summary", help="Show index stats")
@@ -77,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             manifest_path=Path(args.manifest).expanduser().resolve() if args.manifest else None,
             refresh_sources=bool(args.refresh_sources),
             build_dense=not args.skip_dense,
+            dense_profile=args.dense_profile,
             embed_batch_size=args.embed_batch_size,
         )
         print(json.dumps(summary, indent=2, sort_keys=True))

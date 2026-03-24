@@ -13,7 +13,7 @@ description: Optimize AMD MI355X competition kernels in /Users/v/reference-kerne
    - `reference.py`
    - `task.yml`
    - the current `submission.py`
-3. If the problem is `mxfp4_mm`, read [references/mxfp4-through-v45.md](references/mxfp4-through-v45.md) before planning experiments.
+3. If the problem is `mxfp4_mm`, read [references/mxfp4-through-v45.md](references/mxfp4-through-v45.md) and [references/amd-blog-insights.md](references/amd-blog-insights.md) before planning experiments.
 4. If the problem is `moe_mxfp4` or `mixed_mla`, read [references/problem-transfer.md](references/problem-transfer.md) after the snapshot.
 
 ## Scope Rules
@@ -51,9 +51,15 @@ When the user combines this skill with a problem name, treat that problem as the
    - Use `benchmark` before `leaderboard`.
    - For `mxfp4_mm`, prefer the quota-aware `mxfp4-closed-loop` path.
    - For other problems, use `harness-run`, `harness-summary`, `harness-resume`, or the broader `agent_loop` campaign commands.
+   - Treat `leaderboard` as a separate seeded-distribution gate, not a formality after benchmark. For `mxfp4_mm`, ranked inputs are not the same population as `test`/`benchmark`, so a benchmark win is necessary but not sufficient.
+   - If quota is exhausted, start the quota watcher helper from [references/remote-first-eval.md](references/remote-first-eval.md) instead of manually polling.
 7. Record what matters.
    - Keep transient experiment state in `.agent-loop/`.
    - Write shareable wins and turning points into `team_results/`.
+8. Assimilate signal before the next branch.
+   - Update [references/mxfp4-exact-shape-frontier.md](references/mxfp4-exact-shape-frontier.md) when a branch creates a new plateau signal, unlocks a previously broken path, or changes the next allowed branch order.
+   - Prefer adding “recent signal” and “allowed next branches” updates over free-form notes, so future workers inherit a tighter search space.
+   - When a result proves a whole class of edits is low-yield, say that explicitly in the frontier note and treat it as canon until contradicted by a structural win.
 
 ## Problem Map
 
@@ -72,10 +78,16 @@ If a prompt mentions stale `problems/amd_202602/...` paths, map them to these li
   Use for the proven `mxfp4_mm` path from stable trunk through `v45`.
 - [references/optimization.md](references/optimization.md)
   Use for the MI355X optimization landscape: launch geometry, occupancy/resource tradeoffs, arithmetic intensity, coalescing, bandwidth, vectorization, cache/LDS behavior, and thin-vs-wide regime choices.
+- [references/amd-blog-insights.md](references/amd-blog-insights.md)
+  Use for distilled AMD blog and HipKittens-adjacent insights that are specifically relevant to `mxfp4_mm` after the `v66 -> v73` wide-line breakthroughs.
+- [references/mxfp4-exact-shape-frontier.md](references/mxfp4-exact-shape-frontier.md)
+  Use for the current `mxfp4_mm` exact-shape dispatch frontier, per-shape anchors, ranked-seed caveats, and allowed next branches.
 - [references/problem-transfer.md](references/problem-transfer.md)
   Use to transfer the `mxfp4` playbook to `moe` and `mla-decode`.
 - [references/remote-first-eval.md](references/remote-first-eval.md)
   Use for harness commands, closed-loop commands, quota discipline, and promotion rules.
+- `scripts/quota_watch_resume.py`
+  Use when `mxfp4-closed-loop` quota is exhausted and there is a pending `test`, `benchmark`, or `leaderboard` stage that should auto-resume at the exact next slot.
 - `scripts/problem_snapshot.py`
   Use first to build a compact per-problem snapshot.
 - [$commit-push](/Users/v/.codex/skills/commit-push/SKILL.md)
@@ -85,9 +97,21 @@ If a prompt mentions stale `problems/amd_202602/...` paths, map them to these li
 
 ## Current Canon
 
-- Current promoted `mxfp4_mm` winner:
-  [/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_m32_bfrag_direct_v45/submission.py](/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_m32_bfrag_direct_v45/submission.py)
+- Current best measured `mxfp4_mm` frontier:
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_exact_shape_pyprep_v83/submission.py](/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_exact_shape_pyprep_v83/submission.py)
+- Current ranked `mxfp4_mm` anchor:
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_three_regime_v76/submission.py](/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_three_regime_v76/submission.py)
+- Current thin baseline:
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_m16_direct_entry_v54/submission.py](/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_m16_direct_entry_v54/submission.py)
 - Current pure recovery anchor:
   [/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_pure_compiled_bscale_v44/submission.py](/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_pure_compiled_bscale_v44/submission.py)
+
+For `mxfp4_mm`, the live dispatch frontier is now exact-shape first: `m == 4`, `8`, `16`, `32`, `64`, and `256` each have dedicated routes in `v83`, with a separate `other multiples of 32` path behind them. Start from that dispatch unless your single hypothesis is to change routing itself.
+
+Current cost-center policy for `mxfp4_mm`:
+
+- Treat prep-only `m16` and prep-only `m32` edits as plateau territory unless a new branch deletes a whole cost center instead of shaving address/setup work.
+- Spend the next serious optimization budget on `m64`, then `m4`, then `m256` direct-body robustness.
+- Keep `m8` shape-isolated and test-green, but do not let it consume benchmark budget ahead of `m4`, `m64`, or `m256`.
 
 Start from the current winner or the current repo `submission.py`. Do not rediscover old dead ends unless you have a specific contract or performance reason.

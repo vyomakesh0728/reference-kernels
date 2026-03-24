@@ -8,6 +8,7 @@ import sqlite3
 from datetime import UTC, datetime
 
 from .chunking import Chunk, chunk_document
+from .dense_profiles import DEFAULT_DENSE_PROFILE, select_dense_chunks
 from .embeddings import MixedbreadClient, env_embedding_config
 from .sources import SourceDocument, load_manifest, sync_sources
 
@@ -22,6 +23,7 @@ def build_index(
     manifest_path: Path | None = None,
     refresh_sources: bool = False,
     build_dense: bool = True,
+    dense_profile: str = DEFAULT_DENSE_PROFILE,
     embed_batch_size: int = 32,
 ) -> dict[str, object]:
     index_dir = index_dir.resolve()
@@ -30,6 +32,8 @@ def build_index(
     manifest = load_manifest(manifest_path, workspace_root)
     documents = sync_sources(manifest, cache_dir=cache_dir, refresh=refresh_sources)
     chunks = _collect_chunks(documents)
+    effective_dense_profile = dense_profile if build_dense else "none"
+    dense_selection = select_dense_chunks(chunks, profile=effective_dense_profile)
 
     index_dir.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
@@ -41,11 +45,15 @@ def build_index(
         _insert_chunks(conn, chunks)
         dense_ready = False
         embed_model = None
-        if build_dense:
+        if build_dense and dense_selection.chunk_count:
             client = MixedbreadClient(env_embedding_config())
-            if client.available and chunks:
-                vectors = client.embed_texts([chunk.text for chunk in chunks], is_query=False, batch_size=embed_batch_size)
-                _insert_embeddings(conn, chunks, vectors, model=client.config.model)
+            if client.available:
+                vectors = client.embed_texts(
+                    [chunk.text for chunk in dense_selection.chunks],
+                    is_query=False,
+                    batch_size=embed_batch_size,
+                )
+                _insert_embeddings(conn, dense_selection.chunks, vectors, model=client.config.model)
                 dense_ready = True
                 embed_model = client.config.model
         conn.commit()
@@ -57,6 +65,11 @@ def build_index(
         "documents": len(documents),
         "chunks": len(chunks),
         "dense_ready": dense_ready,
+        "dense_profile": dense_selection.profile,
+        "dense_chunk_count": dense_selection.chunk_count,
+        "dense_text_chars": dense_selection.text_chars,
+        "dense_sources": dense_selection.sources,
+        "dense_coverage_ratio": dense_selection.coverage_ratio,
         "embedding_model": embed_model,
         "index_dir": str(index_dir),
     }
@@ -85,15 +98,40 @@ def index_summary(index_dir: Path) -> dict[str, object]:
     if summary_path.exists():
         payload = json.loads(summary_path.read_text(encoding="utf-8"))
         payload["index_dir"] = str(index_dir.resolve())
+        payload.setdefault("dense_profile", "unknown")
+        payload.setdefault("dense_chunk_count", None)
+        payload.setdefault("dense_text_chars", None)
+        payload.setdefault("dense_sources", [])
+        payload.setdefault("dense_coverage_ratio", None)
         return payload
     with open_index(index_dir) as conn:
         document_count = conn.execute("SELECT COUNT(*) AS count FROM documents").fetchone()["count"]
         chunk_count = conn.execute("SELECT COUNT(*) AS count FROM chunks").fetchone()["count"]
         dense_count = conn.execute("SELECT COUNT(*) AS count FROM chunk_embeddings").fetchone()["count"]
+        dense_chars = conn.execute(
+            """
+            SELECT COALESCE(SUM(LENGTH(chunks.text)), 0) AS count
+            FROM chunk_embeddings
+            JOIN chunks ON chunks.chunk_id = chunk_embeddings.chunk_id
+            """
+        ).fetchone()["count"]
+        dense_sources_rows = conn.execute(
+            """
+            SELECT DISTINCT chunks.source_id
+            FROM chunk_embeddings
+            JOIN chunks ON chunks.chunk_id = chunk_embeddings.chunk_id
+            ORDER BY chunks.source_id
+            """
+        ).fetchall()
     return {
         "documents": int(document_count),
         "chunks": int(chunk_count),
         "dense_ready": bool(dense_count),
+        "dense_profile": "unknown",
+        "dense_chunk_count": int(dense_count),
+        "dense_text_chars": int(dense_chars),
+        "dense_sources": [str(row["source_id"]) for row in dense_sources_rows],
+        "dense_coverage_ratio": (float(dense_count) / float(chunk_count)) if chunk_count else 0.0,
         "index_dir": str(index_dir.resolve()),
     }
 

@@ -38,7 +38,15 @@ python3 -m amd_kernel_rag.cli eval --benchmark amd_kernel_rag/benchmarks/kernel_
 
 ## Dense Embeddings
 
-Dense retrieval uses Mixedbread by default.
+Dense retrieval uses Mixedbread's direct embeddings API by default.
+
+This repo does not currently use Mixedbread Stores for retrieval. It:
+
+- chunks the local and web corpus itself
+- writes a local SQLite/FTS index
+- optionally asks Mixedbread only for dense vectors
+
+That means the relevant Mixedbread quota is `Embedding Tokens`, not `Store Ingested Tokens` or `Store Search`.
 
 Environment variables:
 
@@ -46,16 +54,60 @@ Environment variables:
 - optional `AMD_KERNEL_RAG_EMBED_MODEL`
 - optional `AMD_KERNEL_RAG_EMBED_BASE_URL`
 - optional `AMD_KERNEL_RAG_EMBED_PROMPT`
+- optional `AMD_KERNEL_RAG_EMBED_MAX_BATCH_CHARS`
 
 Default model id:
 
-- `mixedbread-ai/mxbai-wholembed-v3`
+- `mixedbread-ai/mxbai-embed-large-v1`
+
+Default query prompt:
+
+- `Represent this sentence for searching relevant passages:`
+
+Default max batch chars:
+
+- `32000`
+
+Dense build profiles:
+
+- `mxfp4-mm-free`:
+  dense-index the curated `mxfp4-mm` subset only
+- `full`:
+  dense-index every chunk
+- `none`:
+  sparse-only, equivalent to skipping dense embeddings
+
+Examples:
+
+```bash
+python3 -m amd_kernel_rag.cli build --dense-profile mxfp4-mm-free
+python3 -m amd_kernel_rag.cli build --dense-profile full
+python3 -m amd_kernel_rag.cli build --dense-profile none
+python3 -m amd_kernel_rag.cli build --skip-dense
+```
 
 If you do not have a Mixedbread API key yet, you can still build the sparse index:
 
 ```bash
 python3 -m amd_kernel_rag.cli build --skip-dense
 ```
+
+## Free-Plan Reality Check
+
+The sparse index works well on the full local corpus, but the full dense build can be much larger than a free embedding-token budget.
+
+As of the current corpus:
+
+- `156241` chunks
+- about `273,609,021` text characters total in the chunk table
+
+That is far beyond a `10M` embedding-token monthly budget in any realistic tokenizer. The default dense profile therefore uses a curated `mxfp4-mm-free` subset instead of trying to embed the whole corpus.
+
+On the free plan, use one of these approaches:
+
+- keep the full sparse index and use the default curated dense profile
+- keep the full sparse index and skip dense
+- raise the embedding budget before running a full dense rebuild
 
 ## Output Shape
 
@@ -95,4 +147,3 @@ export AMD_KERNEL_RAG_INDEX_DIR=/absolute/path/to/index
 - `amd_kernel_rag/integration.py`: optional `agent_loop` bridge
 - `amd_kernel_rag/eval.py`: benchmark metrics and report generation
 - `amd_kernel_rag/ADDING_SOURCES.md`: how to extend the corpus
-

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from hashlib import sha1, sha256
 from html.parser import HTMLParser
+from http.client import RemoteDisconnected
 from pathlib import Path
 import json
 import os
@@ -101,6 +102,31 @@ def default_manifest(workspace_root: Path) -> list[SourceSpec]:
             id="rocm-cdna4-gemm-blog",
             kind="web",
             url="https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html",
+        ),
+        SourceSpec(
+            id="rocm-matrix-cores-cdna-blog",
+            kind="web",
+            url="https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html",
+        ),
+        SourceSpec(
+            id="rocm-gemm-optimization-blog",
+            kind="web",
+            url="https://rocm.blogs.amd.com/artificial-intelligence/gemm_blog/README.html",
+        ),
+        SourceSpec(
+            id="rocm-matrix-cores-blog",
+            kind="web",
+            url="https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores/README.html",
+        ),
+        SourceSpec(
+            id="amd-aocl-small-matrices-blog",
+            kind="web",
+            url="https://www.amd.com/en/developer/resources/technical-articles/2025/aocl-blas-boosting-gemm-performance-for-small-matrices-.html",
+        ),
+        SourceSpec(
+            id="rocm-ai-blogs-index",
+            kind="web",
+            url="https://rocm.blogs.amd.com/ai.html",
         ),
         SourceSpec(
             id="hazy-hk-blog",
@@ -256,14 +282,8 @@ def _sync_web_source(spec: SourceSpec, *, cache_dir: Path, refresh: bool) -> lis
     cached = web_dir / f"{_safe_id(spec.id)}{ext}"
     meta_path = web_dir / f"{_safe_id(spec.id)}.json"
     if refresh or not cached.exists():
-        req = urllib.request.Request(
-            spec.url,
-            headers={"User-Agent": "amd-kernel-rag/1.0 (+https://github.com/llvm/llvm-project)"},
-        )
-        with urllib.request.urlopen(req, timeout=60) as response:
-            payload = response.read()
-            cached.write_bytes(payload)
-            headers = dict(response.headers.items())
+        payload, headers = _fetch_web_payload(spec.url)
+        cached.write_bytes(payload)
         meta_path.write_text(
             json.dumps(
                 {
@@ -294,6 +314,55 @@ def _sync_web_source(spec: SourceSpec, *, cache_dir: Path, refresh: bool) -> lis
             text=text,
         )
     ]
+
+
+def _fetch_web_payload(url: str) -> tuple[bytes, dict[str, str]]:
+    user_agent = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+    )
+    request_headers = {
+        "User-Agent": user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    last_error: Exception | None = None
+    for _ in range(3):
+        try:
+            req = urllib.request.Request(url, headers=request_headers)
+            with urllib.request.urlopen(req, timeout=60) as response:
+                return response.read(), dict(response.headers.items())
+        except (TimeoutError, OSError, RemoteDisconnected, urllib.error.HTTPError, urllib.error.URLError) as exc:
+            last_error = exc
+    curl = subprocess.run(
+        [
+            "curl",
+            "--http1.1",
+            "-L",
+            "--fail",
+            "--compressed",
+            "-A",
+            user_agent,
+            "-H",
+            f"accept: {request_headers['Accept']}",
+            "-H",
+            f"accept-language: {request_headers['Accept-Language']}",
+            "-H",
+            f"cache-control: {request_headers['Cache-Control']}",
+            "-H",
+            f"pragma: {request_headers['Pragma']}",
+            url,
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if curl.returncode == 0:
+        return curl.stdout, {}
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"failed to fetch web source: {url}")
 
 
 def _sync_local_source(spec: SourceSpec) -> list[SourceDocument]:

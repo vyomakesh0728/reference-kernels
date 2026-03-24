@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .__init__ import DEFAULT_EMBED_BASE_URL, DEFAULT_EMBED_MODEL
+from .__init__ import DEFAULT_EMBED_BASE_URL, DEFAULT_EMBED_MODEL, DEFAULT_QUERY_EMBED_PROMPT
 
 
 API_KEY_ENV_CANDIDATES = ("MIXEDBREAD_API_KEY", "MXBAI_API_KEY", "MIXEDBREAD_API_TOKEN")
@@ -20,6 +20,7 @@ class EmbeddingConfig:
     api_key: str | None = None
     prompt: str | None = None
     timeout_seconds: float = 60.0
+    max_batch_chars: int = 32000
 
 
 class MixedbreadClient:
@@ -43,16 +44,18 @@ class MixedbreadClient:
                 "Mixedbread API key not found. Set MIXEDBREAD_API_KEY or MXBAI_API_KEY to build/query dense embeddings."
             )
         vectors: list[list[float]] = []
-        for start in range(0, len(texts), batch_size):
-            batch = texts[start : start + batch_size]
+        for batch in _iter_batches(texts, batch_size=batch_size, max_batch_chars=self.config.max_batch_chars):
             payload = {
                 "model": self.config.model,
                 "input": batch,
                 "normalized": True,
                 "encoding_format": "float",
             }
-            if self.config.prompt:
-                payload["prompt"] = self.config.prompt
+            prompt = self.config.prompt
+            if prompt is None and is_query:
+                prompt = DEFAULT_QUERY_EMBED_PROMPT
+            if prompt:
+                payload["prompt"] = prompt
             response = self._post_json("/v1/embeddings", payload)
             data = response.get("data")
             if not isinstance(data, list):
@@ -73,6 +76,7 @@ class MixedbreadClient:
                 "Authorization": f"Bearer {self.config.api_key}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
+                "Connection": "close",
                 "User-Agent": "amd-kernel-rag/1.0",
             },
         )
@@ -101,6 +105,7 @@ def env_embedding_config() -> EmbeddingConfig:
         api_key=_env_api_key(),
         prompt=os.environ.get("AMD_KERNEL_RAG_EMBED_PROMPT") or None,
         timeout_seconds=float(os.environ.get("AMD_KERNEL_RAG_EMBED_TIMEOUT_SECONDS", "60")),
+        max_batch_chars=int(os.environ.get("AMD_KERNEL_RAG_EMBED_MAX_BATCH_CHARS", "32000")),
     )
 
 
@@ -110,3 +115,25 @@ def _env_api_key() -> str | None:
         if value:
             return value
     return None
+
+
+def _iter_batches(texts: list[str], *, batch_size: int, max_batch_chars: int) -> list[list[str]]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if max_batch_chars <= 0:
+        raise ValueError("max_batch_chars must be positive")
+
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_chars = 0
+    for text in texts:
+        text_len = len(text)
+        if current and (len(current) >= batch_size or current_chars + text_len > max_batch_chars):
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(text)
+        current_chars += text_len
+    if current:
+        batches.append(current)
+    return batches

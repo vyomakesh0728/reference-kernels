@@ -265,5 +265,50 @@
       }
     ],
     "why_hard": "This is the kind of failure-memory query we want agents to answer from repo-local evidence instead of guessing."
+  },
+  {
+    "id": "q25-cdna-matrix-core-lane-layout",
+    "query": "CDNA matrix core blog lane layout register ownership and native MFMA data layout for 16x16x16 and 32x32 shapes",
+    "relevant_any_of": [
+      {
+        "source_contains": "rocm-matrix-cores-cdna-blog"
+      },
+      {
+        "source_contains": "rocm-matrix-cores-blog"
+      }
+    ],
+    "why_hard": "The answer spans multiple AMD blog pages and mixes lane layout, register ownership, and instruction-shape language."
+  },
+  {
+    "id": "q26-aocl-small-matrix-overhead",
+    "query": "AOCL small matrices fused loads plus FMAs reduce instruction overhead dependencies and register pressure",
+    "relevant_any_of": [
+      {
+        "source_contains": "amd-aocl-small-matrices-blog",
+        "text_contains": "Fused Loads + FMAs"
+      }
+    ],
+    "why_hard": "This is a CPU GEMM article, so retrieval has to surface the specific microkernel insight instead of drowning in generic small-matrix discussion."
+  },
+  {
+    "id": "q27-gemm-tuning-shape-driven",
+    "query": "AMD GEMM optimization blog shape-driven tuning kernel parameters and problem-size logging",
+    "relevant_any_of": [
+      {
+        "source_contains": "rocm-gemm-optimization-blog"
+      }
+    ],
+    "why_hard": "The useful idea is shape-driven tuning rather than one exact phrase, so semantic recall matters more than literal matching."
+  },
+  {
+    "id": "q28-ai-blog-index-hipblaslt",
+    "query": "ROCm AI blogs index hipBLASLt online GEMM tuning recent posts",
+    "relevant_any_of": [
+      {
+        "source_contains": "rocm-ai-blogs-index",
+        "text_contains": "hipBLASLt Online GEMM Tuning"
+      }
+    ],
+    "why_hard": "The landing page is broad and can rank poorly unless the retriever preserves post-title context."
   }
 ]
