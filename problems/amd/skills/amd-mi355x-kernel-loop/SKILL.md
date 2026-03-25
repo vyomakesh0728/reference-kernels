@@ -40,6 +40,15 @@ When the user combines this skill with a problem name, treat that problem as the
 3. Keep one hypothesis per candidate.
    - Prefer new candidate files under `/Users/v/reference-kernels/problems/amd/.agent-loop/manual/`.
    - Do not combine semantic repair, data-movement changes, and scheduling changes in one remote run.
+4. Enforce the cost-center branch gate.
+   - Every candidate must begin with a Candidate Card that states:
+     - shape
+     - deleted cost center
+     - expected upside source
+     - why the gain should be larger than noise
+     - forbidden edits
+   - Reject any candidate that sounds like cleanup, hoist, fast path, prep improvement, or a cleaner version of the same path unless it deletes a whole bucket of work.
+   - Reject any branch that touches more than one exact shape or changes both prep and scheduling together.
 4. Use retrieval before guessing low-level contracts.
    - Use `amd_kernel_rag` for intrinsics, ISA, operand/feed layout, LLVM builtin mapping, and CDNA4 docs.
    - Use [references/repo-map.md](references/repo-map.md) for exact entrypoints and index locations.
@@ -48,11 +57,19 @@ When the user combines this skill with a problem name, treat that problem as the
    - Use it for repeated failure signatures, benchmark-only failures, and historical pattern lookup.
 6. Stay remote-first.
    - Use `test` before `benchmark`.
+   - Use `profile_rocprof` only after a benchmark winner when you need hardware-counter evidence for the next Candidate Card.
    - Use `benchmark` before `leaderboard`.
    - For `mxfp4_mm`, prefer the quota-aware `mxfp4-closed-loop` path.
    - For other problems, use `harness-run`, `harness-summary`, `harness-resume`, or the broader `agent_loop` campaign commands.
    - Treat `leaderboard` as a separate seeded-distribution gate, not a formality after benchmark. For `mxfp4_mm`, ranked inputs are not the same population as `test`/`benchmark`, so a benchmark win is necessary but not sufficient.
    - If quota is exhausted, start the quota watcher helper from [references/remote-first-eval.md](references/remote-first-eval.md) instead of manually polling.
+   - When a benchmark winner is unclear or a plateau feels real, prefer the `rocprofv3` profiling lane over intuition. The resulting `profile_summary.json` and `candidate_cards.json` become the next design input for shape-local branches.
+   - Treat the downloaded kernelbot `profile_*.zip` artifact as mandatory evidence, not an optional attachment. The active profile lane now mines the zip directly when kernelbot returns its built-in rocPROF trace instead of the custom PMC payload.
+   - Before opening the next branch after a profile run, read:
+     - the zip-derived `profile_summary.json`
+     - the zip-derived `candidate_cards.json`
+     - the current queue note in [references/mxfp4-profile-branch-queue.md](references/mxfp4-profile-branch-queue.md)
+   - The current exact-shape `v83` trunk already exposes ROCTx ranges for `m4`, `m8`, `m16`, `m32`, `m64`, and `m256`, plus `b_prep`, `a_pack`, and `kernel_launch` where the Python path owns those buckets.
 7. Record what matters.
    - Keep transient experiment state in `.agent-loop/`.
    - Write shareable wins and turning points into `team_results/`.
@@ -60,6 +77,14 @@ When the user combines this skill with a problem name, treat that problem as the
    - Update [references/mxfp4-exact-shape-frontier.md](references/mxfp4-exact-shape-frontier.md) when a branch creates a new plateau signal, unlocks a previously broken path, or changes the next allowed branch order.
    - Prefer adding “recent signal” and “allowed next branches” updates over free-form notes, so future workers inherit a tighter search space.
    - When a result proves a whole class of edits is low-yield, say that explicitly in the frontier note and treat it as canon until contradicted by a structural win.
+9. Route sub-agents through the canon explicitly.
+   - Sub-agents do not automatically ingest the local skill corpus.
+   - Every sub-agent prompt for `mxfp4_mm` must explicitly point at:
+     - [references/mxfp4-exact-shape-frontier.md](references/mxfp4-exact-shape-frontier.md)
+     - [references/amd-blog-insights.md](references/amd-blog-insights.md)
+     - [references/mxfp4-cost-center-gate.md](references/mxfp4-cost-center-gate.md)
+     - [references/mxfp4-profile-branch-queue.md](references/mxfp4-profile-branch-queue.md)
+   - Require sub-agents to return a Candidate Card before proposing code.
 
 ## Problem Map
 
@@ -82,6 +107,10 @@ If a prompt mentions stale `problems/amd_202602/...` paths, map them to these li
   Use for distilled AMD blog and HipKittens-adjacent insights that are specifically relevant to `mxfp4_mm` after the `v66 -> v73` wide-line breakthroughs.
 - [references/mxfp4-exact-shape-frontier.md](references/mxfp4-exact-shape-frontier.md)
   Use for the current `mxfp4_mm` exact-shape dispatch frontier, per-shape anchors, ranked-seed caveats, and allowed next branches.
+- [references/mxfp4-cost-center-gate.md](references/mxfp4-cost-center-gate.md)
+  Use for the mandatory Candidate Card schema, branch veto rules, and per-shape cost-center ladder.
+- [references/mxfp4-profile-branch-queue.md](references/mxfp4-profile-branch-queue.md)
+  Use for the current zip-derived branch order, active Candidate Cards, and the required next exact-shape queue.
 - [references/problem-transfer.md](references/problem-transfer.md)
   Use to transfer the `mxfp4` playbook to `moe` and `mla-decode`.
 - [references/remote-first-eval.md](references/remote-first-eval.md)
@@ -111,7 +140,8 @@ For `mxfp4_mm`, the live dispatch frontier is now exact-shape first: `m == 4`, `
 Current cost-center policy for `mxfp4_mm`:
 
 - Treat prep-only `m16` and prep-only `m32` edits as plateau territory unless a new branch deletes a whole cost center instead of shaving address/setup work.
-- Spend the next serious optimization budget on `m64`, then `m4`, then `m256` direct-body robustness.
+- Treat exact `m64` prep specialization as low-yield after `v87`; `v90` also showed that the first exact `m64` body-level deletion was not stable enough to promote, so do not reopen `m64` unless the next branch deletes a different full bucket such as exact `m64` A-pack.
+- Spend the next serious optimization budget on `m256` direct-body robustness, then `m4` exact-path fixed-overhead deletion, and only then revisit `m64` with a new deleted bucket.
 - Keep `m8` shape-isolated and test-green, but do not let it consume benchmark budget ahead of `m4`, `m64`, or `m256`.
 
 Start from the current winner or the current repo `submission.py`. Do not rediscover old dead ends unless you have a specific contract or performance reason.

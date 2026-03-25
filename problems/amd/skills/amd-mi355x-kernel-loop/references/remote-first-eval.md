@@ -25,6 +25,7 @@ Useful commands:
 python3 -m agent_loop --config agent_loop.toml mxfp4-closed-loop preflight --variant <name> --source <submission.py> --lane <A|B|A+B> --hypothesis "<one line>" --expected-gain "<one line>" --next-patch "<one line>" --runtime none
 python3 -m agent_loop --config agent_loop.toml mxfp4-closed-loop submit --variant <name> --source <submission.py> --lane <A|B|A+B> --stage test
 python3 -m agent_loop --config agent_loop.toml mxfp4-closed-loop submit --variant <name> --source <submission.py> --lane <A|B|A+B> --stage benchmark
+python3 -m agent_loop --config agent_loop.toml mxfp4-closed-loop submit --variant <name> --source <submission.py> --lane <A|B|A+B> --stage profile_rocprof
 python3 -m agent_loop --config agent_loop.toml mxfp4-closed-loop submit --variant <name> --source <submission.py> --lane <A|B|A+B> --stage leaderboard
 ```
 
@@ -36,15 +37,22 @@ python3 /Users/v/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/sc
   --variant <name> \
   --source <submission.py> \
   --lane <A|B|A+B> \
-  --stage <test|benchmark|leaderboard>
+  --stage <test|benchmark|profile_rocprof|leaderboard>
 ```
 
 Current coordinator behavior from code:
 
 - local preflight is static-only by default
 - `test` and `benchmark` are treated as a shared bucket by the local governor
+- `profile_rocprof` currently shares that same remote-spend bucket conservatively
 - `leaderboard` is gated before UTC minute `45`
 - for `mxfp4_mm`, leaderboard uses a different seeded input population than `test` and `benchmark`, so treat ranked as a separate cross-seed gate
+- `profile_rocprof` uses `popcorn-cli --mode profile` plus `POPCORN_PROFILE_BACKEND=rocprofv3` and materializes:
+  - `profile/profile_summary.json`
+  - `profile/candidate_cards.json`
+  - `profile/raw/...` decoded CSV artifacts when the custom payload lands
+  - the downloaded kernelbot `profile_*.zip` artifact is also part of the contract and must be mined when kernelbot returns its built-in rocPROF trace output instead of the custom PMC payload
+- the current exact-shape trunk also exposes ROCTx ranges per shape so profile traces stay separable without reopening shared-path instrumentation work
 - the ledger lives at [/Users/v/reference-kernels/problems/amd/.agent-loop/closed_loop/mxfp4_mm/experiment_ledger.jsonl](/Users/v/reference-kernels/problems/amd/.agent-loop/closed_loop/mxfp4_mm/experiment_ledger.jsonl)
 
 ## Quota Exhaustion Workflow
@@ -62,6 +70,26 @@ Operational rule:
 - do not manually busy-poll quota after a clean watcher is running
 - use the freed time for retrieval, canon updates, and next-branch design
 - prefer one watcher per pending variant/stage rather than stacking duplicate submitters
+- treat `profile_rocprof` the same way if a benchmark winner is waiting for hardware-counter confirmation
+
+## Profile Zip Mining
+
+Current kernelbot behavior for `--mode profile` can return a built-in rocPROF trace zip instead of the custom `rocprofv3` PMC payload. Treat that as the live profile source, not as a failed run.
+
+Operational rule:
+
+1. read `profile_*.zip`
+2. mine `kernel_trace.csv`, `hip_api_trace.csv`, and `agent_info.csv`
+3. let the fallback parser write:
+   - `profile/profile_summary.json`
+   - `profile/candidate_cards.json`
+4. only then open the next branch
+
+For `mxfp4_mm`, the current fallback parser already extracts:
+
+- per-shape cost buckets from kernelbot profile markdown
+- trace metadata like `VGPR`, `SGPR`, workgroup size, grid size, and LDS block size from the zip
+- zip-derived Candidate Cards that obey the exact-shape cost-center gate
 
 ## Broader Harness Commands
 
@@ -78,6 +106,7 @@ python3 -m agent_loop harness-resume --problem <problem>
 
 - `test` first
 - `benchmark` second
+- `profile_rocprof` third for benchmark winners that need counter evidence
 - `leaderboard` only for a candidate that already has a measured reason to win
 
 Do not spend leaderboard slots on:
