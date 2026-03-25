@@ -140,7 +140,7 @@ def build_critique(
     if problem_key == "moe_mxfp4" and result.status != "ok":
         next_actions.insert(
             0,
-            "Anchor on fused_moe with the provided shuffled weights/scales before exploring Triton packing variants.",
+            "Keep routing/topk fixed, keep topk_ids/topk_weights visible, and narrow the next MoE candidate to one owned lane without rebuilding all experts in Python.",
         )
     if problem_key == "mixed_mla" and result.status != "ok":
         next_actions.insert(

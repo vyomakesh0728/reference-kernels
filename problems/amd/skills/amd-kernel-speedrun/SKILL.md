@@ -14,6 +14,7 @@ Use this skill to work the MI355X competition loop in a disciplined way: read th
 1. Start with the current state, not assumptions.
    Run `python3 -m agent_loop --config agent_loop.toml status` from `/Users/v/reference-kernels/problems/amd`.
    For one problem, run `python3 /Users/v/reference-kernels/problems/amd/skills/amd-kernel-speedrun/scripts/problem_snapshot.py --repo /Users/v/reference-kernels/problems/amd --problem <problem>`.
+   For `moe_mxfp4`, prefer `/root/reference-kernels/problems/amd/.venv/bin/python -m agent_loop ...` for closed-loop commands instead of system `python3`.
 
 2. Prefer one problem first when failures are repetitive.
    If one problem shows the same failure signature repeatedly, focus there before running all three in parallel.
@@ -35,12 +36,19 @@ Use this skill to work the MI355X competition loop in a disciplined way: read th
 ## Problem Rules
 
 Read `/Users/v/reference-kernels/problems/amd/skills/amd-kernel-speedrun/references/problem-contracts.md` when writing or reviewing candidates.
+If the problem is `moe_mxfp4`, also read:
+- `/Users/v/reference-kernels/problems/amd/skills/amd-kernel-speedrun/references/moe-closed-loop.md`
+- `/Users/v/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-cost-center-gate.md`
+- `/Users/v/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-branch-queue.md`
 
 High-level rules:
 
 - `mxfp4_mm`: combine local shape envelopes with the live `amd-mxfp4-mm` contract; preserve shuffled MXFP4 semantics before tuning.
   Current preferred path is HIP-first on `gfx950` via `load_inline`, then CDNA4 scaled-MFMA.
 - `moe_mxfp4`: keep routing/top-k semantics fixed while rewriting one expert-compute stage at a time.
+  Prefer lane-local candidates in this order: `dispatch_pack`, `stage1_core`, `stage2_reduce`, `shared_expert`, `full_pipeline`.
+  Every non-baseline branch must carry one Candidate Card and one regime tag.
+  Every non-anchor branch must carry a full Candidate Card plus retrieval and motivation evidence before remote spend.
 - `mixed_mla`: treat decode as latency-first with `q_seq_len=1`; optimize actual Triton decode/attention work, not a wrapper around the anchor.
 
 ## Mutation Rules

@@ -55,6 +55,36 @@ Current coordinator behavior from code:
 - the current exact-shape trunk also exposes ROCTx ranges per shape so profile traces stay separable without reopening shared-path instrumentation work
 - the ledger lives at [/Users/v/reference-kernels/problems/amd/.agent-loop/closed_loop/mxfp4_mm/experiment_ledger.jsonl](/Users/v/reference-kernels/problems/amd/.agent-loop/closed_loop/mxfp4_mm/experiment_ledger.jsonl)
 
+## Current `moe_mxfp4` Coordinator
+
+Use the repo virtualenv for MoE closed-loop commands:
+
+```bash
+/root/reference-kernels/problems/amd/.venv/bin/python -m agent_loop --config agent_loop.toml moe-closed-loop status --report
+```
+
+Useful commands:
+
+```bash
+/root/reference-kernels/problems/amd/.venv/bin/python -m agent_loop --config agent_loop.toml moe-closed-loop register --variant <name> --source <submission.py> --lane <dispatch_pack|stage1_core|stage2_reduce|shared_expert|full_pipeline> --hot-path-state <anchor-backed|partial-native|native> --regime-tag <tag> --deleted-cost-center "<bucket>" --expected-upside-source "<source>" --why-larger-than-noise "<reason>" --forbidden-edit "<edit>" --success-gate "<gate>" --motivation-ref "<ref>" --retrieval-query "<query>"
+/root/reference-kernels/problems/amd/.venv/bin/python -m agent_loop --config agent_loop.toml moe-closed-loop preflight --variant <name> --source <submission.py> --lane <dispatch_pack|stage1_core|stage2_reduce|shared_expert|full_pipeline> --hot-path-state <anchor-backed|partial-native|native> --regime-tag <tag> --deleted-cost-center "<bucket>" --expected-upside-source "<source>" --why-larger-than-noise "<reason>" --forbidden-edit "<edit>" --success-gate "<gate>" --motivation-ref "<ref>" --retrieval-query "<query>" --runtime none
+/root/reference-kernels/problems/amd/.venv/bin/python -m agent_loop --config agent_loop.toml moe-closed-loop submit --variant <name> --source <submission.py> --lane <dispatch_pack|stage1_core|stage2_reduce|shared_expert|full_pipeline> --hot-path-state <anchor-backed|partial-native|native> --regime-tag <tag> --deleted-cost-center "<bucket>" --expected-upside-source "<source>" --why-larger-than-noise "<reason>" --forbidden-edit "<edit>" --success-gate "<gate>" --motivation-ref "<ref>" --retrieval-query "<query>" --stage test
+/root/reference-kernels/problems/amd/.venv/bin/python -m agent_loop --config agent_loop.toml moe-closed-loop submit --variant <name> --source <submission.py> --lane <dispatch_pack|stage1_core|stage2_reduce|shared_expert|full_pipeline> --hot-path-state <anchor-backed|partial-native|native> --regime-tag <tag> --deleted-cost-center "<bucket>" --expected-upside-source "<source>" --why-larger-than-noise "<reason>" --forbidden-edit "<edit>" --success-gate "<gate>" --motivation-ref "<ref>" --retrieval-query "<query>" --stage benchmark
+/root/reference-kernels/problems/amd/.venv/bin/python -m agent_loop --config agent_loop.toml moe-closed-loop submit --variant <name> --source <submission.py> --lane <dispatch_pack|stage1_core|stage2_reduce|shared_expert|full_pipeline> --hot-path-state <anchor-backed|partial-native|native> --regime-tag <tag> --deleted-cost-center "<bucket>" --expected-upside-source "<source>" --why-larger-than-noise "<reason>" --forbidden-edit "<edit>" --success-gate "<gate>" --motivation-ref "<ref>" --retrieval-query "<query>" --stage leaderboard
+```
+
+Current coordinator behavior from code:
+
+- imports existing `.agent-loop/harness_runs/moe_mxfp4` history into the MoE ledger
+- keeps a ranked-anchor reference from `team_results/ranked/2026-03-10/summary.md`
+- carries the MoE Candidate Card in the experiment ledger and blocks remote spend when the card is incomplete
+- rejects non-`full_pipeline` candidates that still route the hot path through `fused_moe(`
+- rejects non-anchor candidates that rebuild all experts in Python instead of touched-expert packing
+- requires `topk_ids` and `topk_weights` to stay visible in `custom_kernel`
+- requires `motivation_refs` and `retrieval_queries` before remote submission for non-baseline branches
+- gates leaderboard on two benchmark reruns within `1.0%`, plus either `<=125 us` or at least `30%` better than the ranked anchor
+- the ledger lives at [/Users/v/reference-kernels/problems/amd/.agent-loop/closed_loop/moe_mxfp4/experiment_ledger.jsonl](/Users/v/reference-kernels/problems/amd/.agent-loop/closed_loop/moe_mxfp4/experiment_ledger.jsonl)
+
 ## Quota Exhaustion Workflow
 
 When the coordinator says quota is exhausted:

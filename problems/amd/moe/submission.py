@@ -1,14 +1,24 @@
 #!POPCORN leaderboard amd-moe-mxfp4
 #!POPCORN gpu MI355X
-# AGENT_LOOP_META: {"attempt": 40, "generator": {"kind": "llm", "model": "(codex default)", "parallel_agents": 3, "provider": "codex_cli", "use_plan": true}, "gpu": "MI355X", "leaderboard": "amd-moe-mxfp4", "policy_profile": {"family": "kernel_explore", "focus": "stabilize routing and shuffled-weight semantics", "name": "contract_repair", "trigger_signals": ["contract_repair", "runtime_repair", "submission_repair"]}, "problem": "moe_mxfp4", "variant": {"BLOCK_SIZE": 256, "NUM_WARPS": 4, "SORT_BY_EXPERT": true, "family": "kernel_explore", "strategy": "routing_prototype", "variant_name": "routing_swiglu_256"}, "variant_index": 2}
+# AGENT_LOOP_META: {"generator": {"kind": "manual_tune"}, "gpu": "MI355X", "leaderboard": "amd-moe-mxfp4", "policy_profile": {"family": "kernel_explore", "name": "moe_blockm_tp8_bs512_v1"}, "problem": "moe_mxfp4"}
+
+import torch
 
 from aiter import ActivationType, QuantType
 from aiter.fused_moe import fused_moe
 from task import input_t, output_t
 
-_ACTIVATION = ActivationType.Silu
-_QUANT_TYPE = QuantType.per_1x32
-_FUSED_MOE = fused_moe
+
+def _select_block_size_m(hidden_states: torch.Tensor, config: dict) -> int | None:
+    # Large-`bs` TP=8 still leaves a sparse per-expert distribution.
+    # Shrinking the routing/sorting block trims padded regroup work in that case.
+    if (
+        int(config["n_routed_experts"]) == 256
+        and int(config["d_expert"]) == 256
+        and hidden_states.shape[0] == 512
+    ):
+        return 32
+    return None
 
 
 def custom_kernel(data: input_t) -> output_t:
@@ -27,23 +37,24 @@ def custom_kernel(data: input_t) -> output_t:
         config,
     ) = data
 
-    hidden_pad = down_weight_shuffled.shape[1] - hidden_states.shape[1]
-    intermediate_pad = (gate_up_weight_shuffled.shape[1] >> 1) - config["d_expert"]
+    hidden_pad = config["d_hidden_pad"] - config["d_hidden"]
+    intermediate_pad = config["d_expert_pad"] - config["d_expert"]
 
-    return _FUSED_MOE(
+    return fused_moe(
         hidden_states,
         gate_up_weight_shuffled,
         down_weight_shuffled,
         topk_weights,
         topk_ids,
         expert_mask=None,
-        activation=_ACTIVATION,
-        quant_type=_QUANT_TYPE,
+        activation=ActivationType.Silu,
+        quant_type=QuantType.per_1x32,
         doweight_stage1=False,
         w1_scale=gate_up_weight_scale_shuffled,
         w2_scale=down_weight_scale_shuffled,
         a1_scale=None,
         a2_scale=None,
+        block_size_M=_select_block_size_m(hidden_states, config),
         hidden_pad=hidden_pad,
         intermediate_pad=intermediate_pad,
     )

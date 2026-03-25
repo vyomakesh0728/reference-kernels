@@ -310,5 +310,64 @@
       }
     ],
     "why_hard": "The landing page is broad and can rank poorly unless the retriever preserves post-title context."
+  },
+  {
+    "id": "q29-fused-moe-padding-free-packing",
+    "query": "Which local note or repo says MoE speed comes from padding-free expert packing and avoiding excessive copies?",
+    "relevant_any_of": [
+      {
+        "path_contains": "important_papers/fused_moe/scattermoe.md",
+        "text_contains": "padding-free"
+      },
+      {
+        "source_contains": "scattermoe-readme"
+      }
+    ],
+    "why_hard": "The answer should prefer the new local MoE canon and the repo motivation source over generic sparse-MoE text."
+  },
+  {
+    "id": "q30-fused-moe-persistent-pipeline",
+    "query": "What local MoE note recommends a persistent expert-tile pipeline across stage1 swiglu and stage2?",
+    "relevant_any_of": [
+      {
+        "path_contains": "important_papers/fused_moe/architectural_multipliers.md",
+        "text_contains": "persistent"
+      },
+      {
+        "path_contains": "important_papers/fused_moe/flashmoe.md",
+        "text_contains": "persistent"
+      }
+    ],
+    "why_hard": "This should surface the fused-MoE local summaries instead of unrelated persistent-kernel references."
+  },
+  {
+    "id": "q31-fused-moe-shared-expert-split",
+    "query": "Where do our local MoE notes justify splitting shared experts from routed experts?",
+    "relevant_any_of": [
+      {
+        "path_contains": "important_papers/fused_moe/deepseek_v3.md",
+        "text_contains": "shared-expert"
+      },
+      {
+        "path_contains": "important_papers/fused_moe/architectural_multipliers.md",
+        "text_contains": "Shared-expert split"
+      }
+    ],
+    "why_hard": "The retriever should prefer the MoE structural canon rather than generic DeepSeek model descriptions."
+  },
+  {
+    "id": "q32-fused-moe-github-motivation-links",
+    "query": "What raw GitHub links are part of the local fused-MoE motivation pack for sub-agents?",
+    "relevant_any_of": [
+      {
+        "path_contains": "important_papers/fused_moe/links.md",
+        "text_contains": "raw README"
+      },
+      {
+        "path_contains": "skills/amd-mi355x-kernel-loop/references/fused-moe-multiplier.md",
+        "text_contains": "github.com"
+      }
+    ],
+    "why_hard": "This is a repo-local workflow query that should resolve to the new MoE links pack, not the general skills corpus."
   }
 ]

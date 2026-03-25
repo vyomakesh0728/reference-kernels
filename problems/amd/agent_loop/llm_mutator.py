@@ -24,6 +24,9 @@ from .kernel_mutator import (
     history_entries,
     load_context,
     load_parent_meta,
+    moe_candidate_card,
+    moe_motivation_refs,
+    moe_subagent_roster,
     render_submission,
 )
 
@@ -92,6 +95,8 @@ def _relevant_skill_paths(problem_key: str, desired_family: str | None) -> list[
     skill_paths = [str(LOCAL_SKILLS_ROOT / "amd-kernel-speedrun" / "SKILL.md")]
     if problem_key == "mxfp4_mm":
         skill_paths.append(str(LOCAL_SKILLS_ROOT / "amd-live-reference-correctness" / "SKILL.md"))
+    if problem_key == "moe_mxfp4":
+        skill_paths.append(str(LOCAL_SKILLS_ROOT / "amd-mi355x-kernel-loop" / "SKILL.md"))
     if desired_family == "hip_explore":
         skill_paths.append(str(LOCAL_SKILLS_ROOT / "optimization-skill" / "SKILL.md"))
 
@@ -182,6 +187,36 @@ def _source_inspirations(problem_key: str, desired_family: str | None) -> list[d
                 },
             ]
         )
+    if problem_key == "moe_mxfp4":
+        inspirations.extend(
+            [
+                {
+                    "name": "ScatterMoE",
+                    "kind": "paper",
+                    "idea": "remove padding waste by packing only touched routed experts and fusing reorder with expert work",
+                },
+                {
+                    "name": "SonicMoE",
+                    "kind": "paper",
+                    "idea": "treat tile scheduling and IO overlap as the structural multiplier after dispatch packing is correct",
+                },
+                {
+                    "name": "FlashMoE",
+                    "kind": "paper",
+                    "idea": "persistent fused dispatch plus compute pipeline is the long-term operator shape, not a wrapper tune",
+                },
+                {
+                    "name": "DeepSeek-V3",
+                    "kind": "repo",
+                    "idea": "shared-expert split and sparse fine-grained regimes matter for prioritizing MoE lanes",
+                },
+                {
+                    "name": "Tutel",
+                    "kind": "repo",
+                    "idea": "adaptive expert-load handling is useful as policy inspiration for regime-aware MoE execution",
+                },
+            ]
+        )
     return inspirations
 
 
@@ -204,6 +239,7 @@ def _write_experiment_plan(
     strategy = variant.get("strategy") if isinstance(variant.get("strategy"), str) else ""
     focus = policy_profile.get("focus") if isinstance(policy_profile.get("focus"), str) else ""
     hypothesis = f"{focus}; variant={variant_name}; strategy={strategy}".strip("; ")
+    candidate_card = moe_candidate_card(variant) if str(problem.get("key")) == "moe_mxfp4" else None
     payload = {
         "problem": problem.get("key"),
         "leaderboard": problem.get("leaderboard"),
@@ -219,6 +255,10 @@ def _write_experiment_plan(
         "sources": _source_inspirations(str(problem.get("key")), desired_family),
         "created_at": datetime.now().astimezone().isoformat(),
     }
+    if candidate_card is not None:
+        payload["candidate_card"] = candidate_card
+        payload["subagent_roster"] = moe_subagent_roster()
+        payload["motivation_refs"] = moe_motivation_refs()
     path = Path(candidate_dir)
     path.mkdir(parents=True, exist_ok=True)
     (path / "experiment.plan.json").write_text(
@@ -442,8 +482,13 @@ def _problem_specific_guidance(
     elif problem_key == "moe_mxfp4":
         guidance.extend(
             [
-                "If correctness is unstable, keep the routing/topk contract fixed and only rewrite one expert-compute stage at a time.",
+                "Keep topk_ids and topk_weights visible in custom_kernel and preserve routing/top-k semantics exactly.",
+                "Own exactly one lane at a time in this order: dispatch_pack, stage1_core, stage2_reduce, shared_expert, then full_pipeline.",
+                "Stay inside the active Candidate Card: one lane, one regime tag, one deleted cost center, and one success gate.",
                 "Avoid leaving the hot path on fused_moe while presenting side-code as the hot path.",
+                "Do not eagerly dequantize or rebuild every expert in Python before routing; touched-expert-only packing is the structural baseline.",
+                "Treat shared-expert handling as a separate structural path only after dispatch and routed-expert stage1/stage2 are stable.",
+                "Do not jump to gfx950-specific MoE math tuning before the kernel is structurally padding-free and regime-specialized.",
             ]
         )
     elif problem_key == "mixed_mla":
@@ -536,6 +581,24 @@ def _build_prompt(
             "- return only Python source",
             "- keep the #!POPCORN header lines valid",
         ]
+    moe_candidate_block = ""
+    if str(problem["key"]) == "moe_mxfp4":
+        candidate_card = moe_candidate_card(variant)
+        retrieval_pack = candidate_card.get("retrieval_pack", {})
+        moe_candidate_block = f"""
+
+MoE Candidate Card:
+{json.dumps(candidate_card, indent=2, sort_keys=True)}
+
+Required MoE sub-agent roster:
+{json.dumps(moe_subagent_roster(), indent=2, sort_keys=True)}
+
+Raw GitHub motivation links:
+{json.dumps(moe_motivation_refs(), indent=2, sort_keys=True)}
+
+Active retrieval pack:
+{json.dumps(retrieval_pack, indent=2, sort_keys=True)}
+"""
 
     user_prompt = f"""
 Problem key: {problem["key"]}
@@ -584,6 +647,9 @@ Read these repo-local skill files before editing:
 Focused edit budget:
 {budget_text}
 
+Source inspirations:
+{chr(10).join(f"- {item['name']} ({item['kind']}): {item['idea']}" for item in _source_inspirations(str(problem["key"]), desired_family))}
+
 Experiment protocol:
 {chr(10).join(f"- {line}" for line in _experiment_protocol(desired_family))}
 
@@ -592,6 +658,7 @@ Atom-of-Thoughts operating rules:
 
 Problem-specific guidance:
 {chr(10).join(f"- {line}" for line in _problem_specific_guidance(problem["key"], desired_family, history))}
+{moe_candidate_block}
 """
     _write_prompt_artifacts(context, system_prompt.strip(), user_prompt.strip())
     return system_prompt.strip(), user_prompt.strip()
@@ -1008,6 +1075,23 @@ def _validate_hot_path(
         if token in body:
             family = "HIP" if desired_family == "hip_explore" else "Kernel"
             raise RuntimeError(f"hot path remained on anchor op {token} instead of {family}")
+    if problem_key == "moe_mxfp4":
+        sanitized_body = re.sub(r"^\s*del[^\n]*$", "", body, flags=re.MULTILINE)
+        if "topk_ids" not in sanitized_body or "topk_weights" not in sanitized_body:
+            raise RuntimeError("moe_mxfp4 candidate did not keep topk_ids and topk_weights visible in custom_kernel")
+        lower_source = source.lower()
+        if (
+            (
+                re.search(r"for\s+\w+\s+in\s+range\(\s*experts\s*\)", lower_source)
+                or re.search(r"for\s+\w+\s+in\s+range\(\s*num_experts\s*\)", lower_source)
+                or "torch.stack(gate_w)" in source
+                or "torch.stack(up_w)" in source
+                or "torch.stack(down_w)" in source
+            )
+            and "torch.unique(" not in lower_source
+            and "unique_experts" not in lower_source
+        ):
+            raise RuntimeError("moe_mxfp4 candidate still rebuilds all experts in Python instead of using touched-expert packing")
     if desired_family == "hip_explore":
         if "load_inline(" not in source and "load_inline(" not in body:
             raise RuntimeError("HIP family candidate did not use load_inline")

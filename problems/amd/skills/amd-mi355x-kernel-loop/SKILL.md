@@ -15,6 +15,9 @@ description: Optimize AMD MI355X competition kernels in /Users/v/reference-kerne
    - the current `submission.py`
 3. If the problem is `mxfp4_mm`, read [references/mxfp4-through-v45.md](references/mxfp4-through-v45.md) and [references/amd-blog-insights.md](references/amd-blog-insights.md) before planning experiments.
 4. If the problem is `moe_mxfp4` or `mixed_mla`, read [references/problem-transfer.md](references/problem-transfer.md) after the snapshot.
+5. If the problem is `moe_mxfp4`, also read [references/fused-moe-multiplier.md](references/fused-moe-multiplier.md) before planning experiments or spawning sub-agents.
+6. If the problem is `moe_mxfp4`, also read [references/moe-cost-center-gate.md](references/moe-cost-center-gate.md) and [references/moe-branch-queue.md](references/moe-branch-queue.md) before opening a branch.
+7. If the problem is `moe_mxfp4`, read [references/moe-subagent-prompt.md](references/moe-subagent-prompt.md) before spawning lane-local sub-agents.
 
 ## Scope Rules
 
@@ -60,6 +63,7 @@ When the user combines this skill with a problem name, treat that problem as the
    - Use `profile_rocprof` only after a benchmark winner when you need hardware-counter evidence for the next Candidate Card.
    - Use `benchmark` before `leaderboard`.
    - For `mxfp4_mm`, prefer the quota-aware `mxfp4-closed-loop` path.
+   - For `moe_mxfp4`, prefer the quota-aware `moe-closed-loop` path and run it through `/root/reference-kernels/problems/amd/.venv/bin/python`.
    - For other problems, use `harness-run`, `harness-summary`, `harness-resume`, or the broader `agent_loop` campaign commands.
    - Treat `leaderboard` as a separate seeded-distribution gate, not a formality after benchmark. For `mxfp4_mm`, ranked inputs are not the same population as `test`/`benchmark`, so a benchmark win is necessary but not sufficient.
    - If quota is exhausted, start the quota watcher helper from [references/remote-first-eval.md](references/remote-first-eval.md) instead of manually polling.
@@ -78,13 +82,28 @@ When the user combines this skill with a problem name, treat that problem as the
    - Prefer adding “recent signal” and “allowed next branches” updates over free-form notes, so future workers inherit a tighter search space.
    - When a result proves a whole class of edits is low-yield, say that explicitly in the frontier note and treat it as canon until contradicted by a structural win.
 9. Route sub-agents through the canon explicitly.
-   - Sub-agents do not automatically ingest the local skill corpus.
-   - Every sub-agent prompt for `mxfp4_mm` must explicitly point at:
+  - Sub-agents do not automatically ingest the local skill corpus.
+  - Every sub-agent prompt for `mxfp4_mm` must explicitly point at:
      - [references/mxfp4-exact-shape-frontier.md](references/mxfp4-exact-shape-frontier.md)
      - [references/amd-blog-insights.md](references/amd-blog-insights.md)
      - [references/mxfp4-cost-center-gate.md](references/mxfp4-cost-center-gate.md)
      - [references/mxfp4-profile-branch-queue.md](references/mxfp4-profile-branch-queue.md)
-   - Require sub-agents to return a Candidate Card before proposing code.
+  - Require sub-agents to return a Candidate Card before proposing code.
+  - Every sub-agent prompt for `moe_mxfp4` must explicitly point at:
+    - [references/problem-transfer.md](references/problem-transfer.md)
+    - [references/fused-moe-multiplier.md](references/fused-moe-multiplier.md)
+    - [references/moe-cost-center-gate.md](references/moe-cost-center-gate.md)
+    - [references/moe-branch-queue.md](references/moe-branch-queue.md)
+    - [references/moe-subagent-prompt.md](references/moe-subagent-prompt.md)
+    - `/root/reference-kernels/problems/amd/important_papers/fused_moe/links.md`
+  - For `moe_mxfp4`, require sub-agents to return:
+    - lane
+    - regime tag
+    - deleted cost center
+    - expected upside source
+    - why larger than noise
+    - forbidden edits
+    - success gate
 
 ## Problem Map
 
@@ -113,6 +132,14 @@ If a prompt mentions stale `problems/amd_202602/...` paths, map them to these li
   Use for the current zip-derived branch order, active Candidate Cards, and the required next exact-shape queue.
 - [references/problem-transfer.md](references/problem-transfer.md)
   Use to transfer the `mxfp4` playbook to `moe` and `mla-decode`.
+- [references/fused-moe-multiplier.md](references/fused-moe-multiplier.md)
+  Use for the MoE-specific paper canon, raw GitHub links, and the current structural multiplier bets.
+- [references/moe-cost-center-gate.md](references/moe-cost-center-gate.md)
+  Use for the mandatory MoE Candidate Card schema, branch veto rules, and lane success gates.
+- [references/moe-branch-queue.md](references/moe-branch-queue.md)
+  Use for the current first-wave branch order and exact MoE lane/regime queue.
+- [references/moe-subagent-prompt.md](references/moe-subagent-prompt.md)
+  Use for the default MoE sub-agent prompt contract.
 - [references/remote-first-eval.md](references/remote-first-eval.md)
   Use for harness commands, closed-loop commands, quota discipline, and promotion rules.
 - `scripts/quota_watch_resume.py`

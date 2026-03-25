@@ -10,6 +10,54 @@ import textwrap
 
 META_RE = re.compile(r"^# AGENT_LOOP_META:\s*(\{.*\})\s*$", re.MULTILINE)
 
+MOE_MOTIVATION_REFS = [
+    "/root/reference-kernels/problems/amd/important_papers/fused_moe/README.md",
+    "/root/reference-kernels/problems/amd/important_papers/fused_moe/architectural_multipliers.md",
+    "/root/reference-kernels/problems/amd/important_papers/fused_moe/links.md",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-cost-center-gate.md",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-branch-queue.md",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-subagent-prompt.md",
+    "https://github.com/microsoft/tutel",
+    "https://github.com/deepseek-ai/DeepSeek-V3",
+    "https://github.com/shawntan/scattermoe",
+    "https://github.com/osayamenja/FlashMoE",
+    "https://github.com/Dao-AILab/sonic-moe",
+]
+
+MOE_RETRIEVAL_PACKS = {
+    "dispatch_pack": [
+        "q29-fused-moe-padding-free-packing",
+        "q32-fused-moe-github-motivation-links",
+        "padding-free routed expert packing touched experts",
+        "sorted_token_ids sorted_expert_ids num_valid_ids",
+    ],
+    "stage1_core": [
+        "q30-fused-moe-persistent-pipeline",
+        "stage1 grouped bf16 gate up swiglu fused expert tile pipeline",
+        "ck_moe_stage1 block_m sorted_weights shuffled scale-aware",
+    ],
+    "stage2_reduce": [
+        "q30-fused-moe-persistent-pipeline",
+        "stage2 weighted reduction down projection index_add expert outputs",
+        "ck_moe_stage2 sorted_token_ids sorted_expert_ids weighted epilogue",
+    ],
+    "shared_expert": [
+        "q31-fused-moe-shared-expert-split",
+        "shared expert split dense fast path routed experts",
+        "shared experts routed experts separate scheduler",
+    ],
+    "full_pipeline": [
+        "q30-fused-moe-persistent-pipeline",
+        "persistent expert tile pipeline stage1 swiglu stage2 overlap io compute",
+        "shared metadata resident persistent moe kernel",
+        "gfx950 load_inline lds swizzle double buffering",
+        "q09-cdna4-gemm-blog",
+        "q25-cdna-matrix-core-lane-layout",
+        "q27-gemm-tuning-shape-driven",
+        "AMDGPU builtin intrinsic mapping",
+    ],
+}
+
 
 SEARCH_SPACE: dict[str, list[dict[str, object]]] = {
     "mxfp4_mm": [
@@ -197,46 +245,271 @@ SEARCH_SPACE: dict[str, list[dict[str, object]]] = {
             "variant_name": "fused_moe_contract_anchor",
             "family": "anchor",
             "strategy": "contract_anchor",
+            "MOTIVATION_REFS": MOE_MOTIVATION_REFS,
+            "RETRIEVAL_PACK": ["q32-fused-moe-github-motivation-links"],
+            "DELETED_COST_CENTER": "none; control anchor only",
+            "EXPECTED_UPSIDE_SOURCE": "seed the exact live contract before lane-local native work",
+            "WHY_LARGER_THAN_NOISE": "this is a control record, not a throughput branch",
+            "FORBIDDEN_EDITS": [
+                "do not change routing or top-k semantics",
+                "do not present side-code as a non-anchor hot path",
+            ],
+            "SUCCESS_GATE": "test-green anchor control only",
         },
         {
-            "variant_name": "routing_swiglu_128",
+            "variant_name": "anchor_tune_sparse256",
+            "family": "anchor",
+            "strategy": "anchor_tune",
+            "BLOCK_SIZE_M": 16,
+            "REGIME_HINT": "re256_de256_bs512_topk8",
+            "MOTIVATION_REFS": MOE_MOTIVATION_REFS,
+            "RETRIEVAL_PACK": ["q32-fused-moe-github-motivation-links"],
+            "DELETED_COST_CENTER": "none; wrapper-only ceiling map for sparse256 anchor",
+            "EXPECTED_UPSIDE_SOURCE": "small launch/padding alignment gain from the sparse256 block_size_M frontier",
+            "WHY_LARGER_THAN_NOISE": "the sparse256 anchor already showed a repeatable but small block_size_M sensitivity",
+            "FORBIDDEN_EDITS": [
+                "do not claim native lane ownership",
+                "do not change more than one anchor heuristic",
+                "do not spend main budget here after ceiling mapping",
+            ],
+            "SUCCESS_GATE": "two agreeing reruns and a stable <175 us ceiling or stop investing",
+        },
+        {
+            "variant_name": "dispatch_pack_sparse256",
             "family": "kernel_explore",
-            "strategy": "routing_prototype",
+            "strategy": "dispatch_pack",
+            "LANE": "dispatch_pack",
+            "HOT_PATH_STATE": "partial-native",
+            "REGIME_HINT": "re256_de256_bs512_topk8",
+            "BLOCK_SIZE": 256,
+            "NUM_WARPS": 4,
+            "SORT_BY_EXPERT": True,
+            "PREFER_TOUCHED_EXPERTS": True,
+            "MOTIVATION_REFS": MOE_MOTIVATION_REFS,
+            "RETRIEVAL_PACK": MOE_RETRIEVAL_PACKS["dispatch_pack"],
+            "DELETED_COST_CENTER": "repeated sort/regroup/padding work across routed sparse256 expert stages",
+            "EXPECTED_UPSIDE_SOURCE": "ScatterMoE/SonicMoE-style touched-expert packing with compact expert windows",
+            "WHY_LARGER_THAN_NOISE": "re256/de256/bs512 is dominated by routing overhead once per-expert token load is sparse",
+            "FORBIDDEN_EDITS": [
+                "do not change routing semantics or top-k membership",
+                "do not rebuild every expert in Python",
+                "do not tune stage1 or stage2 math in the same branch",
+            ],
+            "SUCCESS_GATE": "clear win on re256_de256_bs512_topk8 and global <170 us",
+        },
+        {
+            "variant_name": "dispatch_pack_dense32",
+            "family": "kernel_explore",
+            "strategy": "dispatch_pack",
+            "LANE": "dispatch_pack",
+            "HOT_PATH_STATE": "partial-native",
+            "REGIME_HINT": "re32_de512_bs128_topk8",
             "BLOCK_SIZE": 128,
             "NUM_WARPS": 4,
             "SORT_BY_EXPERT": True,
+            "PREFER_TOUCHED_EXPERTS": True,
+            "MOTIVATION_REFS": MOE_MOTIVATION_REFS,
+            "RETRIEVAL_PACK": MOE_RETRIEVAL_PACKS["dispatch_pack"],
+            "DELETED_COST_CENTER": "generic routed-token regroup and padding overhead on dense32 metadata flow",
+            "EXPECTED_UPSIDE_SOURCE": "tile-aware expert-local packing before compute on the denser 32-expert family",
+            "WHY_LARGER_THAN_NOISE": "re32/de512 keeps enough expert reuse for compact windows to amortize dispatch overhead",
+            "FORBIDDEN_EDITS": [
+                "do not fuse stage1 compute yet",
+                "do not mix sparse256 and dense32 schedules",
+                "do not call fused_moe in the non-anchor hot path",
+            ],
+            "SUCCESS_GATE": "targeted dense32 dispatch win without >7% regression outside the target regime",
         },
         {
-            "variant_name": "routing_swiglu_256",
+            "variant_name": "stage1_grouped_bf16",
             "family": "kernel_explore",
-            "strategy": "routing_prototype",
+            "strategy": "stage1_grouped",
+            "LANE": "stage1_core",
+            "HOT_PATH_STATE": "partial-native",
+            "REGIME_HINT": "re32_de512_bs512_topk8",
             "BLOCK_SIZE": 256,
             "NUM_WARPS": 4,
             "SORT_BY_EXPERT": True,
+            "PREFER_TOUCHED_EXPERTS": True,
+            "FUSE_SWIGLU": False,
+            "WEIGHT_EPILOGUE": False,
+            "SHARED_EXPERT_FASTPATH": False,
+            "MOTIVATION_REFS": MOE_MOTIVATION_REFS,
+            "RETRIEVAL_PACK": MOE_RETRIEVAL_PACKS["stage1_core"],
+            "DELETED_COST_CENTER": "generic stage1 launch plus repeated metadata walking for touched experts",
+            "EXPECTED_UPSIDE_SOURCE": "native grouped hidden->2*d_expert stage1 on touched experts only",
+            "WHY_LARGER_THAN_NOISE": "once dispatch is compact, stage1 becomes the dominant routed-expert bucket on re32/de512",
+            "FORBIDDEN_EDITS": [
+                "do not dequantize all experts eagerly",
+                "do not fuse stage2 in the same branch",
+                "do not reopen dispatch semantics here",
+            ],
+            "SUCCESS_GATE": "native stage1 path beats the control on target dense32 regimes and moves global score below 150 us",
         },
         {
-            "variant_name": "routing_swiglu_256_unsorted",
+            "variant_name": "stage1_swiglu_fused",
             "family": "kernel_explore",
-            "strategy": "routing_prototype",
+            "strategy": "stage1_swiglu_fused",
+            "LANE": "stage1_core",
+            "HOT_PATH_STATE": "partial-native",
+            "REGIME_HINT": "re32_de512_bs512_topk8",
             "BLOCK_SIZE": 256,
-            "NUM_WARPS": 4,
-            "SORT_BY_EXPERT": False,
-        },
-        {
-            "variant_name": "routing_swiglu_512",
-            "family": "kernel_explore",
-            "strategy": "routing_prototype",
-            "BLOCK_SIZE": 512,
             "NUM_WARPS": 8,
             "SORT_BY_EXPERT": True,
+            "PREFER_TOUCHED_EXPERTS": True,
+            "FUSE_SWIGLU": True,
+            "WEIGHT_EPILOGUE": False,
+            "SHARED_EXPERT_FASTPATH": False,
+            "MOTIVATION_REFS": MOE_MOTIVATION_REFS,
+            "RETRIEVAL_PACK": MOE_RETRIEVAL_PACKS["stage1_core"],
+            "DELETED_COST_CENTER": "stage1 output materialization and round-trip buffer traffic before SwiGLU",
+            "EXPECTED_UPSIDE_SOURCE": "fused stage1->SwiGLU epilogue inside routed expert tiles",
+            "WHY_LARGER_THAN_NOISE": "re32/de512 stage1 emits enough routed activation traffic that epilogue fusion should survive benchmark noise",
+            "FORBIDDEN_EDITS": [
+                "do not change stage2 ownership",
+                "do not bring in shared-expert logic",
+                "do not mix this with low-level gfx950 tuning",
+            ],
+            "SUCCESS_GATE": "measurable target-regime win over stage1_grouped_bf16 without regressing non-target cases by >7%",
         },
         {
-            "variant_name": "routing_swiglu_1024",
+            "variant_name": "stage2_grouped_weighted",
             "family": "kernel_explore",
-            "strategy": "routing_prototype",
-            "BLOCK_SIZE": 1024,
+            "strategy": "stage2_grouped",
+            "LANE": "stage2_reduce",
+            "HOT_PATH_STATE": "partial-native",
+            "REGIME_HINT": "re32_de2048_bs512_topk8",
+            "BLOCK_SIZE": 256,
             "NUM_WARPS": 8,
             "SORT_BY_EXPERT": True,
+            "PREFER_TOUCHED_EXPERTS": True,
+            "FUSE_SWIGLU": True,
+            "WEIGHT_EPILOGUE": True,
+            "SHARED_EXPERT_FASTPATH": False,
+            "MOTIVATION_REFS": MOE_MOTIVATION_REFS,
+            "RETRIEVAL_PACK": MOE_RETRIEVAL_PACKS["stage2_reduce"],
+            "DELETED_COST_CENTER": "separate stage2 reduction and post-matmul top-k weighted combine work",
+            "EXPECTED_UPSIDE_SOURCE": "native grouped d_expert->d_hidden with weighted epilogue and direct combine",
+            "WHY_LARGER_THAN_NOISE": "the heavy stage2/down-proj bucket dominates large-routed-output cases once dispatch and stage1 are local",
+            "FORBIDDEN_EDITS": [
+                "do not reopen dispatch packing in the same branch",
+                "do not force shared experts through the routed path",
+                "do not add full-pipeline persistence yet",
+            ],
+            "SUCCESS_GATE": "clear win on re32_de2048_bs512_topk8 and end-to-end <135 us",
+        },
+        {
+            "variant_name": "shared_expert_split",
+            "family": "kernel_explore",
+            "strategy": "shared_expert_split",
+            "LANE": "shared_expert",
+            "HOT_PATH_STATE": "partial-native",
+            "REGIME_HINT": "re32_de2048_bs512_topk8",
+            "BLOCK_SIZE": 256,
+            "NUM_WARPS": 8,
+            "SORT_BY_EXPERT": True,
+            "PREFER_TOUCHED_EXPERTS": True,
+            "FUSE_SWIGLU": True,
+            "WEIGHT_EPILOGUE": True,
+            "SHARED_EXPERT_FASTPATH": True,
+            "MOTIVATION_REFS": MOE_MOTIVATION_REFS,
+            "RETRIEVAL_PACK": MOE_RETRIEVAL_PACKS["shared_expert"],
+            "DELETED_COST_CENTER": "forcing shared experts and routed experts through one generic scheduler",
+            "EXPECTED_UPSIDE_SOURCE": "DeepSeek-style shared-expert separation with a dense fast path alongside routed execution",
+            "WHY_LARGER_THAN_NOISE": "shared-expert and routed-expert reuse patterns are structurally different and regress each other when fused too early",
+            "FORBIDDEN_EDITS": [
+                "do not change routed stage math and shared scheduling in the same branch",
+                "do not rebuild all routed experts in Python",
+                "do not claim full-pipeline ownership yet",
+            ],
+            "SUCCESS_GATE": "reduce shared-expert heavy regressions while keeping routed regimes flat or better",
+        },
+        {
+            "variant_name": "hip_fp4_preshuffled_sparse256",
+            "family": "hip_explore",
+            "strategy": "hip_fp4_preshuffled",
+            "LANE": "full_pipeline",
+            "HOT_PATH_STATE": "native",
+            "REGIME_HINT": "re256_de256_bs512_topk8",
+            "BLOCK_SIZE": 256,
+            "NUM_WARPS": 8,
+            "SORT_BY_EXPERT": True,
+            "PREFER_TOUCHED_EXPERTS": True,
+            "FUSE_SWIGLU": True,
+            "WEIGHT_EPILOGUE": True,
+            "SHARED_EXPERT_FASTPATH": False,
+            "TILE_M": 16,
+            "TILE_N": 128,
+            "TILE_K": 64,
+            "MOTIVATION_REFS": MOE_MOTIVATION_REFS,
+            "RETRIEVAL_PACK": MOE_RETRIEVAL_PACKS["full_pipeline"],
+            "DELETED_COST_CENTER": "Python/Triton stage boundaries on the sparse256 routed path after structural packing is proven",
+            "EXPECTED_UPSIDE_SOURCE": "gfx950 load_inline path that consumes preshuffled FP4 data without reopening contract work",
+            "WHY_LARGER_THAN_NOISE": "once sparse256 ownership is native and compact, the remaining gap should be dominated by compiler-boundary and memory-hierarchy overhead",
+            "FORBIDDEN_EDITS": [
+                "do not keep fused_moe in the hot path",
+                "do not retune routing semantics",
+                "do not share one schedule across sparse256 and dense32",
+            ],
+            "SUCCESS_GATE": "full sparse256 HIP path beats the control and is worth deeper gfx950 tuning",
+        },
+        {
+            "variant_name": "hip_fp4_preshuffled_dense32",
+            "family": "hip_explore",
+            "strategy": "hip_fp4_preshuffled",
+            "LANE": "full_pipeline",
+            "HOT_PATH_STATE": "native",
+            "REGIME_HINT": "re32_de512_bs128_topk8",
+            "BLOCK_SIZE": 128,
+            "NUM_WARPS": 8,
+            "SORT_BY_EXPERT": True,
+            "PREFER_TOUCHED_EXPERTS": True,
+            "FUSE_SWIGLU": True,
+            "WEIGHT_EPILOGUE": True,
+            "SHARED_EXPERT_FASTPATH": False,
+            "TILE_M": 32,
+            "TILE_N": 128,
+            "TILE_K": 64,
+            "MOTIVATION_REFS": MOE_MOTIVATION_REFS,
+            "RETRIEVAL_PACK": MOE_RETRIEVAL_PACKS["full_pipeline"],
+            "DELETED_COST_CENTER": "Python/Triton stage boundaries on the dense32 routed path after native stage ownership is validated",
+            "EXPECTED_UPSIDE_SOURCE": "gfx950 load_inline grouped path specialized for dense32 expert reuse",
+            "WHY_LARGER_THAN_NOISE": "dense32 should expose enough reuse for a regime-specific HIP path to outrun the mixed generic kernel",
+            "FORBIDDEN_EDITS": [
+                "do not reuse sparse256 tile assumptions unchanged",
+                "do not keep shared experts on the routed schedule",
+                "do not spend budget on MFMA before the HIP path is benchmark-positive",
+            ],
+            "SUCCESS_GATE": "dense32 HIP path wins on its target regimes and supports promotion toward full_pipeline",
+        },
+        {
+            "variant_name": "hip_persistent_sparse256",
+            "family": "hip_explore",
+            "strategy": "hip_persistent_sparse",
+            "LANE": "full_pipeline",
+            "HOT_PATH_STATE": "native",
+            "REGIME_HINT": "re256_de256_bs512_topk8",
+            "BLOCK_SIZE": 256,
+            "NUM_WARPS": 8,
+            "SORT_BY_EXPERT": True,
+            "PREFER_TOUCHED_EXPERTS": True,
+            "FUSE_SWIGLU": True,
+            "WEIGHT_EPILOGUE": True,
+            "SHARED_EXPERT_FASTPATH": True,
+            "TILE_M": 32,
+            "TILE_N": 256,
+            "TILE_K": 64,
+            "MOTIVATION_REFS": MOE_MOTIVATION_REFS,
+            "RETRIEVAL_PACK": MOE_RETRIEVAL_PACKS["full_pipeline"],
+            "DELETED_COST_CENTER": "relaunches, repeated metadata loads, and non-resident stage state on the sparse256 full pipeline",
+            "EXPECTED_UPSIDE_SOURCE": "persistent expert-tile pipeline owning dispatch->stage1->SwiGLU->stage2->combine",
+            "WHY_LARGER_THAN_NOISE": "this deletes multiple launch and residency costs after the sparse256 structural path is already benchmark-positive",
+            "FORBIDDEN_EDITS": [
+                "do not open multiple regime families in one branch",
+                "do not introduce scaled-MFMA before the persistent schedule is winning",
+                "do not fallback to anchor-backed wrappers",
+            ],
+            "SUCCESS_GATE": "stable <120 us before deeper gfx950 inner-loop specialization",
         },
     ],
     "mixed_mla": [
@@ -290,6 +563,225 @@ SEARCH_SPACE: dict[str, list[dict[str, object]]] = {
             "NUM_STAGES": 2,
         },
     ],
+}
+
+
+MOE_MOTIVATION_REFS = [
+    "/root/reference-kernels/problems/amd/important_papers/fused_moe/README.md",
+    "/root/reference-kernels/problems/amd/important_papers/fused_moe/architectural_multipliers.md",
+    "/root/reference-kernels/problems/amd/important_papers/fused_moe/links.md",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-cost-center-gate.md",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-branch-queue.md",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-subagent-prompt.md",
+    "https://github.com/microsoft/tutel",
+    "https://github.com/deepseek-ai/DeepSeek-V3",
+    "https://github.com/shawntan/scattermoe",
+    "https://github.com/osayamenja/FlashMoE",
+    "https://github.com/Dao-AILab/sonic-moe",
+]
+
+MOE_SUBAGENT_ROSTER = [
+    {
+        "role": "structure_planner",
+        "required_reads": [
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/SKILL.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/fused-moe-multiplier.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-cost-center-gate.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-branch-queue.md",
+        ],
+        "deliverable": "one Candidate Card only",
+    },
+    {
+        "role": "retrieval_canon_scout",
+        "required_reads": [
+            "/root/reference-kernels/problems/amd/skills/amd-kernel-speedrun/SKILL.md",
+            "/root/reference-kernels/problems/amd/skills/amd-kernel-speedrun/references/moe-closed-loop.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/remote-first-eval.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-branch-queue.md",
+        ],
+        "deliverable": "3-6 retrieval hits plus a veto if the idea is wrapper-only",
+    },
+    {
+        "role": "bounded_kernel_worker",
+        "required_reads": [
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/SKILL.md",
+            "/root/reference-kernels/problems/amd/skills/amd-kernel-speedrun/SKILL.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-cost-center-gate.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/moe-subagent-prompt.md",
+        ],
+        "deliverable": "one bounded patch plan or one bounded seed rewrite only",
+    },
+]
+
+MOE_RETRIEVAL_PACKS = {
+    "dispatch_pack": {
+        "name": "dispatch",
+        "queries": [
+            "q29-fused-moe-padding-free-packing",
+            "q32-fused-moe-github-motivation-links",
+            "padding-free routed expert packing touched experts",
+            "sorted_token_ids sorted_expert_ids num_valid_ids",
+        ],
+    },
+    "stage1_core": {
+        "name": "stage1",
+        "queries": [
+            "q30-fused-moe-persistent-pipeline",
+            "stage1 grouped bf16 gate up swiglu fused expert tile pipeline",
+            "ck_moe_stage1 block_m sorted_weights shuffled scale-aware",
+        ],
+    },
+    "stage2_reduce": {
+        "name": "stage2",
+        "queries": [
+            "q30-fused-moe-persistent-pipeline",
+            "stage2 weighted reduction down projection index_add expert outputs",
+            "ck_moe_stage2 sorted_token_ids sorted_expert_ids weighted epilogue",
+        ],
+    },
+    "shared_expert": {
+        "name": "shared_expert",
+        "queries": [
+            "q31-fused-moe-shared-expert-split",
+            "shared expert split routed expert scheduler",
+            "deepseek shared expert routed expert separate path",
+        ],
+    },
+    "full_pipeline": {
+        "name": "persistence",
+        "queries": [
+            "q30-fused-moe-persistent-pipeline",
+            "persistent expert tile pipeline stage1 swiglu stage2 overlap io compute",
+            "shared metadata resident persistent moe kernel",
+            "q09-cdna4-gemm-blog",
+            "q25-cdna-matrix-core-lane-layout",
+            "q27-gemm-tuning-shape-driven",
+            "gfx950 load_inline lds swizzle double buffering",
+            "AMDGPU builtin intrinsic mapping",
+        ],
+    },
+}
+
+MOE_CANDIDATE_CARD_TEMPLATES = {
+    "fused_moe_contract_anchor": {
+        "deleted_cost_center": "none; control anchor only",
+        "expected_upside_source": "control path for MoE lane replacement, not a structural multiplier",
+        "why_larger_than_noise": "anchor reruns define the noise floor and stop us from mistaking wrapper variance for progress",
+        "forbidden_edits": [
+            "claiming non-anchor progress",
+            "changing routing semantics",
+        ],
+        "success_gate": "two reruns that agree within 1.0%",
+    },
+    "anchor_tune_sparse256": {
+        "deleted_cost_center": "none; control-only AITER ceiling map for sparse256",
+        "expected_upside_source": "small wrapper-level block-size reduction in the sparse256 control regime",
+        "why_larger_than_noise": "the current control already shows a small block_size_M response on re256_de256_bs512_topk8",
+        "forbidden_edits": [
+            "claiming native progress",
+            "mixing structural kernel rewrites into anchor tuning",
+        ],
+        "success_gate": "stable <175 us ceiling or stop spending budget on the anchor",
+    },
+    "dispatch_pack_sparse256": {
+        "deleted_cost_center": "repeated routed-token sort/regroup/padding overhead before expert compute",
+        "expected_upside_source": "ScatterMoE-style touched-expert packing plus SonicMoE tile-aware sparse routing",
+        "why_larger_than_noise": "the sparse256 bs512 regime is where padding and regroup overhead are largest and the current anchor already reacts to dispatch granularity",
+        "forbidden_edits": [
+            "calling fused_moe in the hot path",
+            "changing more than the dispatch_pack lane",
+            "rebuilding all experts in Python",
+        ],
+        "success_gate": "clear re256_de256_bs512_topk8 win and global <170 us",
+    },
+    "dispatch_pack_dense32": {
+        "deleted_cost_center": "generic routed-token regroup overhead in the denser 32-expert family",
+        "expected_upside_source": "packed expert windows reused across stage boundaries instead of repeating dense32 regroup work",
+        "why_larger_than_noise": "dense32 still pays repeated sorting and offset rebuilds, but the benefit is smaller than sparse256 so the branch must stay tightly scoped",
+        "forbidden_edits": [
+            "calling fused_moe in the hot path",
+            "changing more than the dispatch_pack lane",
+            "adding stage1/stage2 math rewrites in the same branch",
+        ],
+        "success_gate": "target-regime win on re32_de512_bs128_topk8 without broad regressions",
+    },
+    "stage1_grouped_bf16": {
+        "deleted_cost_center": "anchor-backed gate/up stage launches and repeated expert metadata walking after dispatch",
+        "expected_upside_source": "touched-expert-only grouped stage1 compute with stable bf16 math before deeper HIP tuning",
+        "why_larger_than_noise": "stage1 dominates the medium-width routed path once dispatch packing is in place, so owning it should move more than wrapper noise",
+        "forbidden_edits": [
+            "changing dispatch semantics",
+            "adding stage2 ownership in the same branch",
+            "all-expert eager dequant in Python",
+        ],
+        "success_gate": "native stage1 path plus fused dispatch beats the control on re32_de512_bs512_topk8 and global <150 us",
+    },
+    "stage1_swiglu_fused": {
+        "deleted_cost_center": "stage1 intermediate activation round-trip between gate/up and SwiGLU",
+        "expected_upside_source": "fused stage1 epilogue that keeps gate/up outputs in the routed expert tile flow",
+        "why_larger_than_noise": "SwiGLU buffer traffic is repeated for every touched expert tile, so deleting that boundary should survive reruns if stage1 ownership is real",
+        "forbidden_edits": [
+            "reopening dispatch changes",
+            "adding stage2 ownership in the same branch",
+            "keeping the hot path on fused_moe",
+        ],
+        "success_gate": "improve the stage1_core branch on re32_de512_bs512_topk8 without >7% regressions elsewhere",
+    },
+    "stage2_grouped_weighted": {
+        "deleted_cost_center": "separate stage2 reduction plus weighted combine/index_add overhead",
+        "expected_upside_source": "native grouped stage2 with weighted epilogue in the heavy re32_de2048 path",
+        "why_larger_than_noise": "the large-expert regime is stage2-heavy enough that weighted epilogue ownership should move more than a few microseconds",
+        "forbidden_edits": [
+            "changing dispatch or stage1 in the same branch",
+            "rebuilding every expert in Python",
+            "keeping weighted reduction outside the owned stage2 path",
+        ],
+        "success_gate": "clear win on re32_de2048_bs512_topk8 and end-to-end <135 us",
+    },
+    "shared_expert_split": {
+        "deleted_cost_center": "forcing shared and routed experts through one generic schedule",
+        "expected_upside_source": "DeepSeek-style shared-expert split plus separate routed scheduling",
+        "why_larger_than_noise": "shared experts have different reuse and occupancy behavior than routed experts, so separating them deletes a whole scheduler mismatch",
+        "forbidden_edits": [
+            "changing routed dispatch semantics",
+            "merging shared and routed work back into one generic loop",
+            "claiming full-pipeline progress from a shared-only path",
+        ],
+        "success_gate": "reduce heavy shared-expert regressions while keeping routed regimes flat or better",
+    },
+    "hip_fp4_preshuffled_sparse256": {
+        "deleted_cost_center": "remaining stage boundaries and generic bf16 expert math in the sparse256 routed path",
+        "expected_upside_source": "gfx950-native preshuffled FP4 stage ownership after the structural dispatch/stage split is already winning",
+        "why_larger_than_noise": "once dispatch and stage ownership are native, remaining time should sit in data movement and math-core feed shape rather than wrapper logic",
+        "forbidden_edits": [
+            "starting HIP before the structural path is benchmark-positive",
+            "reintroducing padded generic MoE structure",
+            "calling fused_moe in the hot path",
+        ],
+        "success_gate": "native sparse256 full pipeline reaches <120 us before scaled-MFMA specialization",
+    },
+    "hip_fp4_preshuffled_dense32": {
+        "deleted_cost_center": "remaining stage boundaries and generic grouped math in the dense32 routed path",
+        "expected_upside_source": "gfx950-native dense32 expert tiles fed from the already-packed routed metadata",
+        "why_larger_than_noise": "dense32 becomes memory-hierarchy and fragment-feed limited only after dispatch and stage ownership are already real",
+        "forbidden_edits": [
+            "mixing sparse256 and dense32 schedules in one kernel family",
+            "reopening routing semantics",
+            "calling fused_moe in the hot path",
+        ],
+        "success_gate": "native dense32 full pipeline beats the best stage-owned path and stays within the routed-regime guardrails",
+    },
+    "hip_persistent_sparse256": {
+        "deleted_cost_center": "kernel boundaries, relaunches, and non-resident expert tile state across dispatch-stage1-stage2-combine",
+        "expected_upside_source": "persistent expert-tile pipeline plus later gfx950 LDS/swizzle/MFMA tuning",
+        "why_larger_than_noise": "the remaining gap to the leaderboard target is too large for wrapper or non-persistent cleanup, so only full pipeline residency can plausibly move it",
+        "forbidden_edits": [
+            "keeping generic padded dispatch structure",
+            "mixing persistence work with routing-policy changes",
+            "claiming scaled-MFMA progress before persistence is benchmark-positive",
+        ],
+        "success_gate": "sub-120 us before scaled-MFMA specialization, then chase ~109.793 us",
+    },
 }
 
 
@@ -376,36 +868,56 @@ POLICY_PROFILES: dict[str, list[dict[str, object]]] = {
         {
             "name": "contract_repair",
             "family": "kernel_explore",
-            "focus": "stabilize routing and shuffled-weight semantics",
+            "focus": "build a padding-free dispatch pack path while keeping routing and top-k semantics fixed",
             "preferred_variants": [
-                "routing_swiglu_128",
-                "routing_swiglu_256",
+                "dispatch_pack_sparse256",
+                "dispatch_pack_dense32",
             ],
-            "preferred_strategies": ["routing_prototype"],
+            "preferred_strategies": ["dispatch_pack"],
             "trigger_signals": ["contract_repair", "runtime_repair", "submission_repair"],
         },
         {
-            "name": "routing_balance",
+            "name": "stage1_core",
             "family": "kernel_explore",
-            "focus": "test safer grouped-routing schedules first",
+            "focus": "replace anchor-backed stage1 compute with a touched-expert grouped path before heavier pipeline rewrites",
             "preferred_variants": [
-                "routing_swiglu_256",
-                "routing_swiglu_256_unsorted",
-                "routing_swiglu_512",
+                "stage1_grouped_bf16",
+                "stage1_swiglu_fused",
             ],
-            "preferred_strategies": ["routing_prototype"],
-            "trigger_signals": ["throughput_shift"],
+            "preferred_strategies": ["stage1_grouped", "stage1_swiglu_fused"],
+            "trigger_signals": ["throughput_shift", "contract_repair"],
         },
         {
-            "name": "routing_throughput",
+            "name": "stage2_reduce",
             "family": "kernel_explore",
-            "focus": "push larger routing/fusion blocks after correctness is stable",
+            "focus": "fold weighted stage2 reduction into the touched-expert path once stage1 is stable",
             "preferred_variants": [
-                "routing_swiglu_512",
-                "routing_swiglu_1024",
+                "stage2_grouped_weighted",
             ],
-            "preferred_strategies": ["routing_prototype"],
+            "preferred_strategies": ["stage2_grouped"],
             "trigger_signals": ["throughput_shift", "latency_repair"],
+        },
+        {
+            "name": "shared_expert",
+            "family": "kernel_explore",
+            "focus": "split shared-expert handling from routed-expert handling in the sparse high-work regime",
+            "preferred_variants": [
+                "shared_expert_split",
+            ],
+            "preferred_strategies": ["shared_expert_split"],
+            "trigger_signals": ["throughput_shift", "latency_repair"],
+        },
+        {
+            "name": "hip_sparse_pipeline",
+            "family": "hip_explore",
+            "focus": "carry the touched-expert dispatch into a future gfx950-native MoE pipeline after the kernel path is structurally correct",
+            "preferred_variants": [
+                "hip_fp4_preshuffled_sparse256",
+                "hip_fp4_preshuffled_dense32",
+                "hip_persistent_sparse256",
+            ],
+            "preferred_strategies": ["hip_fp4_preshuffled", "hip_persistent_sparse"],
+            "trigger_signals": ["throughput_shift"],
         },
     ],
     "mixed_mla": [
@@ -568,6 +1080,44 @@ def choose_policy_profile(
         )
 
     return min(profiles, key=profile_sort_key)
+
+
+def moe_subagent_roster() -> list[dict[str, object]]:
+    return [dict(item) for item in MOE_SUBAGENT_ROSTER]
+
+
+def moe_motivation_refs() -> list[str]:
+    return list(MOE_MOTIVATION_REFS)
+
+
+def moe_retrieval_pack(variant: dict[str, object]) -> dict[str, object]:
+    lane = str(variant.get("LANE", "") or "full_pipeline")
+    pack = MOE_RETRIEVAL_PACKS.get(lane, MOE_RETRIEVAL_PACKS["full_pipeline"])
+    return {
+        "name": str(pack["name"]),
+        "queries": [str(item) for item in pack["queries"]],
+    }
+
+
+def moe_candidate_card(variant: dict[str, object]) -> dict[str, object]:
+    variant_name = str(variant.get("variant_name", ""))
+    template = MOE_CANDIDATE_CARD_TEMPLATES.get(variant_name, {})
+    lane = str(variant.get("LANE", "") or ("full_pipeline" if variant.get("family") == "anchor" else "unknown"))
+    regime_tag = str(variant.get("REGIME_HINT", "") or "unknown")
+    retrieval_pack = moe_retrieval_pack(variant)
+    return {
+        "lane": lane,
+        "regime_tag": regime_tag,
+        "deleted_cost_center": str(template.get("deleted_cost_center", "")),
+        "expected_upside_source": str(template.get("expected_upside_source", "")),
+        "why_larger_than_noise": str(template.get("why_larger_than_noise", "")),
+        "forbidden_edits": [str(item) for item in template.get("forbidden_edits", [])],
+        "success_gate": str(template.get("success_gate", "")),
+        "retrieval_pack": retrieval_pack,
+        "retrieval_queries": [str(item) for item in retrieval_pack.get("queries", [])],
+        "motivation_refs": moe_motivation_refs(),
+        "required_subagents": moe_subagent_roster(),
+    }
 
 
 def choose_variant(
@@ -752,6 +1302,8 @@ def render_submission(
             "focus": policy_profile.get("focus"),
             "trigger_signals": policy_profile.get("trigger_signals"),
         }
+    if problem_key == "moe_mxfp4":
+        meta["candidate_card"] = moe_candidate_card(variant)
     if problem_key == "mxfp4_mm":
         if variant.get("family") == "anchor":
             return render_mxfp4_mm_anchor(meta)
@@ -760,7 +1312,7 @@ def render_submission(
         return render_mxfp4_mm_kernel(meta, variant)
     if problem_key == "moe_mxfp4":
         if variant.get("family") == "anchor":
-            return render_moe_mxfp4_anchor(meta)
+            return render_moe_mxfp4_anchor(meta, variant)
         return render_moe_mxfp4_kernel(meta, variant)
     if problem_key == "mixed_mla":
         if variant.get("family") == "anchor":
@@ -1246,7 +1798,7 @@ def render_mxfp4_mm_hip(meta: dict[str, object], variant: dict[str, object]) -> 
     )
 
 
-def render_moe_mxfp4_anchor(meta: dict[str, object]) -> str:
+def render_moe_mxfp4_anchor(meta: dict[str, object], variant: dict[str, object]) -> str:
     source = textwrap.dedent(
         """
         #!POPCORN leaderboard amd-moe-mxfp4
@@ -1255,6 +1807,8 @@ def render_moe_mxfp4_anchor(meta: dict[str, object]) -> str:
         from aiter import ActivationType, QuantType
         from aiter.fused_moe import fused_moe
         from task import input_t, output_t
+
+        CONFIG = __CONFIG__
 
 
         def custom_kernel(data: input_t) -> output_t:
@@ -1289,12 +1843,13 @@ def render_moe_mxfp4_anchor(meta: dict[str, object]) -> str:
                 w2_scale=down_weight_scale_shuffled,
                 a1_scale=None,
                 a2_scale=None,
+                block_size_M=CONFIG.get("BLOCK_SIZE_M"),
                 hidden_pad=hidden_pad,
                 intermediate_pad=intermediate_pad,
             )
         """
     ).strip()
-    return source.replace("__META__", json.dumps(meta, sort_keys=True))
+    return source.replace("__META__", json.dumps(meta, sort_keys=True)).replace("__CONFIG__", repr(variant))
 
 
 def render_moe_mxfp4_kernel(meta: dict[str, object], variant: dict[str, object]) -> str:
@@ -1327,43 +1882,44 @@ def render_moe_mxfp4_kernel(meta: dict[str, object], variant: dict[str, object])
             return (values * scale)[:rows, :cols].to(torch.bfloat16)
 
 
-        def _load_weights(
+        def _requantize_activation(activation: torch.Tensor) -> torch.Tensor:
+            quantized, scale = aiter.get_triton_quant(QuantType.per_1x32)(activation.contiguous(), shuffle=False)
+            rows, cols = activation.shape
+            return _dequant_matrix(quantized, scale, rows=rows, cols=cols)
+
+
+        def _dequant_gate_up_for_expert(
             gate_up_weight: torch.Tensor,
-            down_weight: torch.Tensor,
             gate_up_weight_scale: torch.Tensor,
-            down_weight_scale: torch.Tensor,
+            expert: int,
             config: dict,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            experts = gate_up_weight.shape[0]
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             d_hidden = int(config["d_hidden"])
             d_expert = int(config["d_expert"])
-
-            gate_w = []
-            up_w = []
-            down_w = []
-            for expert in range(experts):
-                gate_up = _dequant_matrix(
-                    gate_up_weight[expert],
-                    gate_up_weight_scale[expert],
-                    rows=2 * d_expert,
-                    cols=d_hidden,
-                )
-                gate_part, up_part = gate_up.chunk(2, dim=0)
-                gate_w.append(gate_part.contiguous())
-                up_w.append(up_part.contiguous())
-                down_part = _dequant_matrix(
-                    down_weight[expert],
-                    down_weight_scale[expert],
-                    rows=d_hidden,
-                    cols=d_expert,
-                )
-                down_w.append(down_part.contiguous())
-
-            return (
-                torch.stack(gate_w),
-                torch.stack(up_w),
-                torch.stack(down_w),
+            gate_up = _dequant_matrix(
+                gate_up_weight[expert],
+                gate_up_weight_scale[expert],
+                rows=2 * d_expert,
+                cols=d_hidden,
             )
+            gate_part, up_part = gate_up.chunk(2, dim=0)
+            return gate_part.contiguous(), up_part.contiguous()
+
+
+        def _dequant_down_for_expert(
+            down_weight: torch.Tensor,
+            down_weight_scale: torch.Tensor,
+            expert: int,
+            config: dict,
+        ) -> torch.Tensor:
+            d_hidden = int(config["d_hidden"])
+            d_expert = int(config["d_expert"])
+            return _dequant_matrix(
+                down_weight[expert],
+                down_weight_scale[expert],
+                rows=d_hidden,
+                cols=d_expert,
+            ).contiguous()
 
 
         @triton.jit
@@ -1393,6 +1949,28 @@ def render_moe_mxfp4_kernel(meta: dict[str, object], variant: dict[str, object])
             return out
 
 
+        def _route_entries(topk_ids: torch.Tensor, topk_weights: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            num_tokens = topk_ids.shape[0]
+            topk = topk_ids.shape[1]
+            token_ids = torch.arange(num_tokens, device=topk_ids.device, dtype=torch.int64).repeat_interleave(topk)
+            expert_ids = topk_ids.reshape(-1).to(torch.int64)
+            weights = topk_weights.reshape(-1, 1).to(torch.float32)
+            if CONFIG["SORT_BY_EXPERT"]:
+                order = torch.argsort(expert_ids)
+                token_ids = token_ids[order]
+                expert_ids = expert_ids[order]
+                weights = weights[order]
+            return token_ids, expert_ids, weights
+
+
+        def _expert_windows(expert_ids: torch.Tensor, num_experts: int) -> tuple[torch.Tensor, torch.Tensor]:
+            counts = torch.bincount(expert_ids, minlength=num_experts)
+            offsets = torch.zeros_like(counts)
+            if counts.numel() > 1:
+                offsets[1:] = torch.cumsum(counts[:-1], dim=0)
+            return offsets, counts
+
+
         def custom_kernel(data: input_t) -> output_t:
             (
                 hidden_states,
@@ -1411,42 +1989,50 @@ def render_moe_mxfp4_kernel(meta: dict[str, object], variant: dict[str, object])
             del gate_up_weight_shuffled, down_weight_shuffled
             del gate_up_weight_scale_shuffled, down_weight_scale_shuffled
 
-            gate_w, up_w, down_w = _load_weights(
-                gate_up_weight,
-                down_weight,
-                gate_up_weight_scale,
-                down_weight_scale,
-                config,
-            )
-
             num_tokens = hidden_states.shape[0]
-            total_top_k = topk_ids.shape[1]
-            output = torch.zeros((num_tokens, int(config["d_hidden"])), dtype=torch.bfloat16, device=hidden_states.device)
+            d_hidden = int(config["d_hidden"])
+            num_experts = int(gate_up_weight.shape[0])
+            shared_experts = int(config.get("n_shared_experts", config.get("nsharedexperts", 0)))
+            output = torch.zeros((num_tokens, d_hidden), dtype=torch.bfloat16, device=hidden_states.device)
+            hidden_states_q = _requantize_activation(hidden_states)
 
-            token_ids = torch.arange(num_tokens, device=hidden_states.device, dtype=torch.int64).repeat_interleave(total_top_k)
-            expert_ids = topk_ids.reshape(-1).to(torch.int64)
-            weights = topk_weights.reshape(-1, 1).to(torch.bfloat16)
+            token_ids, expert_ids, weights = _route_entries(topk_ids, topk_weights)
+            offsets, counts = _expert_windows(expert_ids, num_experts)
+            unique_experts = torch.nonzero(counts > 0, as_tuple=False).flatten()
 
-            order = torch.argsort(expert_ids) if CONFIG["SORT_BY_EXPERT"] else torch.arange(expert_ids.numel(), device=expert_ids.device)
-            token_ids = token_ids[order]
-            expert_ids = expert_ids[order]
-            weights = weights[order]
-            counts = torch.bincount(expert_ids, minlength=gate_w.shape[0])
-
-            start = 0
-            for expert, count in enumerate(counts.tolist()):
-                if count == 0:
+            for expert in unique_experts.tolist():
+                start = int(offsets[expert].item())
+                end = start + int(counts[expert].item())
+                if end <= start:
                     continue
-                end = start + count
+                expert_gate_w, expert_up_w = _dequant_gate_up_for_expert(
+                    gate_up_weight,
+                    gate_up_weight_scale,
+                    expert,
+                    config,
+                )
+                expert_down_w = _dequant_down_for_expert(
+                    down_weight,
+                    down_weight_scale,
+                    expert,
+                    config,
+                )
                 expert_token_ids = token_ids[start:end]
-                expert_inputs = hidden_states.index_select(0, expert_token_ids)
-                gate = expert_inputs @ gate_w[expert].transpose(0, 1)
-                up = expert_inputs @ up_w[expert].transpose(0, 1)
-                fused = _silu_mul(gate.contiguous(), up.contiguous())
-                expert_out = fused @ down_w[expert].transpose(0, 1)
-                expert_out = expert_out * weights[start:end]
+                expert_inputs = hidden_states_q.index_select(0, expert_token_ids)
+                gate = expert_inputs @ expert_gate_w.transpose(0, 1)
+                up = expert_inputs @ expert_up_w.transpose(0, 1)
+                if CONFIG.get("FUSE_SWIGLU", False):
+                    fused = _silu_mul(gate.contiguous(), up.contiguous())
+                else:
+                    fused = (torch.nn.functional.silu(gate) * up).to(torch.bfloat16)
+                fused_q = _requantize_activation(fused)
+                expert_out = fused_q @ expert_down_w.transpose(0, 1)
+                if CONFIG.get("WEIGHT_EPILOGUE", True):
+                    expert_out = (expert_out * weights[start:end]).to(output.dtype)
                 output.index_add_(0, expert_token_ids, expert_out)
-                start = end
+
+            if CONFIG.get("SHARED_EXPERT_FASTPATH", False) and shared_experts > 0:
+                output = output.contiguous()
 
             return output
         """

@@ -33,6 +33,8 @@
 - Current team rule:
   - keep routing/top-k semantics fixed while rewriting one stage at a time
   - for a true Triton candidate, `custom_kernel` must not keep the hot path on `fused_moe`
+  - for any benchmark lane, do not rebuild or dequantize all experts in Python before routing
+  - use lane and regime tags from `references/moe-closed-loop.md`
 
 ## mixed_mla
 

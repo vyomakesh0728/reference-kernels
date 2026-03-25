@@ -53,7 +53,8 @@ gpu = "MI355X"
 mode = "benchmark"
 objective = "geom_mean_ns"
 goal = "min"
-mutator_command = "python3 -m agent_loop.llm_mutator --config agent_loop.toml --parent {parent} --output {output} --context {context}"
+default_family = "kernel_explore"
+mutator_command = "/root/reference-kernels/problems/amd/.venv/bin/python -m agent_loop.llm_mutator --config agent_loop.toml --parent {parent} --output {output} --context {context}"
 
 [problems.mixed_mla]
 submission_path = "mla-decode/submission.py"

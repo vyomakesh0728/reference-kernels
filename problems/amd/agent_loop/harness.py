@@ -52,6 +52,7 @@ class KernelHarness:
         stages: list[str],
         family: str | None = None,
         label: str = "",
+        variant: str | None = None,
     ) -> Path:
         problem = self.config.require_problem(problem_key)
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -67,6 +68,7 @@ class KernelHarness:
             "problem": problem_key,
             "family": family,
             "label": label,
+            "variant": variant,
             "source_path": str(source_path.resolve()),
             "submission_copy": str(copied_source),
             "leaderboard": problem.leaderboard,

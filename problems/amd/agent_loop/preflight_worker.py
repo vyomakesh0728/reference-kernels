@@ -143,7 +143,11 @@ def run_host_preflight(
         return report
     report.checks.append(PreflightCheck("custom_kernel", "ok", "custom_kernel(data) found"))
 
-    gate_checks = _check_mxfp4_shape_gates(module_ast) if problem_key == "mxfp4_mm" else []
+    gate_checks: list[PreflightCheck] = []
+    if problem_key == "mxfp4_mm":
+        gate_checks.extend(_check_mxfp4_shape_gates(module_ast))
+    if problem_key == "moe_mxfp4":
+        gate_checks.extend(_check_moe_contract_gates(module_ast))
     for check in gate_checks:
         report.checks.append(check)
         if check.status == "fail":
@@ -270,6 +274,33 @@ def _check_mxfp4_shape_gates(module_ast: ast.AST) -> list[PreflightCheck]:
     return [
         PreflightCheck(name, "ok" if hit else "fail", "shape gate detected" if hit else details[name])
         for name, hit in gate_hits.items()
+    ]
+
+
+def _check_moe_contract_gates(module_ast: ast.AST) -> list[PreflightCheck]:
+    topk_ids_seen = False
+    topk_weights_seen = False
+    for node in ast.walk(module_ast):
+        if not isinstance(node, ast.Name):
+            continue
+        if node.id == "topk_ids":
+            topk_ids_seen = True
+        elif node.id == "topk_weights":
+            topk_weights_seen = True
+    if topk_ids_seen and topk_weights_seen:
+        return [
+            PreflightCheck(
+                "moe_topk_contract",
+                "ok",
+                "topk_ids/topk_weights are visible in the candidate source",
+            )
+        ]
+    return [
+        PreflightCheck(
+            "moe_topk_contract",
+            "fail",
+            "moe candidate must keep topk_ids and topk_weights visible",
+        )
     ]
 
 
