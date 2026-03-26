@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import torch.cuda
+from profile_support import run_rocprofv3_profiling
 
 from utils import set_seed
 try:
@@ -319,6 +320,11 @@ def run_single_profile(test: TestCase) -> str:
 
 
 def run_profiling(logger: PopcornOutput, tests: list[TestCase]):
+    backend = os.environ.get("POPCORN_PROFILE_BACKEND", "torch.profiler").strip().lower()
+    logger.log("profile.backend", backend)
+    if backend == "rocprofv3":
+        return run_rocprofv3_profiling(logger, tests)
+
     logger.log("benchmark-count", len(tests))
     for idx, test in enumerate(tests):
         logger.log(f"benchmark.{idx}.spec", test.spec)
@@ -370,8 +376,9 @@ def main():
                         break
 
                 logger.log("check", "pass" if passed else "fail")
+                return 0 if passed else 112
             elif mode == "profile":
-                run_profiling(logger, tests)
+                return run_profiling(logger, tests)
             else:
                 # TODO: Implement script mode
                 return 2

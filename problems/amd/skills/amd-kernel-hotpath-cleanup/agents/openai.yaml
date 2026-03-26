@@ -1,0 +1,4 @@
+interface:
+  display_name: "AMD Kernel Hotpath Cleanup"
+  short_description: "Clean dead AMD kernel hot-path debt"
+  default_prompt: "Use $amd-kernel-hotpath-cleanup to trim dead code and isolate fallback debt in an AMD MI355X kernel winner without changing its hot-path semantics."

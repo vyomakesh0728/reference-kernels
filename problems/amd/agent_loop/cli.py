@@ -191,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
     mxfp4_submit.add_argument("--hypothesis", default="")
     mxfp4_submit.add_argument("--expected-gain", default="")
     mxfp4_submit.add_argument("--next-patch", default="")
-    mxfp4_submit.add_argument("--stage", required=True, choices=["test", "benchmark", "leaderboard"])
+    mxfp4_submit.add_argument("--stage", required=True, choices=["test", "benchmark", "leaderboard", "profile_rocprof"])
     mxfp4_submit.add_argument("--label", default="")
     mxfp4_submit.add_argument("--continue-after-fail", action="store_true")
 

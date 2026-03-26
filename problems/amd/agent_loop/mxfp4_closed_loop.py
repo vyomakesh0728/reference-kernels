@@ -22,8 +22,8 @@ TIMESTAMP_FMT = "%Y-%m-%dT%H:%M:%S.%f%z"
 PROBLEM_KEY = "mxfp4_mm"
 LANE_VALUES = {"A", "B", "A+B", "unknown"}
 PREFLIGHT_PROFILES = {"amd-parity-full", "amd-compile-fast"}
-REMOTE_STAGE_VALUES = {"test", "benchmark", "leaderboard"}
-SHARED_TEST_BUCKET_STAGES = {"test", "benchmark"}
+REMOTE_STAGE_VALUES = {"test", "benchmark", "leaderboard", "profile_rocprof"}
+SHARED_TEST_BUCKET_STAGES = {"test", "benchmark", "profile_rocprof"}
 CONTAINER_PLATFORM = "linux/amd64"
 
 
@@ -84,6 +84,7 @@ class ExperimentRecord:
     test_status: str
     benchmark_status: str
     leaderboard_status: str
+    profile_rocprof_status: str
     benchmark_geomean: float | None
     per_shape_times: dict[str, float]
     decision: str
@@ -94,6 +95,9 @@ class ExperimentRecord:
     updated_at: str
     notes: list[str] = field(default_factory=list)
     preflight_report_path: str | None = None
+    profile_summary_path: str | None = None
+    candidate_cards_path: str | None = None
+    profile_artifact_zip_paths: list[str] = field(default_factory=list)
     remote_history: list[RemoteEvent] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -113,12 +117,13 @@ class ExperimentRecord:
             lane=str(payload.get("lane", "unknown")),
             hypothesis=str(payload.get("hypothesis", "")),
             expected_gain=str(payload.get("expected_gain", "")),
-            remote_cost=dict(payload.get("remote_cost", {"test": 1, "benchmark": 1, "leaderboard": 1})),
+            remote_cost=dict(payload.get("remote_cost", {"test": 1, "benchmark": 1, "leaderboard": 1, "profile_rocprof": 1})),
             purity_status=str(payload.get("purity_status", "pending")),
             preflight_status=str(payload.get("preflight_status", "pending")),
             test_status=str(payload.get("test_status", "pending")),
             benchmark_status=str(payload.get("benchmark_status", "pending")),
             leaderboard_status=str(payload.get("leaderboard_status", "pending")),
+            profile_rocprof_status=str(payload.get("profile_rocprof_status", "pending")),
             benchmark_geomean=(
                 float(payload["benchmark_geomean"])
                 if payload.get("benchmark_geomean") is not None
@@ -140,6 +145,19 @@ class ExperimentRecord:
                 if payload.get("preflight_report_path")
                 else None
             ),
+            profile_summary_path=(
+                str(payload["profile_summary_path"])
+                if payload.get("profile_summary_path")
+                else None
+            ),
+            candidate_cards_path=(
+                str(payload["candidate_cards_path"])
+                if payload.get("candidate_cards_path")
+                else None
+            ),
+            profile_artifact_zip_paths=[
+                str(item) for item in payload.get("profile_artifact_zip_paths", [])
+            ],
             remote_history=history,
         )
 
@@ -215,6 +233,9 @@ class Mxfp4ClosedLoopCoordinator:
                     "test_status": value.test_status,
                     "benchmark_status": value.benchmark_status,
                     "leaderboard_status": value.leaderboard_status,
+                    "profile_rocprof_status": value.profile_rocprof_status,
+                    "profile_summary_path": value.profile_summary_path,
+                    "candidate_cards_path": value.candidate_cards_path,
                     "benchmark_geomean": value.benchmark_geomean,
                     "updated_at": value.updated_at,
                 }
@@ -405,6 +426,7 @@ class Mxfp4ClosedLoopCoordinator:
         leaderboard_events: dict[tuple[str, str], RemoteEvent] = {}
         test_events: dict[tuple[str, str], RemoteEvent] = {}
         benchmark_events: dict[tuple[str, str], RemoteEvent] = {}
+        profile_events: dict[tuple[str, str], RemoteEvent] = {}
         for record in records.values():
             for event in record.remote_history:
                 event_time = _parse_ts(event.requested_at)
@@ -417,6 +439,8 @@ class Mxfp4ClosedLoopCoordinator:
                         test_events[event_key] = event
                     elif event.stage == "benchmark":
                         benchmark_events[event_key] = event
+                    elif event.stage == "profile_rocprof":
+                        profile_events[event_key] = event
                 elif event.stage == "leaderboard":
                     leaderboard_events[event_key] = event
         shared_limit = 6
@@ -438,6 +462,9 @@ class Mxfp4ClosedLoopCoordinator:
             "benchmark_stage_limit_per_hour": 2,
             "benchmark_stage_used": len(benchmark_events),
             "benchmark_stage_remaining": max(0, 2 - len(benchmark_events)),
+            "profile_stage_limit_per_hour": 1,
+            "profile_stage_used": len(profile_events),
+            "profile_stage_remaining": max(0, 1 - len(profile_events)),
             "leaderboard_limit_per_hour": 1,
             "leaderboard_used": len(leaderboard_events),
             "leaderboard_remaining": max(0, 1 - len(leaderboard_events)),
@@ -470,12 +497,13 @@ class Mxfp4ClosedLoopCoordinator:
             lane="A+B",
             hypothesis="promoted safe pure baseline",
             expected_gain="0.0 us baseline anchor",
-            remote_cost={"test": 1, "benchmark": 1, "leaderboard": 1},
+            remote_cost={"test": 1, "benchmark": 1, "leaderboard": 1, "profile_rocprof": 1},
             purity_status="ok",
             preflight_status="ok",
             test_status="ok",
             benchmark_status="ok",
             leaderboard_status="pending",
+            profile_rocprof_status="pending",
             benchmark_geomean=self.promoted_baseline_geomean_us,
             per_shape_times=dict(self.promoted_baseline_per_shape_us),
             decision="keep",
@@ -530,12 +558,13 @@ class Mxfp4ClosedLoopCoordinator:
             lane=lane if lane in LANE_VALUES else "unknown",
             hypothesis=hypothesis,
             expected_gain=expected_gain,
-            remote_cost={"test": 1, "benchmark": 1, "leaderboard": 1},
+            remote_cost={"test": 1, "benchmark": 1, "leaderboard": 1, "profile_rocprof": 1},
             purity_status="pending",
             preflight_status="pending",
             test_status="pending",
             benchmark_status="pending",
             leaderboard_status="pending",
+            profile_rocprof_status="pending",
             benchmark_geomean=None,
             per_shape_times={},
             decision="pending",
@@ -570,6 +599,17 @@ class Mxfp4ClosedLoopCoordinator:
             if budget["benchmark_stage_remaining"] <= 0:
                 return False, "benchmark-stage hourly coordinator budget is exhausted"
             return True, "benchmark allowed after passing test"
+        if stage == "profile_rocprof":
+            if record.test_status != "ok" or record.benchmark_status != "ok":
+                return False, "profile_rocprof requires passing remote test and benchmark"
+            if budget["shared_test_bucket_remaining_before_reserve"] <= 0:
+                return False, "benchmark/test/profile shared quota is exhausted for this hour"
+            if budget["profile_stage_remaining"] <= 0:
+                return False, "profile-stage hourly coordinator budget is exhausted"
+            allowed, rationale = self._is_profile_worthy(record)
+            if not allowed:
+                return False, rationale
+            return True, rationale
         if stage == "leaderboard":
             now = datetime.now(UTC)
             if now.minute < 45:
@@ -595,6 +635,39 @@ class Mxfp4ClosedLoopCoordinator:
             if current > baseline * (1.0 + threshold):
                 return True
         return False
+
+    def _is_profile_worthy(self, record: ExperimentRecord) -> tuple[bool, str]:
+        if record.benchmark_geomean is None:
+            return False, "profile_rocprof requires a benchmark geomean"
+        best_reference = self.current_best_record()
+        if best_reference is None or best_reference.variant == record.variant:
+            return True, "profile_rocprof allowed for the current benchmark winner"
+        if record.benchmark_geomean < best_reference.benchmark_geomean:
+            return True, "profile_rocprof allowed for a new benchmark winner"
+
+        best_shapes = self._best_shape_times(exclude_variant=record.variant)
+        for shape, current in record.per_shape_times.items():
+            reference = best_shapes.get(shape)
+            if reference is None:
+                reference = self.promoted_baseline_per_shape_us.get(shape)
+            if reference is None:
+                continue
+            if current < reference * 0.99:
+                return True, f"profile_rocprof allowed for a shape win on {shape}"
+        return False, "profile_rocprof is reserved for benchmark winners or >=1% exact-shape wins"
+
+    def _best_shape_times(self, *, exclude_variant: str | None = None) -> dict[str, float]:
+        best: dict[str, float] = {}
+        for record in self._latest_records().values():
+            if record.variant == exclude_variant:
+                continue
+            if record.benchmark_status != "ok":
+                continue
+            for shape, value in record.per_shape_times.items():
+                previous = best.get(shape)
+                if previous is None or value < previous:
+                    best[shape] = value
+        return best
 
     def _sync_record_from_harness(
         self,
@@ -673,6 +746,17 @@ class Mxfp4ClosedLoopCoordinator:
                     record.decision = "keep"
                 else:
                     record.decision = "discard"
+        elif stage_name == "profile_rocprof":
+            record.profile_rocprof_status = status
+            summary_path = stage_payload.get("profile_summary_path")
+            cards_path = stage_payload.get("candidate_cards_path")
+            if summary_path:
+                record.profile_summary_path = str(summary_path)
+            if cards_path:
+                record.candidate_cards_path = str(cards_path)
+            archive_paths = stage_payload.get("profile_artifact_zip_paths")
+            if isinstance(archive_paths, list):
+                record.profile_artifact_zip_paths = [str(item) for item in archive_paths]
         elif stage_name == "leaderboard":
             record.leaderboard_status = status
 

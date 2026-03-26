@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from math import exp, log
 from pathlib import Path
@@ -11,6 +10,7 @@ import subprocess
 import time
 
 from .config import ProblemConfig, WorkspaceConfig
+from .profile_rocprof import materialize_encoded_artifacts, materialize_kernelbot_profile_fallback
 
 
 LINE_RE = re.compile(r"^\s*([^:]+):\s*(.*?)\s*$")
@@ -74,6 +74,7 @@ def run_popcorn_submission(
     stdout_path = artifacts_dir / "stdout.txt"
     stderr_path = artifacts_dir / "stderr.txt"
 
+    selected_mode = _popcorn_mode(mode or problem.mode)
     command = [
         workspace.popcorn_cli,
         "submit",
@@ -83,7 +84,7 @@ def run_popcorn_submission(
         "--leaderboard",
         problem.leaderboard,
         "--mode",
-        mode or problem.mode,
+        selected_mode,
         "--output",
         str(result_path),
         str(submission_path),
@@ -92,7 +93,11 @@ def run_popcorn_submission(
     if workspace.api_url:
         env["POPCORN_API_URL"] = workspace.api_url
 
-    selected_mode = mode or problem.mode
+    if (mode or problem.mode) == "profile_rocprof":
+        env["POPCORN_PROFILE_BACKEND"] = "rocprofv3"
+        env["POPCORN_PROFILE_PROBLEM"] = problem.key
+        env["POPCORN_PROFILE_LEADERBOARD"] = problem.leaderboard
+
     timeout_seconds = (
         workspace.leaderboard_timeout_seconds if selected_mode == "leaderboard" else None
     )
@@ -120,6 +125,12 @@ def run_popcorn_submission(
         metrics["timeout_seconds"] = timeout_seconds
         metrics["wall_time_seconds"] = wall_time
         metrics["check"] = "fail"
+        _materialize_profile_artifacts(
+            artifacts_dir,
+            metrics,
+            result_text=result_text,
+            mode=(mode or problem.mode),
+        )
         metadata_path = artifacts_dir / "parsed_metrics.json"
         metadata_path.write_text(
             json.dumps(metrics, indent=2, sort_keys=True),
@@ -153,6 +164,12 @@ def run_popcorn_submission(
     if selected_mode == "leaderboard" and workspace.leaderboard_reference_seconds is not None:
         metrics["leaderboard_reference_seconds"] = workspace.leaderboard_reference_seconds
         metrics["leaderboard_over_reference"] = wall_time > workspace.leaderboard_reference_seconds
+    _materialize_profile_artifacts(
+        artifacts_dir,
+        metrics,
+        result_text=result_text,
+        mode=(mode or problem.mode),
+    )
     objective = _extract_objective(metrics, problem.objective)
 
     status = "submit_error"
@@ -181,6 +198,30 @@ def run_popcorn_submission(
         stderr=stderr,
         result_text=result_text,
     )
+
+
+def _popcorn_mode(mode: str) -> str:
+    if mode == "profile_rocprof":
+        return "profile"
+    return mode
+
+
+def _materialize_profile_artifacts(
+    artifacts_dir: Path,
+    metrics: dict[str, object],
+    *,
+    result_text: str,
+    mode: str,
+) -> None:
+    profile_payload = materialize_encoded_artifacts(metrics, artifacts_dir)
+    if mode == "profile_rocprof" and not profile_payload.get("profile_summary_path"):
+        profile_payload.update(
+            materialize_kernelbot_profile_fallback(
+                result_text=result_text,
+                artifacts_dir=artifacts_dir,
+            )
+        )
+    metrics.update(profile_payload)
 
 
 def _coerce_value(value: str) -> object:

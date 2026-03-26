@@ -1,6 +1,8 @@
 #!POPCORN leaderboard amd-mxfp4-mm
 #!POPCORN gpu MI355X
 # AGENT_LOOP_META: {"generator": {"kind": "manual_phase2"}, "gpu": "MI355X", "leaderboard": "amd-mxfp4-mm", "policy_profile": {"family": "hip_explore", "name": "deaiter_exact_m16_scaled_mfma"}, "problem": "mxfp4_mm"}
+import ctypes
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -1451,6 +1453,54 @@ void mxfp4_mm_hip(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
 
 _MODULE = None
 _TRITON_QUANT = None
+_ROCTX_LIB = None
+_ROCTX_READY = None
+
+
+@contextmanager
+def _null_context():
+    yield
+
+
+def _roctx_enabled() -> bool:
+    global _ROCTX_LIB, _ROCTX_READY
+    if _ROCTX_READY is not None:
+        return bool(_ROCTX_READY)
+    enabled = (
+        os.environ.get("MXFP4_ROCTX_ENABLE") == "1"
+        or os.environ.get("POPCORN_PROFILE_BACKEND", "").strip().lower() == "rocprofv3"
+    )
+    if not enabled:
+        _ROCTX_READY = False
+        return False
+    for candidate in ("libroctx64.so", "libroctx64.so.1"):
+        try:
+            lib = ctypes.CDLL(candidate)
+        except OSError:
+            continue
+        lib.roctxRangePushA.argtypes = [ctypes.c_char_p]
+        lib.roctxRangePushA.restype = ctypes.c_int
+        lib.roctxRangePop.argtypes = []
+        lib.roctxRangePop.restype = ctypes.c_int
+        _ROCTX_LIB = lib
+        _ROCTX_READY = True
+        return True
+    _ROCTX_READY = False
+    return False
+
+
+@contextmanager
+def _roctx_range(name: str):
+    if not _roctx_enabled():
+        with _null_context():
+            yield
+        return
+    assert _ROCTX_LIB is not None
+    _ROCTX_LIB.roctxRangePushA(name.encode("utf-8"))
+    try:
+        yield
+    finally:
+        _ROCTX_LIB.roctxRangePop()
 
 
 def _phase(name: str, **payload: object) -> None:
@@ -1852,172 +1902,191 @@ def _select_kernel_regime(m: int, k: int) -> str:
 
 def custom_kernel(data: input_t) -> output_t:
     a, b, b_q, b_shuffle, b_scale_sh = data
-    _phase("enter_custom_kernel", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-    torch._assert(b_q.shape[0] == b.shape[0], "B_q row count must match logical B")
-    torch._assert(b_shuffle.shape[0] == b.shape[0], "B_shuffle row count must match logical B")
-    torch._assert(b_scale_sh.numel() > 0, "B_scale_sh must be present for the live contract")
-    if a.shape[0] == 256 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
-        _phase("path_exact_m256")
-        mod = _module()
-        _phase("post_module_return", path="exact_m256")
-        _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-        b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct_exact_m256(b_q, b_scale_sh)
-        _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
-        _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-        a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m256(a)
-        _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
-        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
-        _phase("post_output_alloc", c_shape=list(c.shape))
-        inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
-        inflight.append((a_packed, a_scale, b_packed, b_scale))
-        if len(inflight) > 64:
-            del inflight[:-64]
-        _phase("pre_direct_kernel_launch", chunked=False)
-        mod.mxfp4_mm_hip_mfma_scale_exact_m256_only(a_packed, b_packed, a_scale, b_scale, c)
-        _phase("post_wrapper_return", chunked=False)
-        return c
-    if a.shape[0] == 64 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
-        _phase("path_exact_m64")
-        mod = _module()
-        _phase("post_module_return", path="exact_m64")
-        _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-        b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct_exact_m64(b_q, b_scale_sh)
-        _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
-        _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-        a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m64(a)
-        _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
-        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
-        _phase("post_output_alloc", c_shape=list(c.shape))
-        inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
-        inflight.append((a_packed, a_scale, b_packed, b_scale))
-        if len(inflight) > 64:
-            del inflight[:-64]
-        _phase("pre_direct_kernel_launch", chunked=False)
-        mod.mxfp4_mm_hip_mfma_scale_exact_m64_only(a_packed, b_packed, a_scale, b_scale, c)
-        _phase("post_wrapper_return", chunked=False)
-        return c
-    if a.shape[0] == 32 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
-        _phase("path_exact_m32")
-        mod = _module()
-        _phase("post_module_return", path="exact_m32")
-        _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-        b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct_exact_m32(b_q, b_scale_sh)
-        _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
-        _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-        a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m32(a)
-        _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
-        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
-        _phase("post_output_alloc", c_shape=list(c.shape))
-        inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
-        inflight.append((a_packed, a_scale, b_packed, b_scale))
-        if len(inflight) > 64:
-            del inflight[:-64]
-        _phase("pre_direct_kernel_launch", chunked=False)
-        mod.mxfp4_mm_hip_mfma_scale_exact_m32_only(a_packed, b_packed, a_scale, b_scale, c)
-        _phase("post_wrapper_return", chunked=False)
-        return c
-    if a.shape[0] >= 32 and (a.shape[0] % 32) == 0 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
-        _phase("path_direct_m32_other_multiples32", rows=int(a.shape[0]))
-        mod = _module()
-        _phase("post_module_return", path="direct_m32_other_multiples32")
-        _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-        b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct(b_q, b_scale_sh)
-        _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
-        _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-        a_packed, a_scale = _get_a_contract_mfma_fp4_compiled(a)
-        _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
-        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
-        _phase("post_output_alloc", c_shape=list(c.shape))
-        inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
-        inflight.append((a_packed, a_scale, b_packed, b_scale))
-        if len(inflight) > 64:
-            del inflight[:-64]
-        _phase("pre_direct_kernel_launch", chunked=False)
-        mod.mxfp4_mm_hip_mfma_scale_exact_m32(a_packed, b_packed, a_scale, b_scale, c)
-        _phase("post_wrapper_return", chunked=False)
-        return c
-    if a.shape[0] == 16 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:
-        _phase("path_direct_m16")
-        mod = _module()
-        _phase("post_module_return", path="direct_m16")
-        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
-        _phase("post_output_alloc", c_shape=list(c.shape))
-        _phase("pre_direct_kernel_launch", chunked=False)
-        mod.mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry(
-            a.contiguous(),
-            b_q.contiguous().view(torch.uint8),
-            b_scale_sh.contiguous().view(torch.uint8),
-            c,
+    with _roctx_range("mxfp4/custom_kernel"):
+        _phase("enter_custom_kernel", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+        torch._assert(b_q.shape[0] == b.shape[0], "B_q row count must match logical B")
+        torch._assert(b_shuffle.shape[0] == b.shape[0], "B_shuffle row count must match logical B")
+        torch._assert(b_scale_sh.numel() > 0, "B_scale_sh must be present for the live contract")
+        if a.shape[0] == 256 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
+            with _roctx_range("mxfp4/exact_m256"):
+                _phase("path_exact_m256")
+                mod = _module()
+                _phase("post_module_return", path="exact_m256")
+                with _roctx_range("mxfp4/exact_m256/b_prep"):
+                    _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+                    b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct_exact_m256(b_q, b_scale_sh)
+                    _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
+                with _roctx_range("mxfp4/exact_m256/a_pack"):
+                    _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+                    a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m256(a)
+                    _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
+                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                _phase("post_output_alloc", c_shape=list(c.shape))
+                inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
+                inflight.append((a_packed, a_scale, b_packed, b_scale))
+                if len(inflight) > 64:
+                    del inflight[:-64]
+                with _roctx_range("mxfp4/exact_m256/kernel_launch"):
+                    _phase("pre_direct_kernel_launch", chunked=False)
+                    mod.mxfp4_mm_hip_mfma_scale_exact_m256_only(a_packed, b_packed, a_scale, b_scale, c)
+                    _phase("post_wrapper_return", chunked=False)
+                return c
+        if a.shape[0] == 64 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
+            with _roctx_range("mxfp4/exact_m64"):
+                _phase("path_exact_m64")
+                mod = _module()
+                _phase("post_module_return", path="exact_m64")
+                with _roctx_range("mxfp4/exact_m64/b_prep"):
+                    _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+                    b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct_exact_m64(b_q, b_scale_sh)
+                    _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
+                with _roctx_range("mxfp4/exact_m64/a_pack"):
+                    _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+                    a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m64(a)
+                    _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
+                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                _phase("post_output_alloc", c_shape=list(c.shape))
+                inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
+                inflight.append((a_packed, a_scale, b_packed, b_scale))
+                if len(inflight) > 64:
+                    del inflight[:-64]
+                with _roctx_range("mxfp4/exact_m64/kernel_launch"):
+                    _phase("pre_direct_kernel_launch", chunked=False)
+                    mod.mxfp4_mm_hip_mfma_scale_exact_m64_only(a_packed, b_packed, a_scale, b_scale, c)
+                    _phase("post_wrapper_return", chunked=False)
+                return c
+        if a.shape[0] == 32 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
+            with _roctx_range("mxfp4/exact_m32"):
+                _phase("path_exact_m32")
+                mod = _module()
+                _phase("post_module_return", path="exact_m32")
+                with _roctx_range("mxfp4/exact_m32/b_prep"):
+                    _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+                    b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct_exact_m32(b_q, b_scale_sh)
+                    _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
+                with _roctx_range("mxfp4/exact_m32/a_pack"):
+                    _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+                    a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m32(a)
+                    _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
+                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                _phase("post_output_alloc", c_shape=list(c.shape))
+                inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
+                inflight.append((a_packed, a_scale, b_packed, b_scale))
+                if len(inflight) > 64:
+                    del inflight[:-64]
+                with _roctx_range("mxfp4/exact_m32/kernel_launch"):
+                    _phase("pre_direct_kernel_launch", chunked=False)
+                    mod.mxfp4_mm_hip_mfma_scale_exact_m32_only(a_packed, b_packed, a_scale, b_scale, c)
+                    _phase("post_wrapper_return", chunked=False)
+                return c
+        if a.shape[0] >= 32 and (a.shape[0] % 32) == 0 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
+            _phase("path_direct_m32_other_multiples32", rows=int(a.shape[0]))
+            mod = _module()
+            _phase("post_module_return", path="direct_m32_other_multiples32")
+            _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+            b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct(b_q, b_scale_sh)
+            _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
+            _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+            a_packed, a_scale = _get_a_contract_mfma_fp4_compiled(a)
+            _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
+            c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+            _phase("post_output_alloc", c_shape=list(c.shape))
+            inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
+            inflight.append((a_packed, a_scale, b_packed, b_scale))
+            if len(inflight) > 64:
+                del inflight[:-64]
+            _phase("pre_direct_kernel_launch", chunked=False)
+            mod.mxfp4_mm_hip_mfma_scale_exact_m32(a_packed, b_packed, a_scale, b_scale, c)
+            _phase("post_wrapper_return", chunked=False)
+            return c
+        if a.shape[0] == 16 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:
+            with _roctx_range("mxfp4/exact_m16"):
+                _phase("path_direct_m16")
+                mod = _module()
+                _phase("post_module_return", path="direct_m16")
+                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                _phase("post_output_alloc", c_shape=list(c.shape))
+                with _roctx_range("mxfp4/exact_m16/kernel_launch"):
+                    _phase("pre_direct_kernel_launch", chunked=False)
+                    mod.mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry(
+                        a.contiguous(),
+                        b_q.contiguous().view(torch.uint8),
+                        b_scale_sh.contiguous().view(torch.uint8),
+                        c,
+                    )
+                    _phase("post_wrapper_return", chunked=False)
+                return c
+        if a.shape[0] == 8 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:
+            with _roctx_range("mxfp4/exact_m8"):
+                _phase("path_exact_m8")
+                mod = _module()
+                _phase("post_module_return", path="exact_m8")
+                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                _phase("post_output_alloc", c_shape=list(c.shape))
+                with _roctx_range("mxfp4/exact_m8/kernel_launch"):
+                    _phase("pre_direct_kernel_launch", chunked=False)
+                    mod.mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry(
+                        a.contiguous(),
+                        b_q.contiguous().view(torch.uint8),
+                        b_scale_sh.contiguous().view(torch.uint8),
+                        c,
+                    )
+                    _phase("post_wrapper_return", chunked=False)
+                return c
+        if a.shape[0] == 4 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:
+            with _roctx_range("mxfp4/exact_m4"):
+                _phase("path_exact_m4")
+                mod = _module()
+                _phase("post_module_return", path="exact_m4")
+                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                _phase("post_output_alloc", c_shape=list(c.shape))
+                with _roctx_range("mxfp4/exact_m4/kernel_launch"):
+                    _phase("pre_direct_kernel_launch", chunked=False)
+                    mod.mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry(
+                        a.contiguous(),
+                        b_q.contiguous().view(torch.uint8),
+                        b_scale_sh.contiguous().view(torch.uint8),
+                        c,
+                    )
+                    _phase("post_wrapper_return", chunked=False)
+                return c
+        _phase("pre_reference_oracle_inputs")
+        a_in, b_in = _reference_oracle_inputs(a, b, b_q, b_scale_sh)
+        _phase("post_reference_oracle_inputs", a_ref_shape=list(a_in.shape), b_ref_shape=list(b_in.shape))
+        regime = _select_kernel_regime(a_in.shape[0], a_in.shape[1])
+        use_mfma_medium = (
+            regime == "medium_m"
+            and a_in.shape[0] == 16
+            and (a_in.shape[0] % 16) == 0
+            and (a_in.shape[1] % 16) == 0
+            and (b_in.shape[0] % 16) == 0
         )
-        _phase("post_wrapper_return", chunked=False)
-        return c
-    if a.shape[0] == 8 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:
-        _phase("path_exact_m8")
-        mod = _module()
-        _phase("post_module_return", path="exact_m8")
-        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
-        _phase("post_output_alloc", c_shape=list(c.shape))
-        _phase("pre_direct_kernel_launch", chunked=False)
-        mod.mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry(
-            a.contiguous(),
-            b_q.contiguous().view(torch.uint8),
-            b_scale_sh.contiguous().view(torch.uint8),
-            c,
-        )
-        _phase("post_wrapper_return", chunked=False)
-        return c
-    if a.shape[0] == 4 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:
-        _phase("path_exact_m4")
-        mod = _module()
-        _phase("post_module_return", path="exact_m4")
-        c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
-        _phase("post_output_alloc", c_shape=list(c.shape))
-        _phase("pre_direct_kernel_launch", chunked=False)
-        mod.mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry(
-            a.contiguous(),
-            b_q.contiguous().view(torch.uint8),
-            b_scale_sh.contiguous().view(torch.uint8),
-            c,
-        )
-        _phase("post_wrapper_return", chunked=False)
-        return c
-    _phase("pre_reference_oracle_inputs")
-    a_in, b_in = _reference_oracle_inputs(a, b, b_q, b_scale_sh)
-    _phase("post_reference_oracle_inputs", a_ref_shape=list(a_in.shape), b_ref_shape=list(b_in.shape))
-    regime = _select_kernel_regime(a_in.shape[0], a_in.shape[1])
-    use_mfma_medium = (
-        regime == "medium_m"
-        and a_in.shape[0] == 16
-        and (a_in.shape[0] % 16) == 0
-        and (a_in.shape[1] % 16) == 0
-        and (b_in.shape[0] % 16) == 0
-    )
-    _phase("regime_selected", regime=regime, use_mfma_medium=bool(use_mfma_medium))
-    if use_mfma_medium:
-        _phase("path_mfma_medium")
-        a_mfma = a_in.to(torch.bfloat16).contiguous()
-        b_mfma = _get_b_contract_bf16(b, b_q, b_scale_sh)
-        c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
-        _phase("pre_shared_module_call", path="mfma_medium")
-        _module().mxfp4_mm_hip_mfma_medium(a_mfma, b_mfma, c)
-        return c
-    if regime == "medium_m":
-        _phase("path_medium_scalar_hip")
-        c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
-        _phase("pre_shared_module_call", path="medium_scalar_hip")
-        _module().mxfp4_mm_hip(a_in, b_in, c)
-        return c
-    if regime == "fallback":
-        if a_in.shape[0] == 256:
-            _phase("path_fallback_hip_256")
+        _phase("regime_selected", regime=regime, use_mfma_medium=bool(use_mfma_medium))
+        if use_mfma_medium:
+            _phase("path_mfma_medium")
+            a_mfma = a_in.to(torch.bfloat16).contiguous()
+            b_mfma = _get_b_contract_bf16(b, b_q, b_scale_sh)
             c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
-            _phase("pre_shared_module_call", path="fallback_hip_256")
+            _phase("pre_shared_module_call", path="mfma_medium")
+            _module().mxfp4_mm_hip_mfma_medium(a_mfma, b_mfma, c)
+            return c
+        if regime == "medium_m":
+            _phase("path_medium_scalar_hip")
+            c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
+            _phase("pre_shared_module_call", path="medium_scalar_hip")
             _module().mxfp4_mm_hip(a_in, b_in, c)
             return c
-        _phase("path_fallback_torch_mm")
-        return torch.mm(a_in, b_in.t()).to(torch.bfloat16)
-    _phase("path_default_scalar_hip")
-    c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
-    _phase("pre_shared_module_call", path="default_scalar_hip")
-    _module().mxfp4_mm_hip(a_in, b_in, c)
-    return c
+        if regime == "fallback":
+            if a_in.shape[0] == 256:
+                _phase("path_fallback_hip_256")
+                c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
+                _phase("pre_shared_module_call", path="fallback_hip_256")
+                _module().mxfp4_mm_hip(a_in, b_in, c)
+                return c
+            _phase("path_fallback_torch_mm")
+            return torch.mm(a_in, b_in.t()).to(torch.bfloat16)
+        _phase("path_default_scalar_hip")
+        c = torch.empty((a_in.shape[0], b_in.shape[0]), dtype=torch.bfloat16, device=a_in.device)
+        _phase("pre_shared_module_call", path="default_scalar_hip")
+        _module().mxfp4_mm_hip(a_in, b_in, c)
+        return c

@@ -142,6 +142,8 @@ If a prompt mentions stale `problems/amd_202602/...` paths, map them to these li
   Use for the default MoE sub-agent prompt contract.
 - [references/remote-first-eval.md](references/remote-first-eval.md)
   Use for harness commands, closed-loop commands, quota discipline, and promotion rules.
+- [references/competition-rules.md](references/competition-rules.md)
+  Use for cross-problem legality, purity, and staged remote-eval rules shared by `mxfp4-mm`, `moe-mxfp4`, and `mixed-mla`.
 - `scripts/quota_watch_resume.py`
   Use when `mxfp4-closed-loop` quota is exhausted and there is a pending `test`, `benchmark`, or `leaderboard` stage that should auto-resume at the exact next slot.
 - `scripts/problem_snapshot.py`

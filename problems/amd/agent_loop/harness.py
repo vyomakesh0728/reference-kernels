@@ -14,6 +14,7 @@ TARGET_BY_STAGE = {
     "test": "kernelbot-test",
     "benchmark": "kernelbot-benchmark",
     "leaderboard": "kernelbot-ranked",
+    "profile_rocprof": "kernelbot-profile",
 }
 
 
@@ -186,8 +187,16 @@ class KernelHarness:
                 "stdout_path": str(stage_dir / "stdout.txt"),
                 "stderr_path": str(stage_dir / "stderr.txt"),
                 "parsed_metrics_path": str(stage_dir / "parsed_metrics.json"),
+                "profile_summary_path": metrics.get("profile_summary_path"),
+                "candidate_cards_path": metrics.get("candidate_cards_path"),
+                "profile_raw_artifact_paths": metrics.get("profile_raw_artifact_paths"),
             }
         )
+        if stage.get("name") == "profile_rocprof":
+            run_dir = stage_dir.parents[1]
+            archive_paths = sorted(str(path) for path in run_dir.glob("profile_*.zip"))
+            if archive_paths:
+                stage["profile_artifact_zip_paths"] = archive_paths
 
 
 def _slugify(text: str) -> str:

@@ -6,6 +6,9 @@ files:
   - {"name": "utils.py", "source": "../utils.py"}
   - {"name": "reference.py", "source": "reference.py"}
   - {"name": "eval.py", "source": "../eval.py"}
+  - {"name": "profile_support.py", "source": "../profile_support.py"}
+  - {"name": "agent_loop/__init__.py", "source": "../agent_loop/__init__.py"}
+  - {"name": "agent_loop/profile_rocprof.py", "source": "../agent_loop/profile_rocprof.py"}
 
 lang: "py"
 

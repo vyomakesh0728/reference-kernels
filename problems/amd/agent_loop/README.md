@@ -192,6 +192,8 @@ benchmark section. Lower is better.
   - stages are explicit and ordered, typically `test -> benchmark -> leaderboard`
   - each stage records `result.txt`, `stdout.txt`, `stderr.txt`, and `parsed_metrics.json`
   - stage targets are named like `kernelbot-test`, `kernelbot-benchmark`, and `kernelbot-ranked`
+  - `profile_rocprof` now uses the remote `profile` transport and can materialize `profile/profile_summary.json` plus `profile/candidate_cards.json`
+  - if kernelbot returns its built-in rocPROF trace instead of the custom PMC payload, the harness now mines the downloaded `profile_*.zip` artifact and still emits the same summary/card outputs
   - `harness-resume` continues from the first non-`ok` stage, and `harness-summary` prints a
     compact JSON view of the run state
 - `--bootstrap-baseline` is idempotent: it reuses an already evaluated baseline for that mode and
