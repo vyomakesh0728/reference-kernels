@@ -861,8 +861,8 @@ class MoeClosedLoopCoordinator:
                         benchmark_events[event_key] = event
                 elif event.stage == "leaderboard":
                     leaderboard_events[event_key] = event
-        shared_limit = 6
-        reserve = 2
+        shared_limit = 16
+        reserve = 0
         usable_shared = shared_limit - reserve
         return {
             "generated_at": current.isoformat(),
@@ -871,12 +871,12 @@ class MoeClosedLoopCoordinator:
             "shared_test_bucket_usable": usable_shared,
             "shared_test_bucket_used": len(shared_events),
             "shared_test_bucket_remaining_before_reserve": max(0, usable_shared - len(shared_events)),
-            "test_stage_limit_per_hour": 2,
+            "test_stage_limit_per_hour": 10,
             "test_stage_used": len(test_events),
-            "test_stage_remaining": max(0, 2 - len(test_events)),
-            "benchmark_stage_limit_per_hour": 2,
+            "test_stage_remaining": max(0, 10 - len(test_events)),
+            "benchmark_stage_limit_per_hour": 6,
             "benchmark_stage_used": len(benchmark_events),
-            "benchmark_stage_remaining": max(0, 2 - len(benchmark_events)),
+            "benchmark_stage_remaining": max(0, 6 - len(benchmark_events)),
             "leaderboard_limit_per_hour": 1,
             "leaderboard_used": len(leaderboard_events),
             "leaderboard_remaining": max(0, 1 - len(leaderboard_events)),
