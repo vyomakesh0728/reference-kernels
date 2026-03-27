@@ -1,0 +1,66 @@
+{
+  "checks": [
+    {
+      "detail": "syntax check passed",
+      "name": "py_compile",
+      "status": "ok"
+    },
+    {
+      "detail": "AST parse passed",
+      "name": "ast_parse",
+      "status": "ok"
+    },
+    {
+      "detail": "no python-level pointer/cache replay patterns found",
+      "name": "purity_scan",
+      "status": "ok"
+    },
+    {
+      "detail": "custom_kernel(data) found",
+      "name": "custom_kernel",
+      "status": "ok"
+    },
+    {
+      "detail": "topk_ids/topk_weights are visible in the candidate source",
+      "name": "moe_topk_contract",
+      "status": "ok"
+    },
+    {
+      "detail": "static-only preflight skipped import/JIT; remote cluster will validate runtime dependencies",
+      "name": "module_import",
+      "status": "skip"
+    },
+    {
+      "detail": "topk_ids/topk_weights are visible in custom_kernel",
+      "name": "moe_topk_contract",
+      "status": "ok"
+    },
+    {
+      "detail": "anchor usage matches lane policy",
+      "name": "moe_anchor_hot_path",
+      "status": "ok"
+    },
+    {
+      "detail": "candidate card is complete",
+      "name": "moe_candidate_card",
+      "status": "ok"
+    },
+    {
+      "detail": "motivation refs and retrieval queries are present",
+      "name": "moe_candidate_evidence",
+      "status": "ok"
+    },
+    {
+      "detail": "no eager all-expert Python rebuild pattern detected",
+      "name": "moe_all_expert_rebuild",
+      "status": "ok"
+    }
+  ],
+  "notes": [
+    "static-only preflight mode enabled",
+    "remote-first mode: Docker parity preflight skipped"
+  ],
+  "purity_status": "ok",
+  "runtime": "host-static-only",
+  "status": "warn"
+}

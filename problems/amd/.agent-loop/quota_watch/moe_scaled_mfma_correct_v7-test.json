@@ -1,0 +1,28 @@
+{
+  "pid": 18308,
+  "problem": "moe_mxfp4",
+  "resume_at_utc": "2026-03-27T11:15:33Z",
+  "stage": "test",
+  "submit_cmd": [
+    "/root/reference-kernels/problems/amd/.venv/bin/python",
+    "-m",
+    "agent_loop",
+    "--config",
+    "agent_loop.toml",
+    "moe-closed-loop",
+    "submit",
+    "--variant",
+    "moe_scaled_mfma_correct_v7",
+    "--source",
+    "/root/reference-kernels/problems/amd/.agent-loop/manual/moe_scaled_mfma_correct_v7/submission.py",
+    "--lane",
+    "full_pipeline",
+    "--stage",
+    "test",
+    "--hot-path-state",
+    "native",
+    "--regime-tag",
+    "re256_de256_bs512_topk8"
+  ],
+  "variant": "moe_scaled_mfma_correct_v7"
+}
