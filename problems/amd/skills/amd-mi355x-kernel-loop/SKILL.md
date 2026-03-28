@@ -14,10 +14,11 @@ description: Optimize AMD MI355X competition kernels in /Users/v/reference-kerne
    - `task.yml`
    - the current `submission.py`
 3. If the problem is `mxfp4_mm`, read [references/mxfp4-through-v45.md](references/mxfp4-through-v45.md) and [references/amd-blog-insights.md](references/amd-blog-insights.md) before planning experiments.
-4. If the problem is `moe_mxfp4` or `mixed_mla`, read [references/problem-transfer.md](references/problem-transfer.md) after the snapshot.
-5. If the problem is `moe_mxfp4`, also read [references/fused-moe-multiplier.md](references/fused-moe-multiplier.md) before planning experiments or spawning sub-agents.
-6. If the problem is `moe_mxfp4`, also read [references/moe-cost-center-gate.md](references/moe-cost-center-gate.md) and [references/moe-branch-queue.md](references/moe-branch-queue.md) before opening a branch.
-7. If the problem is `moe_mxfp4`, read [references/moe-subagent-prompt.md](references/moe-subagent-prompt.md) before spawning lane-local sub-agents.
+4. If the problem is `mxfp4_mm` and you plan to spawn sub-agents, also read [references/mxfp4-subagent-prompt.md](references/mxfp4-subagent-prompt.md) before delegating.
+5. If the problem is `moe_mxfp4` or `mixed_mla`, read [references/problem-transfer.md](references/problem-transfer.md) after the snapshot.
+6. If the problem is `moe_mxfp4`, also read [references/fused-moe-multiplier.md](references/fused-moe-multiplier.md) before planning experiments or spawning sub-agents.
+7. If the problem is `moe_mxfp4`, also read [references/moe-cost-center-gate.md](references/moe-cost-center-gate.md) and [references/moe-branch-queue.md](references/moe-branch-queue.md) before opening a branch.
+8. If the problem is `moe_mxfp4`, read [references/moe-subagent-prompt.md](references/moe-subagent-prompt.md) before spawning lane-local sub-agents.
 
 ## Scope Rules
 
@@ -88,6 +89,7 @@ When the user combines this skill with a problem name, treat that problem as the
      - [references/amd-blog-insights.md](references/amd-blog-insights.md)
      - [references/mxfp4-cost-center-gate.md](references/mxfp4-cost-center-gate.md)
      - [references/mxfp4-profile-branch-queue.md](references/mxfp4-profile-branch-queue.md)
+     - [references/mxfp4-subagent-prompt.md](references/mxfp4-subagent-prompt.md)
   - Require sub-agents to return a Candidate Card before proposing code.
   - Every sub-agent prompt for `moe_mxfp4` must explicitly point at:
     - [references/problem-transfer.md](references/problem-transfer.md)
@@ -130,6 +132,8 @@ If a prompt mentions stale `problems/amd_202602/...` paths, map them to these li
   Use for the mandatory Candidate Card schema, branch veto rules, and per-shape cost-center ladder.
 - [references/mxfp4-profile-branch-queue.md](references/mxfp4-profile-branch-queue.md)
   Use for the current zip-derived branch order, active Candidate Cards, and the required next exact-shape queue.
+- [references/mxfp4-subagent-prompt.md](references/mxfp4-subagent-prompt.md)
+  Use for the default `mxfp4_mm` sub-agent roster and prompt contract.
 - [references/problem-transfer.md](references/problem-transfer.md)
   Use to transfer the `mxfp4` playbook to `moe` and `mla-decode`.
 - [references/fused-moe-multiplier.md](references/fused-moe-multiplier.md)

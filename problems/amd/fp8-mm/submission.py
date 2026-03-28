@@ -21,7 +21,7 @@ from torch.utils.cpp_extension import load_inline
 from task import input_t, output_t
 
 CONFIG = {
-    "variant_name": "native_scaled_exact_shape_pyprep_v83",
+    "variant_name": "native_scaled_exact_shape_v101",
     "family": "hip_explore",
     "strategy": "hip_reference_oracle",
     "ARCH": "gfx950",
@@ -56,8 +56,11 @@ void mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry(torch::Tensor a, torch::Ten
 void mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry_owned(torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scale_sh, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m32(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m32_only(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
+void mxfp4_mm_hip_mfma_scale_exact_m32_rawb_only(torch::Tensor a_packed, torch::Tensor b_q, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m64_only(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
+void mxfp4_mm_hip_mfma_scale_exact_m64_rawb_only(torch::Tensor a_packed, torch::Tensor b_q, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m256_only(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
+void mxfp4_mm_hip_mfma_scale_exact_m256_rawb_only(torch::Tensor a_packed, torch::Tensor b_q, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m32_direct_entry(torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scale_sh, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m64_direct_entry(torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scale_sh, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m256_direct_entry(torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scale_sh, torch::Tensor c);
@@ -707,6 +710,25 @@ __device__ __forceinline__ int pack_scale_e8m0x4_lane(const uint8_t* scale_ptr, 
         | (127 << 24);
 }
 
+__device__ __forceinline__ int pack_scale_e8m0x4_lane_from_shuffled(
+    const uint8_t* __restrict__ b_scale_sh,
+    int rows,
+    int cols,
+    int src_rows,
+    int src_cols,
+    int out_row,
+    int scale_block,
+    int group4
+) {
+    const uint8_t scale0 = mxfp4_load_unshuffled_b_scale(
+        b_scale_sh, rows, cols, src_rows, src_cols, out_row, scale_block + group4
+    );
+    return static_cast<int>(scale0)
+        | (127 << 8)
+        | (127 << 16)
+        | (127 << 24);
+}
+
 __global__ void mxfp4_mm_kernel_mfma_scale_exact_m16(
     const unsigned char* __restrict__ a_packed,
     const unsigned char* __restrict__ b_packed,
@@ -891,16 +913,126 @@ void mxfp4_mm_hip_mfma_scale_exact_m16_dense(torch::Tensor a_packed, torch::Tens
     );
 }
 
-__global__ void mxfp4_mm_kernel_mfma_scale_exact_m4_dense(
+__global__ void mxfp4_mm_kernel_mfma_scale_exact_m16_dense_rawscale(
     const unsigned char* __restrict__ a_packed,
     const unsigned char* __restrict__ b_packed,
     const uint8_t* __restrict__ a_scale,
-    const uint8_t* __restrict__ b_scale,
+    const uint8_t* __restrict__ b_scale_sh,
     __hip_bfloat16* __restrict__ c,
     int n,
     int k,
     int a_scale_stride,
-    int b_scale_stride
+    int scale_cols,
+    int src_rows,
+    int src_cols
+) {
+    constexpr int MFMA_M = 16;
+    constexpr int MFMA_N = 16;
+    constexpr int MFMA_K = 128;
+
+    const int lane = static_cast<int>(__builtin_amdgcn_workitem_id_x());
+    const int tile_col = blockIdx.x * MFMA_N;
+    const int lane16 = lane & 15;
+    const int group4 = lane >> 4;
+    const int a_bytes_per_row = k / 2;
+    const int b_bytes_per_row = k / 2;
+    const unsigned char* a_row_ptr = a_packed + lane16 * a_bytes_per_row + group4 * 16;
+    const unsigned char* b_row_ptr = b_packed + (tile_col + lane16) * b_bytes_per_row + group4 * 16;
+    const uint8_t* a_scale_ptr = a_scale + lane16 * a_scale_stride;
+
+    union { i32x8_t v; unsigned char b[32]; } a_buf;
+    union { i32x8_t v; unsigned char b[32]; } b_buf;
+    floatx4 acc = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (int tile_k = 0; tile_k < k; tile_k += MFMA_K) {
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            a_buf.v[i] = 0;
+            b_buf.v[i] = 0;
+        }
+
+        const unsigned char* ldg_a = a_row_ptr;
+        const unsigned char* ldg_b = b_row_ptr;
+        #pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            a_buf.b[i] = ldg_a[i];
+            b_buf.b[i] = ldg_b[i];
+        }
+
+        const int scale_block = tile_k / 32;
+        const int scale_a = pack_scale_e8m0x4_lane(a_scale_ptr, group4);
+        const int scale_b = pack_scale_e8m0x4_lane_from_shuffled(
+            b_scale_sh,
+            n,
+            scale_cols,
+            src_rows,
+            src_cols,
+            tile_col + lane16,
+            scale_block,
+            group4
+        );
+        acc = __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(a_buf.v, b_buf.v, acc, 4, 4, 0, scale_a, 0, scale_b);
+
+        a_row_ptr += 64;
+        b_row_ptr += 64;
+        a_scale_ptr += 4;
+    }
+
+    const int out_col = tile_col + lane16;
+    const int out_row_base = group4 * 4;
+    c[(out_row_base + 0) * n + out_col] = static_cast<__hip_bfloat16>(acc[0]);
+    c[(out_row_base + 1) * n + out_col] = static_cast<__hip_bfloat16>(acc[1]);
+    c[(out_row_base + 2) * n + out_col] = static_cast<__hip_bfloat16>(acc[2]);
+    c[(out_row_base + 3) * n + out_col] = static_cast<__hip_bfloat16>(acc[3]);
+}
+
+void mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale(
+    torch::Tensor a_packed,
+    torch::Tensor b_packed,
+    torch::Tensor a_scale,
+    torch::Tensor b_scale_sh,
+    torch::Tensor c
+) {
+    const int m = static_cast<int>(c.size(0));
+    const int n = static_cast<int>(c.size(1));
+    const int k = static_cast<int>(a_packed.size(1) * 2);
+    const int scale_cols = k / 32;
+    TORCH_CHECK(m == 16, "dense exact m16 raw-scale path requires m == 16");
+
+    dim3 block(64);
+    dim3 grid((n + 16 - 1) / 16, 1);
+    hipLaunchKernelGGL(
+        mxfp4_mm_kernel_mfma_scale_exact_m16_dense_rawscale,
+        grid,
+        block,
+        0,
+        0,
+        reinterpret_cast<unsigned char const*>(a_packed.data_ptr<uint8_t>()),
+        reinterpret_cast<unsigned char const*>(b_packed.data_ptr<uint8_t>()),
+        reinterpret_cast<uint8_t const*>(a_scale.data_ptr<uint8_t>()),
+        reinterpret_cast<uint8_t const*>(b_scale_sh.data_ptr<uint8_t>()),
+        reinterpret_cast<__hip_bfloat16*>(c.data_ptr<at::BFloat16>()),
+        n,
+        k,
+        static_cast<int>(a_scale.size(1)),
+        scale_cols,
+        static_cast<int>(b_scale_sh.size(0)),
+        static_cast<int>(b_scale_sh.size(1))
+    );
+}
+
+__global__ void mxfp4_mm_kernel_mfma_scale_exact_m4_dense(
+    const unsigned char* __restrict__ a_packed,
+    const unsigned char* __restrict__ b_packed,
+    const uint8_t* __restrict__ a_scale,
+    const uint8_t* __restrict__ b_scale_sh,
+    __hip_bfloat16* __restrict__ c,
+    int n,
+    int k,
+    int a_scale_stride,
+    int scale_cols,
+    int src_rows,
+    int src_cols
 ) {
     constexpr int MFMA_N = 16;
     constexpr int MFMA_K = 128;
@@ -942,7 +1074,16 @@ __global__ void mxfp4_mm_kernel_mfma_scale_exact_m4_dense(
         const int scale_a = a_active
             ? pack_scale_e8m0x4_lane(a_scale + lane16 * a_scale_stride + scale_block, group4)
             : (127 | (127 << 8) | (127 << 16) | (127 << 24));
-        const int scale_b = pack_scale_e8m0x4_lane(b_scale + (tile_col + lane16) * b_scale_stride + scale_block, group4);
+        const int scale_b = pack_scale_e8m0x4_lane_from_shuffled(
+            b_scale_sh,
+            n,
+            scale_cols,
+            src_rows,
+            src_cols,
+            tile_col + lane16,
+            scale_block,
+            group4
+        );
         acc = __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(a_buf.v, b_buf.v, acc, 4, 4, 0, scale_a, 0, scale_b);
     }
 
@@ -957,10 +1098,11 @@ __global__ void mxfp4_mm_kernel_mfma_scale_exact_m4_dense(
     }
 }
 
-void mxfp4_mm_hip_mfma_scale_exact_m4_dense(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c) {
+void mxfp4_mm_hip_mfma_scale_exact_m4_dense(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale_sh, torch::Tensor c) {
     const int m = static_cast<int>(c.size(0));
     const int n = static_cast<int>(c.size(1));
     const int k = static_cast<int>(a_packed.size(1) * 2);
+    const int scale_cols = k / 32;
     TORCH_CHECK(m == 4, "dense exact m4 path requires m == 4");
 
     dim3 block(64);
@@ -974,12 +1116,14 @@ void mxfp4_mm_hip_mfma_scale_exact_m4_dense(torch::Tensor a_packed, torch::Tenso
         reinterpret_cast<unsigned char const*>(a_packed.data_ptr<uint8_t>()),
         reinterpret_cast<unsigned char const*>(b_packed.data_ptr<uint8_t>()),
         reinterpret_cast<uint8_t const*>(a_scale.data_ptr<uint8_t>()),
-        reinterpret_cast<uint8_t const*>(b_scale.data_ptr<uint8_t>()),
+        reinterpret_cast<uint8_t const*>(b_scale_sh.data_ptr<uint8_t>()),
         reinterpret_cast<__hip_bfloat16*>(c.data_ptr<at::BFloat16>()),
         n,
         k,
         static_cast<int>(a_scale.size(1)),
-        static_cast<int>(b_scale.size(1))
+        scale_cols,
+        static_cast<int>(b_scale_sh.size(0)),
+        static_cast<int>(b_scale_sh.size(1))
     );
 }
 
@@ -998,11 +1142,9 @@ void mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry(
     auto opts_u8 = torch::TensorOptions().device(a_in.device()).dtype(torch::kUInt8);
     auto a_packed = torch::empty({a_in.size(0), a_in.size(1) / 2}, opts_u8);
     auto a_scale = torch::empty({a_in.size(0), a_in.size(1) / 32}, opts_u8);
-    auto b_scale = torch::empty({b_q_u8.size(0), (b_q_u8.size(1) * 2) / 32}, opts_u8);
 
     mxfp4_pack_a_fixed(a_in, a_packed, a_scale);
-    mxfp4_unshuffle_b_scale(b_scale_u8, b_scale);
-    mxfp4_mm_hip_mfma_scale_exact_m16_dense(a_packed, b_q_u8, a_scale, b_scale, c);
+    mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale(a_packed, b_q_u8, a_scale, b_scale_u8, c);
 }
 
 void mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry(
@@ -1021,11 +1163,9 @@ void mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry(
     auto opts_u8 = torch::TensorOptions().device(a_in.device()).dtype(torch::kUInt8);
     auto a_packed = torch::empty({a_in.size(0), a_in.size(1) / 2}, opts_u8);
     auto a_scale = torch::empty({a_in.size(0), a_in.size(1) / 32}, opts_u8);
-    auto b_scale = torch::empty({b_q_u8.size(0), (b_q_u8.size(1) * 2) / 32}, opts_u8);
 
     mxfp4_pack_a_fixed(a_in, a_packed, a_scale);
-    mxfp4_unshuffle_b_scale(b_scale_u8, b_scale);
-    mxfp4_mm_hip_mfma_scale_exact_m4_dense(a_packed, b_q_u8, a_scale, b_scale, c);
+    mxfp4_mm_hip_mfma_scale_exact_m4_dense(a_packed, b_q_u8, a_scale, b_scale_u8, c);
 }
 
 void mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry(
@@ -1303,6 +1443,106 @@ void mxfp4_mm_hip_mfma_scale_exact_m32_only(torch::Tensor a_packed, torch::Tenso
     );
 }
 
+__global__ void mxfp4_mm_kernel_mfma_scale_exact_m32_rawb(
+    const unsigned char* __restrict__ a_packed,
+    const unsigned char* __restrict__ b_q,
+    const uint8_t* __restrict__ a_scale,
+    const uint8_t* __restrict__ b_scale,
+    __hip_bfloat16* __restrict__ c,
+    int n,
+    int k,
+    int a_scale_stride,
+    int b_scale_stride
+) {
+    constexpr int MFMA_M = 32;
+    constexpr int MFMA_N = 32;
+    constexpr int MFMA_K = 64;
+    constexpr int EXACT_M = 32;
+
+    const int lane = static_cast<int>(__builtin_amdgcn_workitem_id_x());
+    const int tile_row = blockIdx.y * MFMA_M;
+    const int tile_col = blockIdx.x * MFMA_N;
+    const int lane32 = lane & 31;
+    const int group = lane >> 5;
+    const int a_bytes_per_row = k / 2;
+    const int b_bytes_per_row = k / 2;
+
+    union { i32x8_t v; unsigned char b[32]; } a_buf;
+    union { i32x8_t v; unsigned char b[32]; } b_buf;
+    opus::fp32x16_t acc{};
+    auto mma = opus::mfma<opus::fp4_t, opus::fp4_t, opus::fp32_t, 32, 32, 64>{};
+    const uint8_t* a_scale_row = a_scale + (tile_row + lane32) * a_scale_stride;
+    const int out_col = tile_col + lane32;
+    const uint8_t* b_scale_row = b_scale + out_col * b_scale_stride;
+    const unsigned char* b_row_ptr = b_q + out_col * b_bytes_per_row;
+
+    for (int tile_k = 0; tile_k < k; tile_k += MFMA_K) {
+        a_buf.v[4] = 0;
+        a_buf.v[5] = 0;
+        a_buf.v[6] = 0;
+        a_buf.v[7] = 0;
+        b_buf.v[4] = 0;
+        b_buf.v[5] = 0;
+        b_buf.v[6] = 0;
+        b_buf.v[7] = 0;
+
+        const unsigned char* ldg_a = a_packed + (tile_row + lane32) * a_bytes_per_row + tile_k / 2 + group * 16;
+        const i32x4_t* ldg_a_vec = reinterpret_cast<const i32x4_t*>(__builtin_assume_aligned(ldg_a, 16));
+        *reinterpret_cast<i32x4_t*>(&a_buf.b[0]) = ldg_a_vec[0];
+
+        const unsigned char* ldg_b = b_row_ptr + tile_k / 2 + group * 16;
+        const i32x4_t* ldg_b_vec = reinterpret_cast<const i32x4_t*>(__builtin_assume_aligned(ldg_b, 16));
+        *reinterpret_cast<i32x4_t*>(&b_buf.b[0]) = ldg_b_vec[0];
+
+        const int scale_block = tile_k / 32;
+        const int scale_a = pack_scale_e8m0x2_lane(a_scale_row + scale_block, group);
+        const int scale_b = pack_scale_e8m0x2_lane(b_scale_row + scale_block, group);
+        acc = mma(a_buf.v, b_buf.v, acc, scale_a, scale_b);
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int row_base = tile_row + group * 4 + i * 8;
+        if (row_base + 0 < EXACT_M && out_col < n) c[(row_base + 0) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 0]);
+        if (row_base + 1 < EXACT_M && out_col < n) c[(row_base + 1) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 1]);
+        if (row_base + 2 < EXACT_M && out_col < n) c[(row_base + 2) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 2]);
+        if (row_base + 3 < EXACT_M && out_col < n) c[(row_base + 3) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 3]);
+    }
+}
+
+void mxfp4_mm_hip_mfma_scale_exact_m32_rawb_only(
+    torch::Tensor a_packed,
+    torch::Tensor b_q,
+    torch::Tensor a_scale,
+    torch::Tensor b_scale,
+    torch::Tensor c
+) {
+    const int m = static_cast<int>(c.size(0));
+    const int n = static_cast<int>(c.size(1));
+    const int k = static_cast<int>(a_packed.size(1) * 2);
+    TORCH_CHECK(m == 32, "exact m32 raw-b path requires m == 32");
+    TORCH_CHECK((n % 32) == 0, "exact m32 raw-b path requires n to be divisible by 32");
+
+    dim3 block(64);
+    dim3 grid(n / 32, 1);
+    hipLaunchKernelGGL(
+        mxfp4_mm_kernel_mfma_scale_exact_m32_rawb,
+        grid,
+        block,
+        0,
+        0,
+        reinterpret_cast<unsigned char const*>(a_packed.data_ptr<uint8_t>()),
+        reinterpret_cast<unsigned char const*>(b_q.data_ptr<uint8_t>()),
+        reinterpret_cast<uint8_t const*>(a_scale.data_ptr<uint8_t>()),
+        reinterpret_cast<uint8_t const*>(b_scale.data_ptr<uint8_t>()),
+        reinterpret_cast<__hip_bfloat16*>(c.data_ptr<at::BFloat16>()),
+        n,
+        k,
+        static_cast<int>(a_scale.size(1)),
+        static_cast<int>(b_scale.size(1))
+    );
+}
+
 void mxfp4_mm_hip_mfma_scale_exact_m64_only(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c) {
     const int m = static_cast<int>(c.size(0));
     const int n = static_cast<int>(c.size(1));
@@ -1323,6 +1563,106 @@ void mxfp4_mm_hip_mfma_scale_exact_m64_only(torch::Tensor a_packed, torch::Tenso
         reinterpret_cast<uint8_t const*>(b_scale.data_ptr<uint8_t>()),
         reinterpret_cast<__hip_bfloat16*>(c.data_ptr<at::BFloat16>()),
         m,
+        n,
+        k,
+        static_cast<int>(a_scale.size(1)),
+        static_cast<int>(b_scale.size(1))
+    );
+}
+
+__global__ void mxfp4_mm_kernel_mfma_scale_exact_m64_rawb(
+    const unsigned char* __restrict__ a_packed,
+    const unsigned char* __restrict__ b_q,
+    const uint8_t* __restrict__ a_scale,
+    const uint8_t* __restrict__ b_scale,
+    __hip_bfloat16* __restrict__ c,
+    int n,
+    int k,
+    int a_scale_stride,
+    int b_scale_stride
+) {
+    constexpr int MFMA_M = 32;
+    constexpr int MFMA_K = 64;
+    constexpr int EXACT_M = 64;
+
+    const int lane = static_cast<int>(__builtin_amdgcn_workitem_id_x());
+    const int tile_row = blockIdx.y * MFMA_M;
+    const int tile_col = blockIdx.x * 32;
+    const int lane32 = lane & 31;
+    const int group = lane >> 5;
+    const int out_col = tile_col + lane32;
+    const int a_bytes_per_row = k / 2;
+    const int b_bytes_per_row = k / 2;
+
+    union { i32x8_t v; unsigned char b[32]; } a_buf;
+    union { i32x8_t v; unsigned char b[32]; } b_buf;
+    opus::fp32x16_t acc{};
+    auto mma = opus::mfma<opus::fp4_t, opus::fp4_t, opus::fp32_t, 32, 32, 64>{};
+
+    const uint8_t* a_scale_row = a_scale + (tile_row + lane32) * a_scale_stride;
+    const uint8_t* b_scale_row = b_scale + out_col * b_scale_stride;
+    const unsigned char* b_row_ptr = b_q + out_col * b_bytes_per_row;
+
+    for (int tile_k = 0; tile_k < k; tile_k += MFMA_K) {
+        a_buf.v[4] = 0;
+        a_buf.v[5] = 0;
+        a_buf.v[6] = 0;
+        a_buf.v[7] = 0;
+        b_buf.v[4] = 0;
+        b_buf.v[5] = 0;
+        b_buf.v[6] = 0;
+        b_buf.v[7] = 0;
+
+        const unsigned char* ldg_a = a_packed + (tile_row + lane32) * a_bytes_per_row + tile_k / 2 + group * 16;
+        const i32x4_t* ldg_a_vec = reinterpret_cast<const i32x4_t*>(__builtin_assume_aligned(ldg_a, 16));
+        *reinterpret_cast<i32x4_t*>(&a_buf.b[0]) = ldg_a_vec[0];
+
+        const unsigned char* ldg_b = b_row_ptr + tile_k / 2 + group * 16;
+        const i32x4_t* ldg_b_vec = reinterpret_cast<const i32x4_t*>(__builtin_assume_aligned(ldg_b, 16));
+        *reinterpret_cast<i32x4_t*>(&b_buf.b[0]) = ldg_b_vec[0];
+
+        const int scale_block = tile_k / 32;
+        const int scale_a = pack_scale_e8m0x2_lane(a_scale_row + scale_block, group);
+        const int scale_b = pack_scale_e8m0x2_lane(b_scale_row + scale_block, group);
+        acc = mma(a_buf.v, b_buf.v, acc, scale_a, scale_b);
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int row_base = tile_row + group * 4 + i * 8;
+        if (out_col < n) c[(row_base + 0) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 0]);
+        if (out_col < n) c[(row_base + 1) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 1]);
+        if (out_col < n) c[(row_base + 2) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 2]);
+        if (out_col < n) c[(row_base + 3) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 3]);
+    }
+}
+
+void mxfp4_mm_hip_mfma_scale_exact_m64_rawb_only(
+    torch::Tensor a_packed,
+    torch::Tensor b_q,
+    torch::Tensor a_scale,
+    torch::Tensor b_scale,
+    torch::Tensor c
+) {
+    const int m = static_cast<int>(c.size(0));
+    const int n = static_cast<int>(c.size(1));
+    const int k = static_cast<int>(a_packed.size(1) * 2);
+    TORCH_CHECK(m == 64, "exact m64 raw-b path requires m == 64");
+    TORCH_CHECK((n % 32) == 0, "exact m64 raw-b path requires n to be divisible by 32");
+
+    dim3 block(64);
+    dim3 grid(n / 32, 2);
+    hipLaunchKernelGGL(
+        mxfp4_mm_kernel_mfma_scale_exact_m64_rawb,
+        grid,
+        block,
+        0,
+        0,
+        reinterpret_cast<unsigned char const*>(a_packed.data_ptr<uint8_t>()),
+        reinterpret_cast<unsigned char const*>(b_q.data_ptr<uint8_t>()),
+        reinterpret_cast<uint8_t const*>(a_scale.data_ptr<uint8_t>()),
+        reinterpret_cast<uint8_t const*>(b_scale.data_ptr<uint8_t>()),
+        reinterpret_cast<__hip_bfloat16*>(c.data_ptr<at::BFloat16>()),
         n,
         k,
         static_cast<int>(a_scale.size(1)),
@@ -1357,6 +1697,106 @@ void mxfp4_mm_hip_mfma_scale_exact_m256_only(torch::Tensor a_packed, torch::Tens
     );
 }
 
+__global__ void mxfp4_mm_kernel_mfma_scale_exact_m256_rawb(
+    const unsigned char* __restrict__ a_packed,
+    const unsigned char* __restrict__ b_q,
+    const uint8_t* __restrict__ a_scale,
+    const uint8_t* __restrict__ b_scale,
+    __hip_bfloat16* __restrict__ c,
+    int n,
+    int k,
+    int a_scale_stride,
+    int b_scale_stride
+) {
+    constexpr int MFMA_M = 32;
+    constexpr int MFMA_N = 32;
+    constexpr int MFMA_K = 64;
+    constexpr int EXACT_M = 256;
+
+    const int lane = static_cast<int>(__builtin_amdgcn_workitem_id_x());
+    const int tile_row = blockIdx.y * MFMA_M;
+    const int tile_col = blockIdx.x * MFMA_N;
+    const int lane32 = lane & 31;
+    const int group = lane >> 5;
+    const int a_bytes_per_row = k / 2;
+    const int b_bytes_per_row = k / 2;
+
+    union { i32x8_t v; unsigned char b[32]; } a_buf;
+    union { i32x8_t v; unsigned char b[32]; } b_buf;
+    opus::fp32x16_t acc{};
+    auto mma = opus::mfma<opus::fp4_t, opus::fp4_t, opus::fp32_t, 32, 32, 64>{};
+    const uint8_t* a_scale_row = a_scale + (tile_row + lane32) * a_scale_stride;
+    const int out_col = tile_col + lane32;
+    const uint8_t* b_scale_row = b_scale + out_col * b_scale_stride;
+    const unsigned char* b_row_ptr = b_q + out_col * b_bytes_per_row;
+
+    for (int tile_k = 0; tile_k < k; tile_k += MFMA_K) {
+        a_buf.v[4] = 0;
+        a_buf.v[5] = 0;
+        a_buf.v[6] = 0;
+        a_buf.v[7] = 0;
+        b_buf.v[4] = 0;
+        b_buf.v[5] = 0;
+        b_buf.v[6] = 0;
+        b_buf.v[7] = 0;
+
+        const unsigned char* ldg_a = a_packed + (tile_row + lane32) * a_bytes_per_row + tile_k / 2 + group * 16;
+        const i32x4_t* ldg_a_vec = reinterpret_cast<const i32x4_t*>(__builtin_assume_aligned(ldg_a, 16));
+        *reinterpret_cast<i32x4_t*>(&a_buf.b[0]) = ldg_a_vec[0];
+
+        const unsigned char* ldg_b = b_row_ptr + tile_k / 2 + group * 16;
+        const i32x4_t* ldg_b_vec = reinterpret_cast<const i32x4_t*>(__builtin_assume_aligned(ldg_b, 16));
+        *reinterpret_cast<i32x4_t*>(&b_buf.b[0]) = ldg_b_vec[0];
+
+        const int scale_block = tile_k / 32;
+        const int scale_a = pack_scale_e8m0x2_lane(a_scale_row + scale_block, group);
+        const int scale_b = pack_scale_e8m0x2_lane(b_scale_row + scale_block, group);
+        acc = mma(a_buf.v, b_buf.v, acc, scale_a, scale_b);
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int row_base = tile_row + group * 4 + i * 8;
+        if (row_base + 0 < EXACT_M && out_col < n) c[(row_base + 0) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 0]);
+        if (row_base + 1 < EXACT_M && out_col < n) c[(row_base + 1) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 1]);
+        if (row_base + 2 < EXACT_M && out_col < n) c[(row_base + 2) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 2]);
+        if (row_base + 3 < EXACT_M && out_col < n) c[(row_base + 3) * n + out_col] = static_cast<__hip_bfloat16>(acc[i * 4 + 3]);
+    }
+}
+
+void mxfp4_mm_hip_mfma_scale_exact_m256_rawb_only(
+    torch::Tensor a_packed,
+    torch::Tensor b_q,
+    torch::Tensor a_scale,
+    torch::Tensor b_scale,
+    torch::Tensor c
+) {
+    const int m = static_cast<int>(c.size(0));
+    const int n = static_cast<int>(c.size(1));
+    const int k = static_cast<int>(a_packed.size(1) * 2);
+    TORCH_CHECK(m == 256, "exact m256 raw-b path requires m == 256");
+    TORCH_CHECK((n % 32) == 0, "exact m256 raw-b path requires n to be divisible by 32");
+
+    dim3 block(64);
+    dim3 grid(n / 32, m / 32);
+    hipLaunchKernelGGL(
+        mxfp4_mm_kernel_mfma_scale_exact_m256_rawb,
+        grid,
+        block,
+        0,
+        0,
+        reinterpret_cast<unsigned char const*>(a_packed.data_ptr<uint8_t>()),
+        reinterpret_cast<unsigned char const*>(b_q.data_ptr<uint8_t>()),
+        reinterpret_cast<uint8_t const*>(a_scale.data_ptr<uint8_t>()),
+        reinterpret_cast<uint8_t const*>(b_scale.data_ptr<uint8_t>()),
+        reinterpret_cast<__hip_bfloat16*>(c.data_ptr<at::BFloat16>()),
+        n,
+        k,
+        static_cast<int>(a_scale.size(1)),
+        static_cast<int>(b_scale.size(1))
+    );
+}
+
 void mxfp4_mm_hip_mfma_scale_exact_m32_direct_entry(
     torch::Tensor a,
     torch::Tensor b_q,
@@ -1373,12 +1813,11 @@ void mxfp4_mm_hip_mfma_scale_exact_m32_direct_entry(
     auto opts_u8 = torch::TensorOptions().device(a_in.device()).dtype(torch::kUInt8);
     auto a_packed = torch::empty({a_in.size(0), a_in.size(1) / 2}, opts_u8);
     auto a_scale = torch::empty({a_in.size(0), a_in.size(1) / 32}, opts_u8);
-    auto b_packed = torch::empty({b_q_u8.size(1) / 32, b_q_u8.size(0), 32}, opts_u8);
     auto b_scale = torch::empty({b_q_u8.size(0), (b_q_u8.size(1) * 2) / 32}, opts_u8);
 
     mxfp4_pack_a_fixed(a_in, a_packed, a_scale);
-    mxfp4_pack_b_m32_direct_with_scale(b_q_u8, b_scale_u8, b_packed, b_scale);
-    mxfp4_mm_hip_mfma_scale_exact_m32_only(a_packed, b_packed, a_scale, b_scale, c);
+    mxfp4_unshuffle_b_scale(b_scale_u8, b_scale);
+    mxfp4_mm_hip_mfma_scale_exact_m32_rawb_only(a_packed, b_q_u8, a_scale, b_scale, c);
 }
 
 void mxfp4_mm_hip_mfma_scale_exact_m64_direct_entry(
@@ -1417,16 +1856,16 @@ void mxfp4_mm_hip_mfma_scale_exact_m256_direct_entry(
     TORCH_CHECK(a_in.size(0) == 256, "exact m256 path requires m == 256");
     TORCH_CHECK(b_q_u8.scalar_type() == torch::kUInt8, "b_q must be uint8-packed for exact m256 direct entry");
     TORCH_CHECK(b_scale_u8.scalar_type() == torch::kUInt8, "b_scale_sh must be uint8-packed for exact m256 direct entry");
+    TORCH_CHECK((b_q_u8.size(0) % 32) == 0, "exact m256 path requires n to be divisible by 32");
 
     auto opts_u8 = torch::TensorOptions().device(a_in.device()).dtype(torch::kUInt8);
     auto a_packed = torch::empty({a_in.size(0), a_in.size(1) / 2}, opts_u8);
     auto a_scale = torch::empty({a_in.size(0), a_in.size(1) / 32}, opts_u8);
-    auto b_packed = torch::empty({b_q_u8.size(1) / 32, b_q_u8.size(0), 32}, opts_u8);
     auto b_scale = torch::empty({b_q_u8.size(0), (b_q_u8.size(1) * 2) / 32}, opts_u8);
 
     mxfp4_pack_a_fixed(a_in, a_packed, a_scale);
-    mxfp4_pack_b_m32_direct_with_scale(b_q_u8, b_scale_u8, b_packed, b_scale);
-    mxfp4_mm_hip_mfma_scale_exact_m256_only(a_packed, b_packed, a_scale, b_scale, c);
+    mxfp4_unshuffle_b_scale(b_scale_u8, b_scale);
+    mxfp4_mm_hip_mfma_scale_exact_m256_rawb_only(a_packed, b_q_u8, a_scale, b_scale, c);
 }
 
 void mxfp4_mm_hip(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
@@ -1454,28 +1893,23 @@ void mxfp4_mm_hip(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
 _MODULE = None
 _TRITON_QUANT = None
 _ROCTX_LIB = None
-_ROCTX_READY = None
+_ROCTX_READY = False
 
 
-@contextmanager
-def _null_context():
-    yield
+def _phase(name: str, **payload: object) -> None:
+    return None
 
 
-def _roctx_enabled() -> bool:
+def _roctx_lib():
     global _ROCTX_LIB, _ROCTX_READY
-    if _ROCTX_READY is not None:
-        return bool(_ROCTX_READY)
-    enabled = (
-        os.environ.get("MXFP4_ROCTX_ENABLE") == "1"
-        or os.environ.get("POPCORN_PROFILE_BACKEND", "").strip().lower() == "rocprofv3"
-    )
-    if not enabled:
-        _ROCTX_READY = False
-        return False
-    for candidate in ("libroctx64.so", "libroctx64.so.1"):
+    if _ROCTX_READY:
+        return _ROCTX_LIB
+    _ROCTX_READY = True
+    if os.environ.get("MXFP4_ROCTX_ENABLE", "").strip() not in {"1", "true", "TRUE", "yes", "YES"}:
+        return None
+    for name in ("libroctx64.so", "libroctx64.so.1"):
         try:
-            lib = ctypes.CDLL(candidate)
+            lib = ctypes.CDLL(name)
         except OSError:
             continue
         lib.roctxRangePushA.argtypes = [ctypes.c_char_p]
@@ -1483,28 +1917,28 @@ def _roctx_enabled() -> bool:
         lib.roctxRangePop.argtypes = []
         lib.roctxRangePop.restype = ctypes.c_int
         _ROCTX_LIB = lib
-        _ROCTX_READY = True
-        return True
-    _ROCTX_READY = False
-    return False
+        break
+    return _ROCTX_LIB
 
 
 @contextmanager
 def _roctx_range(name: str):
-    if not _roctx_enabled():
-        with _null_context():
-            yield
-        return
-    assert _ROCTX_LIB is not None
-    _ROCTX_LIB.roctxRangePushA(name.encode("utf-8"))
+    lib = _roctx_lib()
+    pushed = False
+    if lib is not None:
+        try:
+            lib.roctxRangePushA(name.encode("utf-8"))
+            pushed = True
+        except Exception:
+            pushed = False
     try:
         yield
     finally:
-        _ROCTX_LIB.roctxRangePop()
-
-
-def _phase(name: str, **payload: object) -> None:
-    return None
+        if pushed and lib is not None:
+            try:
+                lib.roctxRangePop()
+            except Exception:
+                pass
 
 
 def _emit_error_stats(tag: str, got: torch.Tensor, ref: torch.Tensor) -> None:
@@ -1549,7 +1983,7 @@ def _module():
             name=module_name,
             cpp_sources=[CPP_WRAPPER],
             cuda_sources=[HIP_SRC],
-            functions=["mxfp4_mm_hip", "mxfp4_mm_hip_mfma_medium", "mxfp4_mm_hip_mfma_scale_exact_m16", "mxfp4_mm_hip_mfma_scale_exact_m16_dense", "mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry_owned", "mxfp4_mm_hip_mfma_scale_exact_m32", "mxfp4_mm_hip_mfma_scale_exact_m32_only", "mxfp4_mm_hip_mfma_scale_exact_m64_only", "mxfp4_mm_hip_mfma_scale_exact_m256_only", "mxfp4_mm_hip_mfma_scale_exact_m32_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m64_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m256_direct_entry", "mxfp4_pack_a_fixed", "mxfp4_repack_b_packed", "mxfp4_pack_b_m32_direct", "mxfp4_pack_b_m32_direct_with_scale", "mxfp4_unshuffle_b_scale"],
+            functions=["mxfp4_mm_hip", "mxfp4_mm_hip_mfma_medium", "mxfp4_mm_hip_mfma_scale_exact_m16", "mxfp4_mm_hip_mfma_scale_exact_m16_dense", "mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry_owned", "mxfp4_mm_hip_mfma_scale_exact_m32", "mxfp4_mm_hip_mfma_scale_exact_m32_only", "mxfp4_mm_hip_mfma_scale_exact_m32_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m64_only", "mxfp4_mm_hip_mfma_scale_exact_m64_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m256_only", "mxfp4_mm_hip_mfma_scale_exact_m256_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m32_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m64_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m256_direct_entry", "mxfp4_pack_a_fixed", "mxfp4_repack_b_packed", "mxfp4_pack_b_m32_direct", "mxfp4_pack_b_m32_direct_with_scale", "mxfp4_unshuffle_b_scale"],
             extra_cuda_cflags=["--offload-arch=gfx950", "-std=c++20", "-O3", "-I/home/runner/aiter/csrc/include"],
             build_directory=str(build_root),
             verbose=False,
@@ -1904,6 +2338,7 @@ def custom_kernel(data: input_t) -> output_t:
     a, b, b_q, b_shuffle, b_scale_sh = data
     with _roctx_range("mxfp4/custom_kernel"):
         _phase("enter_custom_kernel", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+        exact_tiny_m = a.shape[0] in (4, 8)
         torch._assert(b_q.shape[0] == b.shape[0], "B_q row count must match logical B")
         torch._assert(b_shuffle.shape[0] == b.shape[0], "B_shuffle row count must match logical B")
         torch._assert(b_scale_sh.numel() > 0, "B_scale_sh must be present for the live contract")
@@ -1914,8 +2349,15 @@ def custom_kernel(data: input_t) -> output_t:
                 _phase("post_module_return", path="exact_m256")
                 with _roctx_range("mxfp4/exact_m256/b_prep"):
                     _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-                    b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct_exact_m256(b_q, b_scale_sh)
-                    _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
+                    b_q_u8 = b_q.contiguous().view(torch.uint8)
+                    b_scale_u8 = b_scale_sh.contiguous().view(torch.uint8)
+                    b_scale = torch.empty(
+                        (b_q_u8.shape[0], (b_q_u8.shape[1] * 2) // SCALE_GROUP),
+                        dtype=torch.uint8,
+                        device=b_q_u8.device,
+                    )
+                    mod.mxfp4_unshuffle_b_scale(b_scale_u8, b_scale)
+                    _phase("post_b_prep", b_q_shape=list(b_q_u8.shape), b_scale_shape=list(b_scale.shape))
                 with _roctx_range("mxfp4/exact_m256/a_pack"):
                     _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
                     a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m256(a)
@@ -1923,12 +2365,12 @@ def custom_kernel(data: input_t) -> output_t:
                 c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
                 _phase("post_output_alloc", c_shape=list(c.shape))
                 inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
-                inflight.append((a_packed, a_scale, b_packed, b_scale))
+                inflight.append((a_packed, a_scale, b_q_u8, b_scale))
                 if len(inflight) > 64:
                     del inflight[:-64]
                 with _roctx_range("mxfp4/exact_m256/kernel_launch"):
                     _phase("pre_direct_kernel_launch", chunked=False)
-                    mod.mxfp4_mm_hip_mfma_scale_exact_m256_only(a_packed, b_packed, a_scale, b_scale, c)
+                    mod.mxfp4_mm_hip_mfma_scale_exact_m256_rawb_only(a_packed, b_q_u8, a_scale, b_scale, c)
                     _phase("post_wrapper_return", chunked=False)
                 return c
         if a.shape[0] == 64 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
@@ -1938,8 +2380,15 @@ def custom_kernel(data: input_t) -> output_t:
                 _phase("post_module_return", path="exact_m64")
                 with _roctx_range("mxfp4/exact_m64/b_prep"):
                     _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-                    b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct_exact_m64(b_q, b_scale_sh)
-                    _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
+                    b_q_u8 = b_q.contiguous().view(torch.uint8)
+                    b_scale_u8 = b_scale_sh.contiguous().view(torch.uint8)
+                    b_scale = torch.empty(
+                        (b_q_u8.shape[0], (b_q_u8.shape[1] * 2) // SCALE_GROUP),
+                        dtype=torch.uint8,
+                        device=b_q_u8.device,
+                    )
+                    mod.mxfp4_unshuffle_b_scale(b_scale_u8, b_scale)
+                    _phase("post_b_prep", b_q_shape=list(b_q_u8.shape), b_scale_shape=list(b_scale.shape))
                 with _roctx_range("mxfp4/exact_m64/a_pack"):
                     _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
                     a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m64(a)
@@ -1947,12 +2396,12 @@ def custom_kernel(data: input_t) -> output_t:
                 c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
                 _phase("post_output_alloc", c_shape=list(c.shape))
                 inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
-                inflight.append((a_packed, a_scale, b_packed, b_scale))
+                inflight.append((a_packed, a_scale, b_q_u8, b_scale))
                 if len(inflight) > 64:
                     del inflight[:-64]
                 with _roctx_range("mxfp4/exact_m64/kernel_launch"):
                     _phase("pre_direct_kernel_launch", chunked=False)
-                    mod.mxfp4_mm_hip_mfma_scale_exact_m64_only(a_packed, b_packed, a_scale, b_scale, c)
+                    mod.mxfp4_mm_hip_mfma_scale_exact_m64_rawb_only(a_packed, b_q_u8, a_scale, b_scale, c)
                     _phase("post_wrapper_return", chunked=False)
                 return c
         if a.shape[0] == 32 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
@@ -1962,8 +2411,15 @@ def custom_kernel(data: input_t) -> output_t:
                 _phase("post_module_return", path="exact_m32")
                 with _roctx_range("mxfp4/exact_m32/b_prep"):
                     _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-                    b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct_exact_m32(b_q, b_scale_sh)
-                    _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
+                    b_q_u8 = b_q.contiguous().view(torch.uint8)
+                    b_scale_u8 = b_scale_sh.contiguous().view(torch.uint8)
+                    b_scale = torch.empty(
+                        (b_q_u8.shape[0], (b_q_u8.shape[1] * 2) // SCALE_GROUP),
+                        dtype=torch.uint8,
+                        device=b_q_u8.device,
+                    )
+                    mod.mxfp4_unshuffle_b_scale(b_scale_u8, b_scale)
+                    _phase("post_b_prep", b_q_shape=list(b_q_u8.shape), b_scale_shape=list(b_scale.shape))
                 with _roctx_range("mxfp4/exact_m32/a_pack"):
                     _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
                     a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m32(a)
@@ -1971,12 +2427,12 @@ def custom_kernel(data: input_t) -> output_t:
                 c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
                 _phase("post_output_alloc", c_shape=list(c.shape))
                 inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
-                inflight.append((a_packed, a_scale, b_packed, b_scale))
+                inflight.append((a_packed, a_scale, b_q_u8, b_scale))
                 if len(inflight) > 64:
                     del inflight[:-64]
                 with _roctx_range("mxfp4/exact_m32/kernel_launch"):
                     _phase("pre_direct_kernel_launch", chunked=False)
-                    mod.mxfp4_mm_hip_mfma_scale_exact_m32_only(a_packed, b_packed, a_scale, b_scale, c)
+                    mod.mxfp4_mm_hip_mfma_scale_exact_m32_rawb_only(a_packed, b_q_u8, a_scale, b_scale, c)
                     _phase("post_wrapper_return", chunked=False)
                 return c
         if a.shape[0] >= 32 and (a.shape[0] % 32) == 0 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:

@@ -24,6 +24,9 @@ from .kernel_mutator import (
     history_entries,
     load_context,
     load_parent_meta,
+    mxfp4_motivation_refs,
+    mxfp4_retrieval_pack,
+    mxfp4_subagent_roster,
     moe_candidate_card,
     moe_motivation_refs,
     moe_subagent_roster,
@@ -239,7 +242,8 @@ def _write_experiment_plan(
     strategy = variant.get("strategy") if isinstance(variant.get("strategy"), str) else ""
     focus = policy_profile.get("focus") if isinstance(policy_profile.get("focus"), str) else ""
     hypothesis = f"{focus}; variant={variant_name}; strategy={strategy}".strip("; ")
-    candidate_card = moe_candidate_card(variant) if str(problem.get("key")) == "moe_mxfp4" else None
+    problem_key = str(problem.get("key"))
+    candidate_card = moe_candidate_card(variant) if problem_key == "moe_mxfp4" else None
     payload = {
         "problem": problem.get("key"),
         "leaderboard": problem.get("leaderboard"),
@@ -259,6 +263,10 @@ def _write_experiment_plan(
         payload["candidate_card"] = candidate_card
         payload["subagent_roster"] = moe_subagent_roster()
         payload["motivation_refs"] = moe_motivation_refs()
+    elif problem_key == "mxfp4_mm":
+        payload["subagent_roster"] = mxfp4_subagent_roster()
+        payload["motivation_refs"] = mxfp4_motivation_refs()
+        payload["retrieval_pack"] = mxfp4_retrieval_pack()
     path = Path(candidate_dir)
     path.mkdir(parents=True, exist_ok=True)
     (path / "experiment.plan.json").write_text(
@@ -582,6 +590,7 @@ def _build_prompt(
             "- keep the #!POPCORN header lines valid",
         ]
     moe_candidate_block = ""
+    mxfp4_subagent_block = ""
     if str(problem["key"]) == "moe_mxfp4":
         candidate_card = moe_candidate_card(variant)
         retrieval_pack = candidate_card.get("retrieval_pack", {})
@@ -598,6 +607,18 @@ Raw GitHub motivation links:
 
 Active retrieval pack:
 {json.dumps(retrieval_pack, indent=2, sort_keys=True)}
+"""
+    elif str(problem["key"]) == "mxfp4_mm":
+        mxfp4_subagent_block = f"""
+
+Required `mxfp4_mm` sub-agent roster:
+{json.dumps(mxfp4_subagent_roster(), indent=2, sort_keys=True)}
+
+Local `mxfp4_mm` motivation refs:
+{json.dumps(mxfp4_motivation_refs(), indent=2, sort_keys=True)}
+
+Active retrieval pack:
+{json.dumps(mxfp4_retrieval_pack(), indent=2, sort_keys=True)}
 """
 
     user_prompt = f"""
@@ -621,6 +642,7 @@ Knowledge memory:
 
 Retrieved reference context:
 {rag_context_text or "(no retrieval index or no relevant grounded context was available for this round)"}
+{moe_candidate_block}{mxfp4_subagent_block}
 
 Current parent submission:
 {parent_source}
@@ -658,7 +680,7 @@ Atom-of-Thoughts operating rules:
 
 Problem-specific guidance:
 {chr(10).join(f"- {line}" for line in _problem_specific_guidance(problem["key"], desired_family, history))}
-{moe_candidate_block}
+{moe_candidate_block}{mxfp4_subagent_block}
 """
     _write_prompt_artifacts(context, system_prompt.strip(), user_prompt.strip())
     return system_prompt.strip(), user_prompt.strip()

@@ -21,12 +21,52 @@ Operational rule:
 
 ## Queue Order
 
-1. keep `v101` as the active measured and ranked trunk
+1. keep `v116` as the active measured trunk and `v101` as the ranked/profile anchor until `v118` is rerun and, if needed, the winning wide-line trunk is reprofiled
 2. `m16`: annihilate the separate exact `A-pack` launch only with a stronger amortized ownership model; do not inline full per-thread quantization into the MFMA threads and do not use full-panel shared-memory sweep kernels as direct replacements
 3. `m4`: reopen only for the stricter “delete the launch entirely” form of `A-pack` annihilation
-4. plan the next wide move as a family-wide `A-pack` collapse for `m32/m64/m256`
-5. keep `m64` and `m256` closed until a future profile isolates a new legal whole-bucket deletion
+4. treat exact-wide `B-scale` materialization deletion as a resolved positive lane for `m32` and `m256`; do not reopen `A-pack` just because the old queue said wide work should be `A-pack` first
+5. if wide budget stays open, spend it first on a `v118` rerun because it is within the noise gate versus `v116`; only after that choose between a `v116` stability/profile pass and a cheaper exact-`m64` shuffled-scale address path
 6. keep `m8` isolated and test-green only
+
+Queue correction after the `v111` remote result:
+
+- `v111` kept `v101` intact outside exact `m32` and tried a public-`k=512` raw-`b_q` `bundle2` fast path that reused one on-chip exact `A` slice across two neighboring `N` tiles.
+- It passed remote `test`, but benchmarked at `25.360 us` with `m32 21.7 / 21.8 us`, which is worse than `v101` overall and not better on the visible exact `m32` cases either.
+- Operational rule: do not spend another exact-`m32`-only remote slot until a family-wide wide-shape `A-pack` collapse has a stronger amortization story than `v110`/`v111`, or a newer real profile names a better legal bucket.
+
+Queue correction after the `v112a` remote result:
+
+- `v112a` was the first large-bundle exact `m16` follow-up after `v109`: one producer wave, seven consumer waves, two neighboring `N` tiles per consumer wave, and a 14-tile owner bundle with `K=128` slice staging.
+- It passed remote `test`, but benchmarked at `37.766 us` with `m16 437.0 us`, so the branch is correct-but-catastrophically-slow rather than almost-good.
+- Operational rule: do not spend another heavy block-local exact-`m16` owner slot. Any future `m16` `A-pack` candidate must change ownership more fundamentally than “bigger CTA, bigger bundle”; otherwise move the next thin-budget to `m4` or a truly different family-wide redesign.
+
+Operational pivot after the current `A-pack` wave:
+
+- stop treating exact-path `A-pack` prep/materialization deletion as the primary branch objective
+- only reopen `A-pack` when the proposal changes the ownership law fundamentally, not just the producer location, block size, or bundle width
+- move the next serious budget to non-`A-pack` lanes:
+  - exact public-shape constant-body clones that target end-to-end latency, addressing math, and launch-side overhead
+  - wide direct-from-shuffled `B-scale` consumption or other non-`A-pack` data-movement deletes with a fresh legal bucket
+  - if those stay flat, open the architecture-jump lane earlier than originally planned
+
+Queue correction after the `v114` and `v115` remote results:
+
+- `v114` was the first family-wide exact-wide raw shuffled-scale branch after the `A-pack` pivot. It passed remote `test` and benchmarked at `24.3098 us`, with exact `m32 18.8 / 18.8 us`, exact `m256 27.4 us`, and exact `m64 30.7 us`.
+- `v115` kept the `v114` raw shuffled-scale path for exact `m32` and `m256`, but restored exact `m64` to the old row-major scale materialization path. It passed remote `test` and benchmarked at `24.1372 us`, with exact `m32 18.8 / 18.8 us`, exact `m64 29.8 us`, and exact `m256 27.3 us`.
+- Operational rule: direct-from-shuffled `B-scale` consumption is now a measured whole-call win on exact `m32` and a mild positive on exact `m256`; exact `m64` should stay on the row-major scale path unless the next branch specifically lowers the in-kernel shuffled-scale address cost.
+
+Queue correction after the `v116` remote result:
+
+- `v116` kept the `v115` wide routing, but moved exact `m32` from Python-owned temp orchestration into the compiled direct-entry wrapper while preserving the same raw shuffled-scale kernel contract.
+- It passed remote `test` and benchmarked at `24.0287 us`, with exact `m32` still at `18.8 / 18.8 us`.
+- Operational rule: exact `m32` direct-entry collapse is a small positive at the geomean level, but it did not move the visible public `m32` means themselves. The next serious `m32` branch should therefore target the remaining public-`k=512` kernel/address bucket, not more Python-side cleanup alone.
+
+Queue correction after the `v117` and `v118` follow-ups:
+
+- `v117` was the first public-`k=512` exact `m32` constant-body branch on top of `v116`. It kept the raw shuffled-scale `m32` contract but specialized the exact `m32` kernel body for fixed `k=512`, fixed scale columns, and fixed stores.
+- It passed remote `test`, but benchmark correctness failed on both visible `m32` cases with first errors at column `32`. The root cause was the specialized shuffled-scale row-block term using `row_block * 16` instead of the generic helper’s effective `row_block * 32`.
+- `v118` is the immediate repair branch. It fixes that row-block term, passed remote `test`, and benchmarked at `24.0398 us` with `m32 18.5 / 18.5 us`.
+- Operational rule: `v118` is a real public-`m32` shape win but only a portfolio tie versus `v116` (`24.0398 us` vs `24.0287 us`). Do not open another `m32` branch yet. Rerun `v118` first because it is within the `1%` noise gate. If the rerun still does not beat `v116` overall, pivot the next serious budget to cheaper exact `m64` shuffled-scale addressing instead of more `m32` body polish.
 
 ## Candidate Cards
 
@@ -89,17 +129,17 @@ Operational rule:
 
 ### `m64`
 
-- `status`: closed for now
-- `reason`: the `v101` profile did not isolate a legal undeleted whole bucket
-- `why`: `a_pack_share=0.316`, `b_scale_decode_share=0.342`, `kernel_share=0.342`, `b_pack_share=0.000`
-- rule: do not open another `m64` branch until a future profile names a new legal bucket
+- `status`: selectively reopened
+- `reason`: `v114` proved the family-wide `B-scale` delete can win overall, but exact `m64` itself regressed, so the next legal `m64` branch is now “cheaper raw shuffled-scale address path” rather than “full raw-scale path again”
+- `why`: the deleted helper launch was real, but the current exact `m64` kernel overpaid that win as long-`K` address math
+- rule: do not reopen exact `m64` unless the branch keeps `m32`/`m256` intact and specifically lowers exact `m64` kernel-side scale address cost, or a new profile identifies another whole bucket
 
 ### `m256`
 
-- `status`: closed for now
-- `reason`: the compounded `v101` trunk already deleted the resolved exact-wide `B-pack` bucket, and the fresh profile does not isolate another legal undeleted bucket
-- `why`: `a_pack_share=0.316`, `b_scale_decode_share=0.342`, `kernel_share=0.342`, `b_pack_share=0.000`
-- rule: do not open another `m256` branch until a future profile names a new legal bucket
+- `status`: resolved for the current lane
+- `reason`: `v114`/`v115` showed the exact `m256` raw shuffled-scale path is mildly positive on the measured frontier
+- `why`: exact `m256` moved from `27.8 us` on `v101` to `27.4 us` on `v114` and `27.3 us` on `v115`
+- rule: keep the `v115` exact `m256` route locked unless a future profile names another undeleted whole bucket
 
 ## Recent Wins Locked Into The Trunk
 
@@ -117,7 +157,18 @@ Operational rule:
 - `v106`: exact `m16` chunked producer/consumer ownership benchmarked at `37.679 us` with `m16 426.0 us`; close shape-local `m16` `A-pack` ownership variants and move the next `A-pack` spend to a family-wide redesign
 - `v107`: thin-family on-chip `A`-slice service for `m4/m8/m16` passed remote test but benchmarked at `87.946 us`, with `m4 352.0 us` and `m16 3400.0 us`; keep this as a clean negative on “fixed small CTA persistent sweep across all `N`” and ban that ownership shape
 - `v108`: thin-family cooperative-grid `A`-slice service cleared the compile issues but the real MI355X rerun still ended in `check_fail` because the kernelbot self-hosted runner lost communication and no artifacts could be downloaded; keep this as a clean negative on “grid-cooperative launch across the thin tile grid” and ban that execution model for now
-- `v109`: exact `m16` block-local 2-tile ownership passed the pre-spend audit on paper but still timed out badly enough that kernelbot cancelled the workflow after 12 minutes; keep this as a clean negative on “192-thread / 3-wave block-local A owner with 2-tile bundle” and do not benchmark this shape
+- `v109`: exact `m16` block-local 2-tile ownership cleared correctness after the local-scale indexing fix, but benchmarked at `37.321 us` with `m16 399.0 us`; keep this as a clean negative on “192-thread / 3-wave block-local A owner with 2-tile bundle” because it is correct-but-slow, not just timeout-prone
+- `v112`: native gfx950 FP4 scale-pack builtins in `mxfp4_pack_a_fixed` compiled on the real MI355X runner, but the direct drop-in replacement failed correctness across every visible test shape; keep this as a clean negative on “assume the builtin FP4 pack path is a drop-in semantic match for our current hand-rolled quantizer”
+- `v113`: the scale-convention fixup follow-up to `v112` is preflight-green and ready, but it has not spent a remote test slot yet because the hourly test-stage coordinator budget was exhausted
+- `v114`: family-wide exact-wide raw shuffled-scale consumption deleted the helper `mxfp4_unshuffle_b_scale` launch and row-major temp on exact `m32/m64/m256`, passed remote `test`, and benchmarked at `24.3098 us`. Keep this as the proof branch that end-to-end exact-wide `B-scale` materialization deletion is a real win, not just a tidy cleanup.
+- `v115`: hybrid wide exact routing kept the `v114` raw shuffled-scale path for exact `m32` and `m256` while restoring exact `m64` to the old row-major scale path. It passed remote `test` and benchmarked at `24.1372 us`; treat it as the new measured frontier and the current branch to rerun/profile before opening another wide exact lane.
+- `v116`: exact `m32` direct-entry collapse kept the `v115` wide kernel contracts but deleted Python-owned temp orchestration for exact `m32`. It passed remote `test` and benchmarked at `24.0287 us`; treat it as the new measured frontier, but also as evidence that the next large `m32` move must be a public-`k=512` constant-body/body-address branch rather than more wrapper collapse alone.
+- `v117`: the first public-`k=512` exact `m32` constant-body clone passed remote `test` but failed benchmark correctness on both visible `m32` cases because the specialized shuffled-scale row-block term was wrong. Keep this as a clean negative on that buggy implementation, not as closure of the lane.
+- `v118`: the `v117` repair branch corrected the specialized shuffled-scale row-block term, passed remote `test`, and benchmarked at `24.0398 us`. It improved both visible public `m32` cases to `18.5 / 18.5 us`, but the overall geomean stayed slightly behind `v116`, so treat it as a rerun gate rather than an immediate promotion or a license to open another `m32` sibling branch.
+- `v121`: exact `m16` global `A-pack` temp-law deletion via in-kernel direct quantization passed remote `test`, but benchmarked at `25.1570 us` with `m16 63.0 us`. Keep this as a clean negative on “delete exact `m16` external `A-pack` temp traffic by moving quantization into the compute path.”
+- `v122`: exact public-`m32,k=512` CTA-local `A` feeder swap passed remote `test`, but benchmarked at `35.1567 us` with `m32 58.2 / 58.3 us`. Keep this as a clean negative on “preserve the winning exact `m32` body but re-quantize `A` independently per output CTA.” The saved temp bytes were real, but duplicate quant work dominated them.
+- `v121`: exact `m16` global `A-pack` temp-law deletion via in-kernel raw-`A` quantization passed remote `test`, but benchmarked at `25.1570 us` with `m16 63.0 us`. Keep this as a clean negative on “delete external `A-pack` by moving quantization directly into the exact `m16` compute path”.
+- `v122`: exact public `m32,k=512` CTA-local `A` feeder swap passed remote `test`, but benchmarked at `35.1567 us` with `m32 58.2 / 58.3 us`. Keep this as a clean negative on “preserve the winning raw-`B` body but re-quantize `A` independently inside each output-column CTA”.
 
 ## Thin `A-pack` Remote-Spend Gate
 
@@ -144,8 +195,128 @@ Working example from `v107`:
 
 That failure means the next legal direction must preserve most of the original tile-parallel grid while reducing quant duplication. No more fixed-CTA persistent sweeps across all `N`.
 
+## Wide `A-pack` Remote-Spend Gate
+
+No new exact-wide `A-pack` branch may spend remote quota unless its candidate card includes all of:
+
+- `reuse_factor_per_quant`
+- `quant_dup_upper_bound`
+- `saved_global_bytes_per_block`
+- `new_internal_quant_scope`
+- a short proof that total quant work drops rather than merely moving from global temp traffic into the hot path
+
+Reject the branch before remote spend if any of these are true:
+
+- the design re-quantizes `A` independently per output-column CTA
+- `quant_dup_upper_bound > reuse_factor_per_quant`
+- the branch changes both feeder law and CTA ownership in one step
+- the claimed win is only “fewer launches” or “no temp buffer” without a quantified reuse story
+
+Operational rule after `v122`:
+
+- do not spend another exact-`m32`-only `A-pack` slot on CTA-local re-quant
+- the only remaining legal `A-pack` lane is bounded multi-consumer reuse that lowers duplication itself, not just temp bytes
+
+Queue correction after `v125`:
+
+- `v125` was the stricter exact public-`m32,k=512` follow-up after `v122`: it deleted the standalone `mxfp4_pack_a_fixed` launch and the external `a_packed + a_scale` temp law by quantizing each warp-owned `A` strip directly from BF16 into MFMA input registers.
+- It passed remote `test`, but benchmarked at `38.6531 us` with `m32 77.9 / 77.3 us`.
+- Operational rule:
+  - do not spend another slot on exact-shape local `A` feeder rewrites, even if they are register-only and avoid LDS
+  - local `A-pack` deletion is now closed in all tested forms; the only remaining legal `A-pack` lane is still a true duplication-law break with a mechanism stronger than per-CTA local state
+
+Bounded wide-family paper pass on top of `v119`:
+
+- natural `C2`/`C4` cluster laws are now evaluated and closed on paper
+- current exact-wide grid law is still one CTA per `N32` tile, so duplication stays `num_n_tiles / cluster_size`
+- derived public-shape arithmetic:
+  - `m32, n=4096`: `C2 -> reuse 2 / duplication 64`, `C4 -> reuse 4 / duplication 32`
+  - `m32, n=2880`: `C2 -> reuse 2 / duplication 45`, `C4 -> reuse 4 / duplication 23`
+  - `m64, n=7168`: `C2 -> reuse 2 / duplication 112`, `C4 -> reuse 4 / duplication 56`
+  - `m256, n=3072`: `C2 -> reuse 2 / duplication 48`, `C4 -> reuse 4 / duplication 24`
+- operational rule:
+  - do not open a bounded exact-wide `A` service branch whose only new law is “one producer serves 2-4 neighboring `N`-tile CTAs”
+  - the next legal `A-pack` reopen must change the duplication law more fundamentally than local bounded `N` clustering
+
+Macro-cluster follow-up arithmetic:
+
+- if a producer span covers `S` consecutive `N32` tiles, then `reuse=S` and `duplication=ceil(num_n_tiles / S)`
+- first gate (`reuse >= duplication`) starts only at:
+  - `m32, n=4096`: `S >= 12`
+  - `m32, n=2880`: `S >= 12`
+  - `m64, n=7168`: `S >= 16`
+  - `m256, n=3072`: `S >= 12`
+- stronger practical gate (`reuse >= 2 * duplication`) starts only at:
+  - `m32, n=4096`: `S >= 16`
+  - `m32, n=2880`: `S >= 16`
+  - `m64, n=7168`: `S >= 24`
+  - `m256, n=3072`: `S >= 16`
+- operational rule:
+  - do not open another exact-wide `A-pack` branch whose producer span is below these thresholds
+  - any future `A-pack` reopen must be framed as a macro-cluster duplication-law change, not a local cluster-service tweak
+
+## Current Active Program
+
+Use the next budget in this order until a newer real MI355X profile replaces this queue:
+
+1. `m32-nonApack-overhead`
+   - branch class: exact public `m32,k=512` only
+   - deleted cost center: remaining whole-call fixed overhead outside `A-pack` on the winning `v119` path
+   - allowed directions:
+     - direct-entry / wrapper / inflight-retention collapse only if it deletes a measured whole-call bucket
+     - kernel-side constant-body or address-law deletes only if they remove a whole remap/arithmetic bucket already proven live on public `m32`
+   - forbidden:
+     - any `A-pack` reopen
+     - any sibling branch that only polishes the same specialized body without naming a deleted bucket
+
+2. `m4-fixed-cost-delete`
+   - branch class: exact `m4` only
+   - deleted cost center: non-`A-pack` fixed-cost overhead on the tiny path
+   - allowed directions:
+     - wrapper/orchestration/temp retention collapse
+     - dead exact-path epilogue or addressing work
+   - forbidden:
+     - reopening `m4` `A-pack` by itself
+     - broad thin-family ownership changes
+
+3. `m64-address-last`
+   - branch class: exact `m64` only
+   - deleted cost center: in-kernel shuffled-scale address/rebuild cost
+   - allowed directions:
+     - only if the branch keeps `m32` and `m256` intact
+     - only if the deleted bucket is specifically the exact `m64` address path, not a fresh `A-pack` story
+   - note:
+     - `v120` and `v123` proved this is real but portfolio-secondary, so keep it behind `m32` and `m4`
+
+4. `Apack-paper-only`
+   - branch class: research only, no remote spend
+   - active question:
+     - can a future exact-wide `A-pack` reopen change duplication fundamentally without grid-coop, without collapsing wide parallelism, and without recreating a global temp
+   - current status:
+     - arithmetic threshold is known
+     - implementation mechanism is missing
+   - operational rule:
+     - no code and no remote spend unless a new ownership law answers the missing cluster-scoped handoff mechanism first
+
+## Any `A-pack` Remote-Spend Gate
+
+No new `A-pack` branch on any exact shape may spend remote quota unless its Candidate Card includes all of:
+
+- `reuse_factor`
+- `duplication_factor`
+- `saved_global_bytes_per_block`
+- a short proof that total quant work drops instead of only relocating the old external temp bytes
+
+Reject the branch before remote spend if any of these are true:
+
+- `duplication_factor > reuse_factor`
+- the design quantizes `A` independently in each output-column CTA with no cross-CTA reuse law
+- the design keeps only local CTA reuse while duplication still scales with the full output-column CTA count
+- the main benefit is only “fewer launches” or “fewer temp bytes” without a credible amortization story for quant work
+
 ## Freeze Rules
 
 - Do not reopen `m64` or `m256` without a newer profile-backed Candidate Card.
 - Do not spend benchmark budget on `m8` before the family-wide `A-pack` redesign resolves.
 - Do not open a branch whose description sounds like cleanup, hoist, fast path, or prep improvement without deleting a whole bucket.
+- Do not spend another slot on shape-local local-requant `A-pack` deletion; `v121`, `v122`, and `v125` already proved that deleting the external temp law is not enough when quant work still scales with output-column CTAs.

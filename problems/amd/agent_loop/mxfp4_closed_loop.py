@@ -443,8 +443,8 @@ class Mxfp4ClosedLoopCoordinator:
                         profile_events[event_key] = event
                 elif event.stage == "leaderboard":
                     leaderboard_events[event_key] = event
-        shared_limit = 6
-        reserve = 2
+        shared_limit = 16
+        reserve = 0
         usable_shared = shared_limit - reserve
         next_lb_earliest = current.replace(minute=45, second=0, microsecond=0)
         if current.minute >= 45:
@@ -456,12 +456,12 @@ class Mxfp4ClosedLoopCoordinator:
             "shared_test_bucket_usable": usable_shared,
             "shared_test_bucket_used": len(shared_events),
             "shared_test_bucket_remaining_before_reserve": max(0, usable_shared - len(shared_events)),
-            "test_stage_limit_per_hour": 2,
+            "test_stage_limit_per_hour": 10,
             "test_stage_used": len(test_events),
-            "test_stage_remaining": max(0, 2 - len(test_events)),
-            "benchmark_stage_limit_per_hour": 2,
+            "test_stage_remaining": max(0, 10 - len(test_events)),
+            "benchmark_stage_limit_per_hour": 6,
             "benchmark_stage_used": len(benchmark_events),
-            "benchmark_stage_remaining": max(0, 2 - len(benchmark_events)),
+            "benchmark_stage_remaining": max(0, 6 - len(benchmark_events)),
             "profile_stage_limit_per_hour": 1,
             "profile_stage_used": len(profile_events),
             "profile_stage_remaining": max(0, 1 - len(profile_events)),

@@ -613,6 +613,65 @@ MOE_SUBAGENT_ROSTER = [
     },
 ]
 
+MXFP4_MOTIVATION_REFS = [
+    "/root/reference-kernels/problems/amd/important_papers/amd-instinct-cdna4-instruction-set-architecture.pdf",
+    "/root/reference-kernels/problems/amd/important_papers/HipKittens Fast and Furious AMD Kernels.pdf",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/optimization.md",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/amd-blog-insights.md",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-cost-center-gate.md",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-exact-shape-frontier.md",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-profile-branch-queue.md",
+    "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-subagent-prompt.md",
+]
+
+MXFP4_SUBAGENT_ROSTER = [
+    {
+        "role": "cost_center_scout",
+        "required_reads": [
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/SKILL.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/amd-blog-insights.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-cost-center-gate.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-exact-shape-frontier.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-profile-branch-queue.md",
+        ],
+        "deliverable": "one Candidate Card only",
+    },
+    {
+        "role": "retrieval_canon_scout",
+        "required_reads": [
+            "/root/reference-kernels/problems/amd/skills/optimization-skill/SKILL.md",
+            "/root/reference-kernels/problems/amd/skills/amd-live-reference-correctness/references/mxfp4-mm-live-contract.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/remote-first-eval.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-profile-branch-queue.md",
+        ],
+        "deliverable": "3-6 grounded hits plus one veto if the idea is wrapper-only, prep-only, or reopens a banned lane",
+    },
+    {
+        "role": "bounded_kernel_worker",
+        "required_reads": [
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/SKILL.md",
+            "/root/reference-kernels/problems/amd/skills/optimization-skill/SKILL.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-cost-center-gate.md",
+            "/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-subagent-prompt.md",
+        ],
+        "deliverable": "one bounded patch plan or one bounded seed rewrite only",
+    },
+]
+
+MXFP4_RETRIEVAL_PACK = {
+    "name": "exact_shape",
+    "queries": [
+        "V_MFMA_SCALE_F32_32X32X64_F8F6F4 operand order lane layout",
+        "pack_scale_e8m0x2_lane_from_shuffled exact_m32",
+        "mxfp4_load_unshuffled_b_scale source_linear mapping",
+        "exact_m32 raw shuffled scale direct entry public k512",
+        "fewer hot-loop address calculations wide scaled fp4",
+        "q09-cdna4-gemm-blog",
+        "q25-cdna-matrix-core-lane-layout",
+        "q27-gemm-tuning-shape-driven",
+    ],
+}
+
 MOE_RETRIEVAL_PACKS = {
     "dispatch_pack": {
         "name": "dispatch",
@@ -1088,6 +1147,21 @@ def moe_subagent_roster() -> list[dict[str, object]]:
 
 def moe_motivation_refs() -> list[str]:
     return list(MOE_MOTIVATION_REFS)
+
+
+def mxfp4_subagent_roster() -> list[dict[str, object]]:
+    return [dict(item) for item in MXFP4_SUBAGENT_ROSTER]
+
+
+def mxfp4_motivation_refs() -> list[str]:
+    return list(MXFP4_MOTIVATION_REFS)
+
+
+def mxfp4_retrieval_pack() -> dict[str, object]:
+    return {
+        "name": str(MXFP4_RETRIEVAL_PACK["name"]),
+        "queries": [str(item) for item in MXFP4_RETRIEVAL_PACK["queries"]],
+    }
 
 
 def moe_retrieval_pack(variant: dict[str, object]) -> dict[str, object]:
