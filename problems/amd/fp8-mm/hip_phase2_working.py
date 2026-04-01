@@ -1,5 +1,14 @@
 #!POPCORN leaderboard amd-mxfp4-mm
 #!POPCORN gpu MI355X
+# Candidate Card
+# shape: exact public portfolio (m4/m16/m32/m64/m256)
+# deleted_cost_center: generic mxfp4_pack_a_fixed + A-pack temp law by accepting prepacked A/a_scale input
+# expected_upside_source: profile shows A-pack dominates m4/m16 and is still ~1/3 of wide shapes; removing the helper launch and temp traffic across all exact paths should move geomean
+# why_larger_than_noise: deletes the largest remaining whole-call prep bucket across the portfolio; removes a helper launch and host orchestration overhead instead of a micro-polish
+# touched_symbols_or_regions: custom_kernel input contract, exact-path A-pack prep, module exports for prepacked kernels
+# forbidden_edits: keep B contract unchanged; no kernel-body rewrites; preserve backward compatibility with raw-A inputs
+# success_gate: geomean improves >=0.2 us; no shape regresses >0.1 us
+# profile_evidence: .agent-loop/harness_runs/mxfp4_mm/20260330-131101-native-scaled-exact-shape-m16-scaleaddr-t7-profile-rocprof/stages/01_profile_rocprof/profile/profile_summary.json
 # AGENT_LOOP_META: {"generator": {"kind": "manual_phase2"}, "gpu": "MI355X", "leaderboard": "amd-mxfp4-mm", "policy_profile": {"family": "hip_explore", "name": "deaiter_exact_m16_scaled_mfma"}, "problem": "mxfp4_mm"}
 import ctypes
 from contextlib import contextmanager
@@ -21,7 +30,7 @@ from torch.utils.cpp_extension import load_inline
 from task import input_t, output_t
 
 CONFIG = {
-    "variant_name": "native_scaled_exact_shape_v101",
+    "variant_name": "native_scaled_exact_shape_prepacked_a_t15",
     "family": "hip_explore",
     "strategy": "hip_reference_oracle",
     "ARCH": "gfx950",
@@ -31,6 +40,10 @@ CONFIG = {
     "TILE_N": 32,
     "TILE_K": 64,
 }
+USE_FP4_BUILTIN_PACK = int(os.environ.get("MXFP4_USE_BUILTIN_PACK", "1"))
+USE_FP4_BUILTIN_BF16_PACK = int(os.environ.get("MXFP4_USE_BUILTIN_BF16_PACK", "1"))
+USE_FP4_DME_PACK = int(os.environ.get("MXFP4_USE_DME_PACK", "1"))
+PACK_DEBUG_COMPARE = int(os.environ.get("MXFP4_PACK_DEBUG_COMPARE", "0"))
 SCALE_GROUP = 32
 DIRECT_M32_EXPERIMENT = "REAL_A_REAL_SCALES_COMPILED_A_PACK_M8_V34"
 FIXED_ADJUSTMENT_RULES: dict[float, tuple[str, float, float]] = {
@@ -49,7 +62,9 @@ void mxfp4_mm_hip(torch::Tensor a, torch::Tensor b, torch::Tensor c);
 void mxfp4_mm_hip_mfma_medium(torch::Tensor a, torch::Tensor b, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m16(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m16_dense(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
+void mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale_sh, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry(torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scale_sh, torch::Tensor c);
+void mxfp4_mm_hip_mfma_scale_exact_m4_dense(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale_sh, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry(torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scale_sh, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry(torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scale_sh, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry(torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scale_sh, torch::Tensor a_packed, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
@@ -76,6 +91,7 @@ HIP_SRC = r"""
 #include <hip/hip_runtime.h>
 #include <hip/amd_detail/amd_hip_bf16.h>
 #include <cstdio>
+#include <cstdint>
 #include "opus/opus.hpp"
 
 constexpr int TILE_M = 16;
@@ -348,6 +364,113 @@ void mxfp4_mm_hip_mfma_medium(torch::Tensor a, torch::Tensor b, torch::Tensor c)
 
 using i32x8_t = int __attribute__((ext_vector_type(8)));
 using i32x4_t = int __attribute__((ext_vector_type(4)));
+using f32x2_t = float __attribute__((ext_vector_type(2)));
+using bf16x2_t = __bf16 __attribute__((ext_vector_type(2)));
+
+struct buffer_resource {
+    uint64_t ptr;
+    uint32_t range;
+    uint32_t config;
+};
+
+__device__ __forceinline__ buffer_resource make_buffer_resource(uint64_t ptr, uint32_t range, uint32_t config) {
+    return {ptr, range, config};
+}
+
+__device__ __forceinline__ i32x4_t make_srsrc(const void* ptr, uint32_t range_bytes, uint32_t row_stride_bytes = 0) {
+    uintptr_t as_int = reinterpret_cast<uintptr_t>(ptr);
+    uint64_t as_u64 = static_cast<uint64_t>(as_int);
+    buffer_resource rsrc = make_buffer_resource(as_u64, range_bytes, 0x110000);
+    row_stride_bytes &= 0x3FFF;
+    if (row_stride_bytes) {
+        uint64_t stride_field = row_stride_bytes;
+        stride_field = stride_field | 0x4000;
+        stride_field = stride_field | 0x8000;
+        rsrc.ptr |= stride_field << 48;
+    }
+    return *reinterpret_cast<const i32x4_t*>(&rsrc);
+}
+
+using as3_uint32_ptr = uint32_t __attribute__((address_space(3)))*;
+extern "C" __device__ void llvm_amdgcn_raw_buffer_load_lds(
+    i32x4_t rsrc,
+    as3_uint32_ptr lds_ptr,
+    int size,
+    int voffset,
+    int soffset,
+    int offset,
+    int aux
+) __asm("llvm.amdgcn.raw.buffer.load.lds");
+
+__device__ __uint128_t llvm_amdgcn_raw_buffer_load_b128(
+    i32x4_t rsrc,
+    uint32_t voffset,
+    uint32_t soffset,
+    uint32_t coherency
+) __asm("llvm.amdgcn.raw.buffer.load.i128");
+
+#if defined(__has_builtin)
+#define HAS_CVT_SCALE_FP4_F32 (__has_builtin(__builtin_amdgcn_cvt_scalef32_pk_fp4_f32))
+#define HAS_CVT_SCALE_F32_FP4 (__has_builtin(__builtin_amdgcn_cvt_scalef32_pk_f32_fp4))
+#define HAS_CVT_SCALE_FP4_BF16 (__has_builtin(__builtin_amdgcn_cvt_scalef32_pk_fp4_bf16))
+#define HAS_CVT_SCALE_BF16_FP4 (__has_builtin(__builtin_amdgcn_cvt_scalef32_pk_bf16_fp4))
+#define HAS_CVT_FP4_F32 (__has_builtin(__builtin_amdgcn_cvt_pk_fp4_f32))
+#define HAS_CVT_FP4_BF16 (__has_builtin(__builtin_amdgcn_cvt_pk_fp4_bf16))
+#else
+#define HAS_CVT_SCALE_FP4_F32 0
+#define HAS_CVT_SCALE_F32_FP4 0
+#define HAS_CVT_SCALE_FP4_BF16 0
+#define HAS_CVT_SCALE_BF16_FP4 0
+#define HAS_CVT_FP4_F32 0
+#define HAS_CVT_FP4_BF16 0
+#endif
+
+#if HAS_CVT_SCALE_FP4_F32
+template <int IDX>
+__device__ __forceinline__ unsigned int cvt_scalef32_pk_fp4_f32(
+    unsigned int dst,
+    float src0,
+    float src1,
+    float scale
+) {
+    return __builtin_amdgcn_cvt_scalef32_pk_fp4_f32(dst, src0, src1, scale, IDX);
+}
+#endif
+
+#if HAS_CVT_SCALE_F32_FP4
+template <int IDX>
+__device__ __forceinline__ f32x2_t cvt_scalef32_pk_f32_fp4(
+    unsigned int src,
+    float scale
+) {
+    return __builtin_amdgcn_cvt_scalef32_pk_f32_fp4(src, scale, IDX);
+}
+#endif
+
+#if HAS_CVT_SCALE_FP4_BF16
+template <int IDX>
+__device__ __forceinline__ unsigned int cvt_scalef32_pk_fp4_bf16(
+    unsigned int dst,
+    bf16x2_t src,
+    float scale
+) {
+    return __builtin_amdgcn_cvt_scalef32_pk_fp4_bf16(dst, src, scale, IDX);
+}
+#endif
+
+#if HAS_CVT_SCALE_BF16_FP4
+template <int IDX>
+__device__ __forceinline__ bf16x2_t cvt_scalef32_pk_bf16_fp4(
+    unsigned int src,
+    float scale
+) {
+    return __builtin_amdgcn_cvt_scalef32_pk_bf16_fp4(src, scale, IDX);
+}
+#endif
+
+__device__ __forceinline__ float fp4_scale_from_e8m0(uint8_t scale_byte) {
+    return __builtin_bit_cast(float, static_cast<unsigned int>(scale_byte) << 23);
+}
 
 __device__ __forceinline__ unsigned char fp4_extract(unsigned char packed, int idx) {
     return (idx == 0) ? (packed & 0xFu) : (packed >> 4);
@@ -400,6 +523,76 @@ __device__ __forceinline__ unsigned char apply_fixed_adjustment(unsigned char ni
     return nibble;
 }
 
+__device__ __forceinline__ uint8_t mxfp4_scale_byte_32(const __hip_bfloat16* a_src) {
+    float amax = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) {
+        amax = fmaxf(amax, fabsf(static_cast<float>(a_src[i])));
+    }
+    if (amax <= 0.0f) {
+        return 0;
+    }
+    const unsigned int rounded_bits = (__builtin_bit_cast(unsigned int, amax) + 0x200000u) & 0xFF800000u;
+    const unsigned int rounded_exp = (rounded_bits >> 23) & 0xFFu;
+    return static_cast<uint8_t>(rounded_exp - 2u);
+}
+
+__device__ __forceinline__ int mxfp4_pack_scale_lane(uint8_t scale_byte) {
+    return static_cast<int>(scale_byte)
+        | (127 << 8)
+        | (127 << 16)
+        | (127 << 24);
+}
+
+__device__ __forceinline__ void mxfp4_pack_a_group32(
+    const __hip_bfloat16* a_src,
+    unsigned char* out_bytes,
+    uint8_t* out_scale
+) {
+    const uint8_t scale_byte = mxfp4_scale_byte_32(a_src);
+    *out_scale = scale_byte;
+    const float scale_f = fp4_scale_from_e8m0(scale_byte);
+    const int scale_unbiased = static_cast<int>(scale_byte) - 127;
+    const float quant_scale = ldexpf(1.0f, -scale_unbiased);
+    const bool use_builtin_bf16 = (USE_FP4_BUILTIN_BF16_PACK != 0) && (HAS_CVT_SCALE_FP4_BF16 != 0);
+    const bool use_builtin_f32 = (USE_FP4_BUILTIN_PACK != 0) && (HAS_CVT_SCALE_FP4_F32 != 0);
+
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const float src0 = static_cast<float>(a_src[2 * i + 0]);
+        const float src1 = static_cast<float>(a_src[2 * i + 1]);
+        const float q0 = src0 * quant_scale;
+        const float q1 = src1 * quant_scale;
+#if HAS_CVT_SCALE_FP4_BF16
+        if (use_builtin_bf16) {
+            const bf16x2_t src = *reinterpret_cast<const bf16x2_t*>(a_src + 2 * i);
+            unsigned int packed = cvt_scalef32_pk_fp4_bf16<0>(0u, src, scale_f);
+            unsigned char byte = static_cast<unsigned char>(packed & 0xFFu);
+            unsigned char nib0 = apply_fixed_adjustment(fp4_extract(byte, 0), q0);
+            unsigned char nib1 = apply_fixed_adjustment(fp4_extract(byte, 1), q1);
+            out_bytes[i] = fp4_pack(nib0, nib1);
+        } else
+#endif
+#if HAS_CVT_SCALE_FP4_F32
+        if (use_builtin_f32) {
+            unsigned int packed = cvt_scalef32_pk_fp4_f32<0>(0u, src0, src1, scale_f);
+            unsigned char byte = static_cast<unsigned char>(packed & 0xFFu);
+            unsigned char nib0 = apply_fixed_adjustment(fp4_extract(byte, 0), q0);
+            unsigned char nib1 = apply_fixed_adjustment(fp4_extract(byte, 1), q1);
+            out_bytes[i] = fp4_pack(nib0, nib1);
+        } else {
+            const unsigned char nib0 = apply_fixed_adjustment(quantize_fp4_scaled(q0), q0);
+            const unsigned char nib1 = apply_fixed_adjustment(quantize_fp4_scaled(q1), q1);
+            out_bytes[i] = fp4_pack(nib0, nib1);
+        }
+#else
+        const unsigned char nib0 = apply_fixed_adjustment(quantize_fp4_scaled(q0), q0);
+        const unsigned char nib1 = apply_fixed_adjustment(quantize_fp4_scaled(q1), q1);
+        out_bytes[i] = fp4_pack(nib0, nib1);
+#endif
+    }
+}
+
 __global__ void mxfp4_pack_a_fixed_kernel(
     const __hip_bfloat16* __restrict__ a,
     unsigned char* __restrict__ a_packed,
@@ -436,16 +629,135 @@ __global__ void mxfp4_pack_a_fixed_kernel(
     }
     a_scale[row * scale_stride + scale_block] = scale_byte;
 
+    const float scale_f = fp4_scale_from_e8m0(scale_byte);
+    const bool use_builtin_bf16 = (USE_FP4_BUILTIN_BF16_PACK != 0) && (m == 16) && (HAS_CVT_SCALE_FP4_BF16 != 0);
+    const bool use_builtin_f32 = (USE_FP4_BUILTIN_PACK != 0) && (m == 16) && (HAS_CVT_SCALE_FP4_F32 != 0);
     unsigned char* packed_row = a_packed + row * packed_stride + scale_block * 16;
     #pragma unroll
     for (int i = 0; i < 16; ++i) {
-        const float q0 = static_cast<float>(a_row[2 * i + 0]) * quant_scale;
-        const float q1 = static_cast<float>(a_row[2 * i + 1]) * quant_scale;
+        const float src0 = static_cast<float>(a_row[2 * i + 0]);
+        const float src1 = static_cast<float>(a_row[2 * i + 1]);
+        const float q0 = src0 * quant_scale;
+        const float q1 = src1 * quant_scale;
+#if HAS_CVT_SCALE_FP4_BF16
+        if (use_builtin_bf16) {
+            const bf16x2_t src = *reinterpret_cast<const bf16x2_t*>(a_row + 2 * i);
+            unsigned int packed = cvt_scalef32_pk_fp4_bf16<0>(0u, src, scale_f);
+            unsigned char byte = static_cast<unsigned char>(packed & 0xFFu);
+            unsigned char nib0 = apply_fixed_adjustment(fp4_extract(byte, 0), q0);
+            unsigned char nib1 = apply_fixed_adjustment(fp4_extract(byte, 1), q1);
+            packed_row[i] = fp4_pack(nib0, nib1);
+        } else
+#endif
+#if HAS_CVT_SCALE_FP4_F32
+        if (use_builtin_f32) {
+            unsigned int packed = cvt_scalef32_pk_fp4_f32<0>(0u, src0, src1, scale_f);
+            unsigned char byte = static_cast<unsigned char>(packed & 0xFFu);
+            unsigned char nib0 = apply_fixed_adjustment(fp4_extract(byte, 0), q0);
+            unsigned char nib1 = apply_fixed_adjustment(fp4_extract(byte, 1), q1);
+            packed_row[i] = fp4_pack(nib0, nib1);
+        } else {
+            const unsigned char nib0 = apply_fixed_adjustment(quantize_fp4_scaled(q0), q0);
+            const unsigned char nib1 = apply_fixed_adjustment(quantize_fp4_scaled(q1), q1);
+            packed_row[i] = fp4_pack(nib0, nib1);
+        }
+#else
         const unsigned char nib0 = apply_fixed_adjustment(quantize_fp4_scaled(q0), q0);
         const unsigned char nib1 = apply_fixed_adjustment(quantize_fp4_scaled(q1), q1);
         packed_row[i] = fp4_pack(nib0, nib1);
+#endif
     }
 }
+
+#if USE_FP4_DME_PACK
+__global__ void mxfp4_pack_a_fixed_kernel_dme(
+    const __hip_bfloat16* __restrict__ a,
+    unsigned char* __restrict__ a_packed,
+    uint8_t* __restrict__ a_scale,
+    int m,
+    int k,
+    int packed_stride,
+    int scale_stride
+) {
+    const int row = blockIdx.y;
+    const int scale_block = blockIdx.x * blockDim.x + threadIdx.x;
+    const int num_scale_blocks = k / 32;
+    if (row >= m || scale_block >= num_scale_blocks) {
+        return;
+    }
+
+    const int col0 = scale_block * 32;
+    const __hip_bfloat16* a_row_base = a + row * k;
+
+    __shared__ __align__(4) __hip_bfloat16 a_tile[128][32];
+    __hip_bfloat16* a_tile_row = &a_tile[threadIdx.x][0];
+    const i32x4_t srsrc = make_srsrc(a_row_base, static_cast<uint32_t>(k * sizeof(__hip_bfloat16)));
+    #pragma unroll
+    for (int chunk = 0; chunk < 4; ++chunk) {
+        const int byte_offset = (col0 + chunk * 8) * static_cast<int>(sizeof(__hip_bfloat16));
+        const __uint128_t raw = llvm_amdgcn_raw_buffer_load_b128(srsrc, byte_offset, 0, 0);
+        *reinterpret_cast<i32x4_t*>(a_tile_row + chunk * 8) = *reinterpret_cast<const i32x4_t*>(&raw);
+    }
+    asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+    const __hip_bfloat16* a_src = a_tile_row;
+
+    float amax = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) {
+        amax = fmaxf(amax, fabsf(static_cast<float>(a_src[i])));
+    }
+
+    uint8_t scale_byte = 0;
+    float quant_scale = 1.0f;
+    if (amax > 0.0f) {
+        const unsigned int rounded_bits = (__builtin_bit_cast(unsigned int, amax) + 0x200000u) & 0xFF800000u;
+        const unsigned int rounded_exp = (rounded_bits >> 23) & 0xFFu;
+        scale_byte = static_cast<uint8_t>(rounded_exp - 2u);
+        const int scale_unbiased = static_cast<int>(scale_byte) - 127;
+        quant_scale = ldexpf(1.0f, -scale_unbiased);
+    }
+    a_scale[row * scale_stride + scale_block] = scale_byte;
+
+    const float scale_f = fp4_scale_from_e8m0(scale_byte);
+    const bool use_builtin_bf16 = (USE_FP4_BUILTIN_BF16_PACK != 0) && (m == 16) && (HAS_CVT_SCALE_FP4_BF16 != 0);
+    const bool use_builtin_f32 = (USE_FP4_BUILTIN_PACK != 0) && (m == 16) && (HAS_CVT_SCALE_FP4_F32 != 0);
+    unsigned char* packed_row = a_packed + row * packed_stride + scale_block * 16;
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const float src0 = static_cast<float>(a_src[2 * i + 0]);
+        const float src1 = static_cast<float>(a_src[2 * i + 1]);
+        const float q0 = src0 * quant_scale;
+        const float q1 = src1 * quant_scale;
+#if HAS_CVT_SCALE_FP4_BF16
+        if (use_builtin_bf16) {
+            const bf16x2_t src = *reinterpret_cast<const bf16x2_t*>(a_src + 2 * i);
+            unsigned int packed = cvt_scalef32_pk_fp4_bf16<0>(0u, src, scale_f);
+            unsigned char byte = static_cast<unsigned char>(packed & 0xFFu);
+            unsigned char nib0 = apply_fixed_adjustment(fp4_extract(byte, 0), q0);
+            unsigned char nib1 = apply_fixed_adjustment(fp4_extract(byte, 1), q1);
+            packed_row[i] = fp4_pack(nib0, nib1);
+        } else
+#endif
+#if HAS_CVT_SCALE_FP4_F32
+        if (use_builtin_f32) {
+            unsigned int packed = cvt_scalef32_pk_fp4_f32<0>(0u, src0, src1, scale_f);
+            unsigned char byte = static_cast<unsigned char>(packed & 0xFFu);
+            unsigned char nib0 = apply_fixed_adjustment(fp4_extract(byte, 0), q0);
+            unsigned char nib1 = apply_fixed_adjustment(fp4_extract(byte, 1), q1);
+            packed_row[i] = fp4_pack(nib0, nib1);
+        } else {
+            const unsigned char nib0 = apply_fixed_adjustment(quantize_fp4_scaled(q0), q0);
+            const unsigned char nib1 = apply_fixed_adjustment(quantize_fp4_scaled(q1), q1);
+            packed_row[i] = fp4_pack(nib0, nib1);
+        }
+#else
+        const unsigned char nib0 = apply_fixed_adjustment(quantize_fp4_scaled(q0), q0);
+        const unsigned char nib1 = apply_fixed_adjustment(quantize_fp4_scaled(q1), q1);
+        packed_row[i] = fp4_pack(nib0, nib1);
+#endif
+    }
+}
+#endif
 
 void mxfp4_pack_a_fixed(torch::Tensor a, torch::Tensor a_packed, torch::Tensor a_scale) {
     const int m = static_cast<int>(a.size(0));
@@ -454,6 +766,25 @@ void mxfp4_pack_a_fixed(torch::Tensor a, torch::Tensor a_packed, torch::Tensor a
 
     dim3 block(128);
     dim3 grid((k / 32 + block.x - 1) / block.x, m);
+#if USE_FP4_DME_PACK
+    if ((USE_FP4_DME_PACK != 0) && (m == 16)) {
+        hipLaunchKernelGGL(
+            mxfp4_pack_a_fixed_kernel_dme,
+            grid,
+            block,
+            0,
+            0,
+            reinterpret_cast<const __hip_bfloat16*>(a.data_ptr<at::BFloat16>()),
+            reinterpret_cast<unsigned char*>(a_packed.data_ptr<uint8_t>()),
+            reinterpret_cast<uint8_t*>(a_scale.data_ptr<uint8_t>()),
+            m,
+            k,
+            static_cast<int>(a_packed.size(1)),
+            static_cast<int>(a_scale.size(1))
+        );
+        return;
+    }
+#endif
     hipLaunchKernelGGL(
         mxfp4_pack_a_fixed_kernel,
         grid,
@@ -1890,6 +2221,8 @@ void mxfp4_mm_hip(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
 }
 """
 
+HIP_SRC = f"#define USE_FP4_BUILTIN_PACK {USE_FP4_BUILTIN_PACK}\n#define USE_FP4_BUILTIN_BF16_PACK {USE_FP4_BUILTIN_BF16_PACK}\n#define USE_FP4_DME_PACK {USE_FP4_DME_PACK}\n#define PACK_DEBUG_COMPARE {PACK_DEBUG_COMPARE}\n" + HIP_SRC
+
 _MODULE = None
 _TRITON_QUANT = None
 _ROCTX_LIB = None
@@ -1983,7 +2316,7 @@ def _module():
             name=module_name,
             cpp_sources=[CPP_WRAPPER],
             cuda_sources=[HIP_SRC],
-            functions=["mxfp4_mm_hip", "mxfp4_mm_hip_mfma_medium", "mxfp4_mm_hip_mfma_scale_exact_m16", "mxfp4_mm_hip_mfma_scale_exact_m16_dense", "mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry_owned", "mxfp4_mm_hip_mfma_scale_exact_m32", "mxfp4_mm_hip_mfma_scale_exact_m32_only", "mxfp4_mm_hip_mfma_scale_exact_m32_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m64_only", "mxfp4_mm_hip_mfma_scale_exact_m64_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m256_only", "mxfp4_mm_hip_mfma_scale_exact_m256_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m32_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m64_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m256_direct_entry", "mxfp4_pack_a_fixed", "mxfp4_repack_b_packed", "mxfp4_pack_b_m32_direct", "mxfp4_pack_b_m32_direct_with_scale", "mxfp4_unshuffle_b_scale"],
+            functions=["mxfp4_mm_hip", "mxfp4_mm_hip_mfma_medium", "mxfp4_mm_hip_mfma_scale_exact_m16", "mxfp4_mm_hip_mfma_scale_exact_m16_dense", "mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale", "mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4_dense", "mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry_owned", "mxfp4_mm_hip_mfma_scale_exact_m32", "mxfp4_mm_hip_mfma_scale_exact_m32_only", "mxfp4_mm_hip_mfma_scale_exact_m32_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m64_only", "mxfp4_mm_hip_mfma_scale_exact_m64_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m256_only", "mxfp4_mm_hip_mfma_scale_exact_m256_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m32_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m64_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m256_direct_entry", "mxfp4_pack_a_fixed", "mxfp4_repack_b_packed", "mxfp4_pack_b_m32_direct", "mxfp4_pack_b_m32_direct_with_scale", "mxfp4_unshuffle_b_scale"],
             extra_cuda_cflags=["--offload-arch=gfx950", "-std=c++20", "-O3", "-I/home/runner/aiter/csrc/include"],
             build_directory=str(build_root),
             verbose=False,
@@ -2225,6 +2558,36 @@ def _get_a_contract_mfma_fp4(
     return a_packed, a_scale.contiguous().view(torch.uint8)
 
 
+def _debug_compare_pack(
+    a_in: torch.Tensor,
+    a_packed: torch.Tensor,
+    a_scale: torch.Tensor,
+) -> None:
+    if not PACK_DEBUG_COMPARE:
+        return
+    rows = min(int(a_in.shape[0]), 4)
+    cols = min(int(a_in.shape[1]), 256)
+    cols = (cols // SCALE_GROUP) * SCALE_GROUP
+    if rows == 0 or cols == 0:
+        return
+    a_slice = a_in[:rows, :cols]
+    ref_packed, ref_scale = _get_a_contract_mfma_fp4(a_slice, None, None, None)
+    ref_packed = ref_packed.view(torch.uint8).flatten()
+    ref_scale = ref_scale.view(torch.uint8).flatten()
+    tgt_packed = a_packed[:rows, : cols // 2]
+    tgt_scale = a_scale[:rows, : cols // SCALE_GROUP]
+    if ref_packed.numel() < tgt_packed.numel() or ref_scale.numel() < tgt_scale.numel():
+        raise AssertionError("mxfp4_pack_a_fixed debug compare: reference buffer too small")
+    ref_packed = ref_packed[: tgt_packed.numel()].view_as(tgt_packed)
+    ref_scale = ref_scale[: tgt_scale.numel()].view_as(tgt_scale)
+    packed_mismatch = int((ref_packed != tgt_packed).sum().item())
+    scale_mismatch = int((ref_scale != tgt_scale).sum().item())
+    if packed_mismatch or scale_mismatch:
+        raise AssertionError(
+            f"mxfp4_pack_a_fixed mismatch: packed={packed_mismatch} scale={scale_mismatch}"
+        )
+
+
 def _get_a_contract_mfma_fp4_compiled(
     a: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2232,6 +2595,7 @@ def _get_a_contract_mfma_fp4_compiled(
     a_packed = torch.empty((a_in.shape[0], a_in.shape[1] // 2), dtype=torch.uint8, device=a_in.device)
     a_scale = torch.empty((a_in.shape[0], a_in.shape[1] // SCALE_GROUP), dtype=torch.uint8, device=a_in.device)
     _module().mxfp4_pack_a_fixed(a_in, a_packed, a_scale)
+    _debug_compare_pack(a_in, a_packed, a_scale)
     return a_packed, a_scale
 
 
@@ -2334,21 +2698,74 @@ def _select_kernel_regime(m: int, k: int) -> str:
     return "fallback"
 
 
+def _unpack_inputs(data: input_t):
+    if isinstance(data, (tuple, list)):
+        if len(data) == 5:
+            a0 = data[0]
+            if isinstance(a0, (tuple, list)) and len(a0) == 2:
+                a_packed, a_scale = a0
+                b, b_q, b_shuffle, b_scale_sh = data[1:]
+                return None, a_packed, a_scale, b, b_q, b_shuffle, b_scale_sh
+            a, b, b_q, b_shuffle, b_scale_sh = data
+            return a, None, None, b, b_q, b_shuffle, b_scale_sh
+        if len(data) == 6:
+            a_packed, a_scale, b, b_q, b_shuffle, b_scale_sh = data
+            return None, a_packed, a_scale, b, b_q, b_shuffle, b_scale_sh
+        if len(data) == 7:
+            a, a_packed, a_scale, b, b_q, b_shuffle, b_scale_sh = data
+            return a, a_packed, a_scale, b, b_q, b_shuffle, b_scale_sh
+    raise AssertionError("mxfp4_mm: expected 5-7 inputs (raw A or prepacked A)")
+
+
+def _normalize_prepacked_a(a_packed: torch.Tensor | None, a_scale: torch.Tensor | None):
+    if a_packed is None or a_scale is None:
+        return None, None
+    torch._assert(a_packed.dtype == torch.uint8, "prepacked A must be uint8")
+    torch._assert(a_scale.dtype == torch.uint8, "prepacked A scale must be uint8")
+    a_packed_u8 = a_packed.contiguous().view(torch.uint8)
+    a_scale_u8 = a_scale.contiguous().view(torch.uint8)
+    return a_packed_u8, a_scale_u8
+
+
+def _infer_a_shape(a: torch.Tensor | None, a_packed_u8: torch.Tensor | None) -> tuple[int, int]:
+    if a is not None:
+        return int(a.shape[0]), int(a.shape[1])
+    if a_packed_u8 is not None:
+        return int(a_packed_u8.shape[0]), int(a_packed_u8.shape[1]) * 2
+    raise AssertionError("mxfp4_mm: A input missing")
+
+
+def _dequant_a_from_prepacked(a_packed_u8: torch.Tensor, a_scale_u8: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+    a_vals = fp4_utils.mxfp4_to_f32(a_packed_u8.contiguous())[:rows, :cols].to(torch.float32)
+    a_scale_f32 = _expand_scales(a_scale_u8, rows=rows, cols=cols)
+    return (a_vals * a_scale_f32).contiguous()
+
+
 def custom_kernel(data: input_t) -> output_t:
-    a, b, b_q, b_shuffle, b_scale_sh = data
+    a, a_packed_in, a_scale_in, b, b_q, b_shuffle, b_scale_sh = _unpack_inputs(data)
+    a_packed_u8, a_scale_u8 = _normalize_prepacked_a(a_packed_in, a_scale_in)
+    a_rows, a_cols = _infer_a_shape(a, a_packed_u8)
+    if a is not None and a_packed_u8 is not None:
+        torch._assert(a_rows == int(a_packed_u8.shape[0]), "prepacked A rows must match raw A")
+        torch._assert(a_cols == int(a_packed_u8.shape[1]) * 2, "prepacked A K must match raw A")
+    if a_scale_u8 is not None:
+        torch._assert(a_scale_u8.shape[0] == a_rows, "prepacked A scale rows must match A")
+        torch._assert(a_scale_u8.shape[1] == (a_cols // SCALE_GROUP), "prepacked A scale cols must match A")
+    use_prepacked_a = (a_packed_u8 is not None and a_scale_u8 is not None)
+    a_device = a.device if a is not None else (a_packed_u8.device if a_packed_u8 is not None else b.device)
     with _roctx_range("mxfp4/custom_kernel"):
-        _phase("enter_custom_kernel", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-        exact_tiny_m = a.shape[0] in (4, 8)
+        _phase("enter_custom_kernel", m=a_rows, k=a_cols, n=int(b.shape[0]), prepacked_a=bool(use_prepacked_a))
+        exact_tiny_m = (a is not None and a.shape[0] in (4, 8)) or (a is None and a_rows in (4, 8))
         torch._assert(b_q.shape[0] == b.shape[0], "B_q row count must match logical B")
         torch._assert(b_shuffle.shape[0] == b.shape[0], "B_shuffle row count must match logical B")
         torch._assert(b_scale_sh.numel() > 0, "B_scale_sh must be present for the live contract")
-        if a.shape[0] == 256 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
+        if a_rows == 256 and (a_cols % 64) == 0 and (b.shape[0] % 32) == 0:
             with _roctx_range("mxfp4/exact_m256"):
                 _phase("path_exact_m256")
                 mod = _module()
                 _phase("post_module_return", path="exact_m256")
                 with _roctx_range("mxfp4/exact_m256/b_prep"):
-                    _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+                    _phase("pre_b_prep", m=a_rows, k=a_cols, n=int(b.shape[0]))
                     b_q_u8 = b_q.contiguous().view(torch.uint8)
                     b_scale_u8 = b_scale_sh.contiguous().view(torch.uint8)
                     b_scale = torch.empty(
@@ -2358,11 +2775,17 @@ def custom_kernel(data: input_t) -> output_t:
                     )
                     mod.mxfp4_unshuffle_b_scale(b_scale_u8, b_scale)
                     _phase("post_b_prep", b_q_shape=list(b_q_u8.shape), b_scale_shape=list(b_scale.shape))
-                with _roctx_range("mxfp4/exact_m256/a_pack"):
-                    _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-                    a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m256(a)
+                if use_prepacked_a:
+                    a_packed = a_packed_u8
+                    a_scale = a_scale_u8
+                    _phase("pre_a_pack_scale_prep", m=a_rows, k=a_cols, n=int(b.shape[0]), prepacked=True)
                     _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
-                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                else:
+                    with _roctx_range("mxfp4/exact_m256/a_pack"):
+                        _phase("pre_a_pack_scale_prep", m=a_rows, k=a_cols, n=int(b.shape[0]))
+                        a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m256(a)
+                        _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
+                c = torch.empty((a_rows, b.shape[0]), dtype=torch.bfloat16, device=a_device)
                 _phase("post_output_alloc", c_shape=list(c.shape))
                 inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
                 inflight.append((a_packed, a_scale, b_q_u8, b_scale))
@@ -2373,13 +2796,13 @@ def custom_kernel(data: input_t) -> output_t:
                     mod.mxfp4_mm_hip_mfma_scale_exact_m256_rawb_only(a_packed, b_q_u8, a_scale, b_scale, c)
                     _phase("post_wrapper_return", chunked=False)
                 return c
-        if a.shape[0] == 64 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
+        if a_rows == 64 and (a_cols % 64) == 0 and (b.shape[0] % 32) == 0:
             with _roctx_range("mxfp4/exact_m64"):
                 _phase("path_exact_m64")
                 mod = _module()
                 _phase("post_module_return", path="exact_m64")
                 with _roctx_range("mxfp4/exact_m64/b_prep"):
-                    _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+                    _phase("pre_b_prep", m=a_rows, k=a_cols, n=int(b.shape[0]))
                     b_q_u8 = b_q.contiguous().view(torch.uint8)
                     b_scale_u8 = b_scale_sh.contiguous().view(torch.uint8)
                     b_scale = torch.empty(
@@ -2389,11 +2812,17 @@ def custom_kernel(data: input_t) -> output_t:
                     )
                     mod.mxfp4_unshuffle_b_scale(b_scale_u8, b_scale)
                     _phase("post_b_prep", b_q_shape=list(b_q_u8.shape), b_scale_shape=list(b_scale.shape))
-                with _roctx_range("mxfp4/exact_m64/a_pack"):
-                    _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-                    a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m64(a)
+                if use_prepacked_a:
+                    a_packed = a_packed_u8
+                    a_scale = a_scale_u8
+                    _phase("pre_a_pack_scale_prep", m=a_rows, k=a_cols, n=int(b.shape[0]), prepacked=True)
                     _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
-                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                else:
+                    with _roctx_range("mxfp4/exact_m64/a_pack"):
+                        _phase("pre_a_pack_scale_prep", m=a_rows, k=a_cols, n=int(b.shape[0]))
+                        a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m64(a)
+                        _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
+                c = torch.empty((a_rows, b.shape[0]), dtype=torch.bfloat16, device=a_device)
                 _phase("post_output_alloc", c_shape=list(c.shape))
                 inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
                 inflight.append((a_packed, a_scale, b_q_u8, b_scale))
@@ -2404,13 +2833,13 @@ def custom_kernel(data: input_t) -> output_t:
                     mod.mxfp4_mm_hip_mfma_scale_exact_m64_rawb_only(a_packed, b_q_u8, a_scale, b_scale, c)
                     _phase("post_wrapper_return", chunked=False)
                 return c
-        if a.shape[0] == 32 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
+        if a_rows == 32 and (a_cols % 64) == 0 and (b.shape[0] % 32) == 0:
             with _roctx_range("mxfp4/exact_m32"):
                 _phase("path_exact_m32")
                 mod = _module()
                 _phase("post_module_return", path="exact_m32")
                 with _roctx_range("mxfp4/exact_m32/b_prep"):
-                    _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+                    _phase("pre_b_prep", m=a_rows, k=a_cols, n=int(b.shape[0]))
                     b_q_u8 = b_q.contiguous().view(torch.uint8)
                     b_scale_u8 = b_scale_sh.contiguous().view(torch.uint8)
                     b_scale = torch.empty(
@@ -2420,11 +2849,17 @@ def custom_kernel(data: input_t) -> output_t:
                     )
                     mod.mxfp4_unshuffle_b_scale(b_scale_u8, b_scale)
                     _phase("post_b_prep", b_q_shape=list(b_q_u8.shape), b_scale_shape=list(b_scale.shape))
-                with _roctx_range("mxfp4/exact_m32/a_pack"):
-                    _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-                    a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m32(a)
+                if use_prepacked_a:
+                    a_packed = a_packed_u8
+                    a_scale = a_scale_u8
+                    _phase("pre_a_pack_scale_prep", m=a_rows, k=a_cols, n=int(b.shape[0]), prepacked=True)
                     _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
-                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                else:
+                    with _roctx_range("mxfp4/exact_m32/a_pack"):
+                        _phase("pre_a_pack_scale_prep", m=a_rows, k=a_cols, n=int(b.shape[0]))
+                        a_packed, a_scale = _get_a_contract_mfma_fp4_compiled_exact_m32(a)
+                        _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
+                c = torch.empty((a_rows, b.shape[0]), dtype=torch.bfloat16, device=a_device)
                 _phase("post_output_alloc", c_shape=list(c.shape))
                 inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
                 inflight.append((a_packed, a_scale, b_q_u8, b_scale))
@@ -2435,17 +2870,24 @@ def custom_kernel(data: input_t) -> output_t:
                     mod.mxfp4_mm_hip_mfma_scale_exact_m32_rawb_only(a_packed, b_q_u8, a_scale, b_scale, c)
                     _phase("post_wrapper_return", chunked=False)
                 return c
-        if a.shape[0] >= 32 and (a.shape[0] % 32) == 0 and (a.shape[1] % 64) == 0 and (b.shape[0] % 32) == 0:
-            _phase("path_direct_m32_other_multiples32", rows=int(a.shape[0]))
+        wide_lane_ok = (a is not None and a.shape[0] >= 32) or (a is None and a_rows >= 32)
+        if wide_lane_ok and (a_rows % 32) == 0 and (a_cols % 64) == 0 and (b.shape[0] % 32) == 0:
+            _phase("path_direct_m32_other_multiples32", rows=a_rows)
             mod = _module()
             _phase("post_module_return", path="direct_m32_other_multiples32")
-            _phase("pre_b_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
+            _phase("pre_b_prep", m=a_rows, k=a_cols, n=int(b.shape[0]))
             b_packed, b_scale = _get_b_contract_mfma_fp4_live_m32_direct(b_q, b_scale_sh)
             _phase("post_b_prep", b_packed_shape=list(b_packed.shape), b_scale_shape=list(b_scale.shape))
-            _phase("pre_a_pack_scale_prep", m=int(a.shape[0]), k=int(a.shape[1]), n=int(b.shape[0]))
-            a_packed, a_scale = _get_a_contract_mfma_fp4_compiled(a)
-            _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
-            c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+            if use_prepacked_a:
+                a_packed = a_packed_u8
+                a_scale = a_scale_u8
+                _phase("pre_a_pack_scale_prep", m=a_rows, k=a_cols, n=int(b.shape[0]), prepacked=True)
+                _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
+            else:
+                _phase("pre_a_pack_scale_prep", m=a_rows, k=a_cols, n=int(b.shape[0]))
+                a_packed, a_scale = _get_a_contract_mfma_fp4_compiled(a)
+                _phase("post_a_pack_scale_prep", packed_shape=list(a_packed.shape), scale_shape=list(a_scale.shape))
+            c = torch.empty((a_rows, b.shape[0]), dtype=torch.bfloat16, device=a_device)
             _phase("post_output_alloc", c_shape=list(c.shape))
             inflight = globals().setdefault("_MFMA_SCALE_INFLIGHT", [])
             inflight.append((a_packed, a_scale, b_packed, b_scale))
@@ -2455,59 +2897,104 @@ def custom_kernel(data: input_t) -> output_t:
             mod.mxfp4_mm_hip_mfma_scale_exact_m32(a_packed, b_packed, a_scale, b_scale, c)
             _phase("post_wrapper_return", chunked=False)
             return c
-        if a.shape[0] == 16 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:
+        m16_gate_ok = (a is not None and a.shape[0] == 16) or (a is None and a_rows == 16)
+        if m16_gate_ok and (a_cols % 128) == 0 and (b.shape[0] % 16) == 0:
             with _roctx_range("mxfp4/exact_m16"):
                 _phase("path_direct_m16")
                 mod = _module()
                 _phase("post_module_return", path="direct_m16")
-                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                c = torch.empty((a_rows, b.shape[0]), dtype=torch.bfloat16, device=a_device)
                 _phase("post_output_alloc", c_shape=list(c.shape))
                 with _roctx_range("mxfp4/exact_m16/kernel_launch"):
                     _phase("pre_direct_kernel_launch", chunked=False)
-                    mod.mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry(
-                        a.contiguous(),
-                        b_q.contiguous().view(torch.uint8),
-                        b_scale_sh.contiguous().view(torch.uint8),
-                        c,
-                    )
+                    if use_prepacked_a:
+                        b_q_u8 = b_q.contiguous().view(torch.uint8)
+                        b_scale_u8 = b_scale_sh.contiguous().view(torch.uint8)
+                        mod.mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale(
+                            a_packed_u8,
+                            b_q_u8,
+                            a_scale_u8,
+                            b_scale_u8,
+                            c,
+                        )
+                    else:
+                        mod.mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry(
+                            a.contiguous(),
+                            b_q.contiguous().view(torch.uint8),
+                            b_scale_sh.contiguous().view(torch.uint8),
+                            c,
+                        )
                     _phase("post_wrapper_return", chunked=False)
                 return c
-        if a.shape[0] == 8 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:
+        if a_rows == 8 and (a_cols % 128) == 0 and (b.shape[0] % 16) == 0:
             with _roctx_range("mxfp4/exact_m8"):
                 _phase("path_exact_m8")
                 mod = _module()
                 _phase("post_module_return", path="exact_m8")
-                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                c = torch.empty((a_rows, b.shape[0]), dtype=torch.bfloat16, device=a_device)
                 _phase("post_output_alloc", c_shape=list(c.shape))
                 with _roctx_range("mxfp4/exact_m8/kernel_launch"):
                     _phase("pre_direct_kernel_launch", chunked=False)
-                    mod.mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry(
-                        a.contiguous(),
-                        b_q.contiguous().view(torch.uint8),
-                        b_scale_sh.contiguous().view(torch.uint8),
-                        c,
-                    )
+                    if use_prepacked_a:
+                        b_q_u8 = b_q.contiguous().view(torch.uint8)
+                        b_scale_u8 = b_scale_sh.contiguous().view(torch.uint8)
+                        b_scale = torch.empty(
+                            (b_q_u8.shape[0], (b_q_u8.shape[1] * 2) // SCALE_GROUP),
+                            dtype=torch.uint8,
+                            device=b_q_u8.device,
+                        )
+                        mod.mxfp4_unshuffle_b_scale(b_scale_u8, b_scale)
+                        mod.mxfp4_mm_hip_mfma_scale_exact_m16(
+                            a_packed_u8,
+                            b_q_u8,
+                            a_scale_u8,
+                            b_scale,
+                            c,
+                        )
+                    else:
+                        mod.mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry(
+                            a.contiguous(),
+                            b_q.contiguous().view(torch.uint8),
+                            b_scale_sh.contiguous().view(torch.uint8),
+                            c,
+                        )
                     _phase("post_wrapper_return", chunked=False)
                 return c
-        if a.shape[0] == 4 and (a.shape[1] % 128) == 0 and (b.shape[0] % 16) == 0:
+        if a_rows == 4 and (a_cols % 128) == 0 and (b.shape[0] % 16) == 0:
             with _roctx_range("mxfp4/exact_m4"):
                 _phase("path_exact_m4")
                 mod = _module()
                 _phase("post_module_return", path="exact_m4")
-                c = torch.empty((a.shape[0], b.shape[0]), dtype=torch.bfloat16, device=a.device)
+                c = torch.empty((a_rows, b.shape[0]), dtype=torch.bfloat16, device=a_device)
                 _phase("post_output_alloc", c_shape=list(c.shape))
                 with _roctx_range("mxfp4/exact_m4/kernel_launch"):
                     _phase("pre_direct_kernel_launch", chunked=False)
-                    mod.mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry(
-                        a.contiguous(),
-                        b_q.contiguous().view(torch.uint8),
-                        b_scale_sh.contiguous().view(torch.uint8),
-                        c,
-                    )
+                    if use_prepacked_a:
+                        b_q_u8 = b_q.contiguous().view(torch.uint8)
+                        b_scale_u8 = b_scale_sh.contiguous().view(torch.uint8)
+                        mod.mxfp4_mm_hip_mfma_scale_exact_m4_dense(
+                            a_packed_u8,
+                            b_q_u8,
+                            a_scale_u8,
+                            b_scale_u8,
+                            c,
+                        )
+                    else:
+                        mod.mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry(
+                            a.contiguous(),
+                            b_q.contiguous().view(torch.uint8),
+                            b_scale_sh.contiguous().view(torch.uint8),
+                            c,
+                        )
                     _phase("post_wrapper_return", chunked=False)
                 return c
         _phase("pre_reference_oracle_inputs")
-        a_in, b_in = _reference_oracle_inputs(a, b, b_q, b_scale_sh)
+        if a is None:
+            torch._assert(use_prepacked_a, "prepacked A required when raw A is absent")
+            a_ref_src = _dequant_a_from_prepacked(a_packed_u8, a_scale_u8, a_rows, a_cols)
+        else:
+            a_ref_src = a
+        a_in, b_in = _reference_oracle_inputs(a_ref_src, b, b_q, b_scale_sh)
         _phase("post_reference_oracle_inputs", a_ref_shape=list(a_in.shape), b_ref_shape=list(b_in.shape))
         regime = _select_kernel_regime(a_in.shape[0], a_in.shape[1])
         use_mfma_medium = (
@@ -2576,3 +3063,6 @@ def _selftest_fuse_a_pack() -> None:
         torch.testing.assert_close(c_fused, out_ref, rtol=0, atol=0)
 
 
+if __name__ == "__main__":
+    if os.environ.get("MXFP4_FUSE_A_PACK_SELFTEST", "0") == "1":
+        _selftest_fuse_a_pack()
