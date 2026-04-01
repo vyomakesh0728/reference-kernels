@@ -2546,3 +2546,33 @@ def custom_kernel(data: input_t) -> output_t:
         _phase("pre_shared_module_call", path="default_scalar_hip")
         _module().mxfp4_mm_hip(a_in, b_in, c)
         return c
+
+
+def _selftest_fuse_a_pack() -> None:
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        print("SKIP: no HIP GPU")
+        return
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    k = 128
+    n = 256
+    b = torch.randn((n, k), device=device, dtype=dtype)
+    b_q, b_scale_sh = _quant()(b, shuffle=True)
+    b_q_u8 = b_q.contiguous().view(torch.uint8)
+    b_scale_sh_u8 = b_scale_sh.contiguous().view(torch.uint8)
+    b_shuffle = torch.empty_like(b_q_u8)
+    mod = _module()
+    for m in (4, 8, 16):
+        a = torch.randn((m, k), device=device, dtype=dtype)
+        out_ref = custom_kernel((a, b, b_q_u8, b_shuffle, b_scale_sh_u8))
+        c_fused = torch.empty((m, n), device=device, dtype=dtype)
+        mod.mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale_fuseda(
+            a,
+            b_q_u8,
+            b_scale_sh_u8,
+            c_fused,
+        )
+        torch.testing.assert_close(c_fused, out_ref, rtol=0, atol=0)
+
+
