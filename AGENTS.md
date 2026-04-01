@@ -4,6 +4,46 @@
 Beat the aiter library baselines on all three AMD MI355X kernel problems
 by writing faster Triton (or HIP) kernels submitted through popcorn-cli.
 
+## After context reset (compaction / new session)
+
+1. Read **this file** (`AGENTS.md`), especially **Popcorn eval loop** and **Iteration log (HISTORY.md)** below.
+2. Open **`HISTORY.md`** at repo root for the latest iteration notes and patterns not to repeat.
+3. For mixed-mla team notes and MFMA direction, see **`CLAUDE.md`** (if present).
+4. For low-level kernel optimization, see **`docs/mi355x_isa_reference.md`** (MFMA, memory ops, conversions, novel techniques).
+5. **Codex CLI:** start at **`codex.md`** in the repo root (pointer to this file).
+
+## Popcorn eval loop (do not skip)
+
+Remote GPU only—no local MI355X.
+
+| Mode | Use | Rate limit |
+|------|-----|------------|
+| **`test`** | Correctness first; default after code changes | Unlimited |
+| **`benchmark`** | Official **8 shapes**, timing table; **geomean = (∏ mean_i)^(1/8)** in one unit (not printed—compute yourself) | Unlimited |
+| **`leaderboard`** | **Published** aggregate / rank; same per-shape protocol, server applies `ranking_by` from `task.yml` | Typically **1/hour**—reserve for “ship it” |
+
+**Rule:** **`test` → `benchmark` → `leaderboard`**. Do not iterate on `leaderboard` for tuning.
+
+Example:
+
+```bash
+popcorn-cli submit --gpu MI355X --leaderboard amd-mixed-mla --mode test --no-tui problems/amd_202602/mixed-mla/submission.py
+popcorn-cli submit --gpu MI355X --leaderboard amd-mixed-mla --mode benchmark --no-tui problems/amd_202602/mixed-mla/submission.py
+```
+
+## Iteration log (`HISTORY.md`)
+
+Maintain **`HISTORY.md`** at the **repository root** (see template there). After any **meaningful** code change or **Popcorn** run you might compare later, add a dated section—**newest first** under `## Log`.
+
+**Required habits (so we don’t repeat mistakes across compactions):**
+
+1. **Log failures and dead ends** — not only wins. *“Tried X → failed / reverted because Y”* is often the highest-value row.
+2. **Evidence** — paste the **exact** `popcorn-cli …` line(s), **GitHub Actions / workflow URL** if the harness gives one, and **numbers**: test pass/fail, **mismatch_ratio** if any, benchmark **per-shape means** and/or **self-computed geomean**, leaderboard score if you ran it.
+3. **Rule / spec tension** — if the code **conflicts** with a stated rule (e.g. `AGENTS.md` “no cross-call caches” vs buffer reuse in `submission.py`), call it out: *what we do, why, or what we’ll fix.*
+4. **Next bet** — one line: *first experiment or file to try on the next session* so we don’t re-derive the roadmap from zero.
+
+This file is **institutional memory** when chat context is gone.
+
 ## Agent Workflow
 
 ### Reading a problem

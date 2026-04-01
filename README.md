@@ -15,6 +15,12 @@ You can see what's going on [gpumode.com](https://www.gpumode.com/)
 
 Please take a look at `vectoradd_py` to see multiple examples of expected submisisons ranging from PyTorch code to Triton to inline CUDA.
 
+## AI / agent workflow (AMD hackathon & kernel work)
+
+- **`AGENTS.md`** — canonical instructions, **Popcorn `test` → `benchmark` → `leaderboard`** loop, and rules for **`HISTORY.md`** (evidence, failures, next bet).
+- **`HISTORY.md`** — append **newest-first** iteration log so context compactions don’t erase patterns.
+- **`codex.md`** — entry point for **Codex CLI** (points here).
+- **`.cursor/rules/agents-history.mdc`** — Cursor always-on reminder to read the above.
 
 ## Contributing New Problems
 
