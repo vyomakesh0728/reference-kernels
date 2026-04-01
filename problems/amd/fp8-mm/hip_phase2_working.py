@@ -63,6 +63,7 @@ void mxfp4_mm_hip_mfma_medium(torch::Tensor a, torch::Tensor b, torch::Tensor c)
 void mxfp4_mm_hip_mfma_scale_exact_m16(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m16_dense(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale_sh, torch::Tensor c);
+void mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale_fuseda(torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scale_sh, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry(torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scale_sh, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m4_dense(torch::Tensor a_packed, torch::Tensor b_packed, torch::Tensor a_scale, torch::Tensor b_scale_sh, torch::Tensor c);
 void mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry(torch::Tensor a, torch::Tensor b_q, torch::Tensor b_scale_sh, torch::Tensor c);
@@ -1321,6 +1322,88 @@ __global__ void mxfp4_mm_kernel_mfma_scale_exact_m16_dense_rawscale(
     c[(out_row_base + 3) * n + out_col] = static_cast<__hip_bfloat16>(acc[3]);
 }
 
+__global__ void mxfp4_mm_kernel_mfma_scale_exact_m16_dense_rawscale_fuseda(
+    const __hip_bfloat16* __restrict__ a,
+    const unsigned char* __restrict__ b_q,
+    const uint8_t* __restrict__ b_scale_sh,
+    __hip_bfloat16* __restrict__ c,
+    int m,
+    int n,
+    int k,
+    int scale_cols,
+    int src_rows,
+    int src_cols
+) {
+    constexpr int MFMA_N = 16;
+    constexpr int MFMA_K = 128;
+
+    const int lane = static_cast<int>(__builtin_amdgcn_workitem_id_x());
+    const int tile_col = blockIdx.x * MFMA_N;
+    const int lane16 = lane & 15;
+    const int group4 = lane >> 4;
+    const int b_bytes_per_row = k / 2;
+    const bool a_active = lane16 < m;
+
+    union { i32x8_t v; unsigned char b[32]; } a_buf;
+    union { i32x8_t v; unsigned char b[32]; } b_buf;
+    floatx4 acc = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    const unsigned char* b_row_ptr = b_q + (tile_col + lane16) * b_bytes_per_row + group4 * 16;
+    const __hip_bfloat16* a_row_ptr = nullptr;
+    if (a_active) {
+        a_row_ptr = a + lane16 * k + group4 * 32;
+    }
+
+    for (int tile_k = 0; tile_k < k; tile_k += MFMA_K) {
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            a_buf.v[i] = 0;
+            b_buf.v[i] = 0;
+        }
+
+        int scale_a = (127 | (127 << 8) | (127 << 16) | (127 << 24));
+        if (a_active) {
+            uint8_t scale_byte = 0;
+            mxfp4_pack_a_group32(a_row_ptr, a_buf.b, &scale_byte, m);
+            scale_a = mxfp4_pack_scale_lane(scale_byte);
+        }
+
+        const unsigned char* ldg_b = b_row_ptr;
+        #pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            b_buf.b[i] = ldg_b[i];
+        }
+
+        const int scale_block = tile_k / 32;
+        const int scale_b = pack_scale_e8m0x4_lane_from_shuffled(
+            b_scale_sh,
+            n,
+            scale_cols,
+            src_rows,
+            src_cols,
+            tile_col + lane16,
+            scale_block,
+            group4
+        );
+        acc = __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(a_buf.v, b_buf.v, acc, 4, 4, 0, scale_a, 0, scale_b);
+
+        b_row_ptr += 64;
+        if (a_active) {
+            a_row_ptr += MFMA_K;
+        }
+    }
+
+    const int out_col = tile_col + lane16;
+    const int out_row_base = group4 * 4;
+    #pragma unroll
+    for (int row_i = 0; row_i < 4; ++row_i) {
+        const int out_row = out_row_base + row_i;
+        if (out_row < m && out_col < n) {
+            c[out_row * n + out_col] = static_cast<__hip_bfloat16>(acc[row_i]);
+        }
+    }
+}
+
 void mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale(
     torch::Tensor a_packed,
     torch::Tensor b_packed,
@@ -1353,6 +1436,45 @@ void mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale(
         scale_cols,
         static_cast<int>(b_scale_sh.size(0)),
         static_cast<int>(b_scale_sh.size(1))
+    );
+}
+
+void mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale_fuseda(
+    torch::Tensor a,
+    torch::Tensor b_q,
+    torch::Tensor b_scale_sh,
+    torch::Tensor c
+) {
+    auto a_in = a.contiguous();
+    auto b_q_u8 = b_q.contiguous();
+    auto b_scale_u8 = b_scale_sh.contiguous();
+    TORCH_CHECK(a_in.size(0) <= 16, "dense exact m16 fused-a path requires m <= 16");
+    TORCH_CHECK(b_q_u8.scalar_type() == torch::kUInt8, "b_q must be uint8-packed for fused-a thin m16 path");
+    TORCH_CHECK(b_scale_u8.scalar_type() == torch::kUInt8, "b_scale_sh must be uint8-packed for fused-a thin m16 path");
+
+    const int m = static_cast<int>(a_in.size(0));
+    const int n = static_cast<int>(c.size(1));
+    const int k = static_cast<int>(a_in.size(1));
+    const int scale_cols = k / 32;
+
+    dim3 block(64);
+    dim3 grid((n + 16 - 1) / 16, 1);
+    hipLaunchKernelGGL(
+        mxfp4_mm_kernel_mfma_scale_exact_m16_dense_rawscale_fuseda,
+        grid,
+        block,
+        0,
+        0,
+        reinterpret_cast<const __hip_bfloat16*>(a_in.data_ptr<at::BFloat16>()),
+        reinterpret_cast<unsigned char const*>(b_q_u8.data_ptr<uint8_t>()),
+        reinterpret_cast<uint8_t const*>(b_scale_u8.data_ptr<uint8_t>()),
+        reinterpret_cast<__hip_bfloat16*>(c.data_ptr<at::BFloat16>()),
+        m,
+        n,
+        k,
+        scale_cols,
+        static_cast<int>(b_scale_u8.size(0)),
+        static_cast<int>(b_scale_u8.size(1))
     );
 }
 
@@ -2320,7 +2442,7 @@ def _module():
             name=module_name,
             cpp_sources=[CPP_WRAPPER],
             cuda_sources=[HIP_SRC],
-            functions=["mxfp4_mm_hip", "mxfp4_mm_hip_mfma_medium", "mxfp4_mm_hip_mfma_scale_exact_m16", "mxfp4_mm_hip_mfma_scale_exact_m16_dense", "mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale", "mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4_dense", "mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry_owned", "mxfp4_mm_hip_mfma_scale_exact_m32", "mxfp4_mm_hip_mfma_scale_exact_m32_only", "mxfp4_mm_hip_mfma_scale_exact_m32_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m64_only", "mxfp4_mm_hip_mfma_scale_exact_m64_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m256_only", "mxfp4_mm_hip_mfma_scale_exact_m256_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m32_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m64_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m256_direct_entry", "mxfp4_pack_a_fixed", "mxfp4_repack_b_packed", "mxfp4_pack_b_m32_direct", "mxfp4_pack_b_m32_direct_with_scale", "mxfp4_unshuffle_b_scale"],
+            functions=["mxfp4_mm_hip", "mxfp4_mm_hip_mfma_medium", "mxfp4_mm_hip_mfma_scale_exact_m16", "mxfp4_mm_hip_mfma_scale_exact_m16_dense", "mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale", "mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale_fuseda", "mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4_dense", "mxfp4_mm_hip_mfma_scale_exact_m4_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m4m8_direct_entry_owned", "mxfp4_mm_hip_mfma_scale_exact_m32", "mxfp4_mm_hip_mfma_scale_exact_m32_only", "mxfp4_mm_hip_mfma_scale_exact_m32_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m64_only", "mxfp4_mm_hip_mfma_scale_exact_m64_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m256_only", "mxfp4_mm_hip_mfma_scale_exact_m256_rawb_only", "mxfp4_mm_hip_mfma_scale_exact_m32_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m64_direct_entry", "mxfp4_mm_hip_mfma_scale_exact_m256_direct_entry", "mxfp4_pack_a_fixed", "mxfp4_repack_b_packed", "mxfp4_pack_b_m32_direct", "mxfp4_pack_b_m32_direct_with_scale", "mxfp4_unshuffle_b_scale"],
             extra_cuda_cflags=["--offload-arch=gfx950", "-std=c++20", "-O3", "-I/home/runner/aiter/csrc/include"],
             build_directory=str(build_root),
             verbose=False,
