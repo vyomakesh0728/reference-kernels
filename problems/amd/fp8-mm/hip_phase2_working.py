@@ -1456,6 +1456,12 @@ void mxfp4_mm_hip_mfma_scale_exact_m16_dense_rawscale_fuseda(
     const int n = static_cast<int>(c.size(1));
     const int k = static_cast<int>(a_in.size(1));
     const int scale_cols = k / 32;
+    TORCH_CHECK((k % 128) == 0, "dense exact m16 fused-a path requires k to be divisible by 128");
+    TORCH_CHECK((n % 16) == 0, "dense exact m16 fused-a path requires n to be divisible by 16");
+    TORCH_CHECK(static_cast<int>(b_q_u8.size(0)) == n, "dense exact m16 fused-a path requires b_q rows == n");
+    TORCH_CHECK(static_cast<int>(b_q_u8.size(1)) * 2 == k, "dense exact m16 fused-a path requires b_q cols * 2 == k");
+    TORCH_CHECK(static_cast<int>(b_scale_u8.size(0)) >= n, "B scale source rows must cover logical rows");
+    TORCH_CHECK(static_cast<int>(b_scale_u8.size(1)) >= scale_cols, "B scale source cols must cover logical cols");
 
     dim3 block(64);
     dim3 grid((n + 16 - 1) / 16, 1);
