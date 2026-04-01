@@ -1,0 +1,35 @@
+{
+  "created_at": "2026-04-01T12:29:47.966543+00:00",
+  "family": "closed_loop_coordinator",
+  "gpu": "MI355X",
+  "harness_style": "kernelbench-v3-inspired",
+  "label": "native_scaled_exact_shape_m4_fixedcost_fastdispatch_t20-benchmark",
+  "leaderboard": "amd-mxfp4-mm",
+  "problem": "mxfp4_mm",
+  "source_path": "/Users/v/reference-kernels/problems/amd/fp8-mm/submission.py",
+  "stages": [
+    {
+      "candidate_cards_path": null,
+      "failure_kind": null,
+      "failure_signature": null,
+      "finished_at": "2026-04-01T12:33:40.645987+00:00",
+      "mismatch_count": null,
+      "name": "benchmark",
+      "objective": 14509.155592768499,
+      "parsed_metrics_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-122947-native-scaled-exact-shape-m4-fixedcost-fastdispatch-t20-benchmark/stages/01_benchmark/parsed_metrics.json",
+      "profile_raw_artifact_paths": null,
+      "profile_summary_path": null,
+      "result_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-122947-native-scaled-exact-shape-m4-fixedcost-fastdispatch-t20-benchmark/stages/01_benchmark/result.txt",
+      "return_code": 0,
+      "started_at": "2026-04-01T12:29:47.967968+00:00",
+      "status": "ok",
+      "stderr_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-122947-native-scaled-exact-shape-m4-fixedcost-fastdispatch-t20-benchmark/stages/01_benchmark/stderr.txt",
+      "stdout_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-122947-native-scaled-exact-shape-m4-fixedcost-fastdispatch-t20-benchmark/stages/01_benchmark/stdout.txt",
+      "target": "kernelbot-benchmark",
+      "wall_time_seconds": 232.670378292,
+      "workflow_url": "https://github.com/gpu-mode/kernelbot/actions/runs/23848620457"
+    }
+  ],
+  "submission_copy": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-122947-native-scaled-exact-shape-m4-fixedcost-fastdispatch-t20-benchmark/submission.py",
+  "variant": null
+}

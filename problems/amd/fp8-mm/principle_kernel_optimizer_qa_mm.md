@@ -210,3 +210,6 @@ For BMM / alternate small-shape instruction family:
 - `v108` adds the next systems lesson:
   - the multiplier path is also **not** “turn the whole thin tile grid into one cooperative group”
   - a candidate must clear work law, reuse law, parallelism floor, and execution-model safety before it deserves another remote slot
+- `v109` adds the next performance lesson:
+  - the multiplier path is also **not** “use a heavier 192-thread block-local owner and hope correctness implies speed”
+  - the next legal `A-pack` candidate must preserve the cheap consumer hot path of `v101`, not just reduce quant duplication on paper

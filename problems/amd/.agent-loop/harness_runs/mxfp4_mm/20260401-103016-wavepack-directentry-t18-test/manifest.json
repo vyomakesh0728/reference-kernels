@@ -1,0 +1,35 @@
+{
+  "created_at": "2026-04-01T10:30:16.689036+00:00",
+  "family": "closed_loop_coordinator",
+  "gpu": "MI355X",
+  "harness_style": "kernelbench-v3-inspired",
+  "label": "wavepack_directentry_t18-test",
+  "leaderboard": "amd-mxfp4-mm",
+  "problem": "mxfp4_mm",
+  "source_path": "/Users/v/reference-kernels/problems/amd/fp8-mm/submission.py",
+  "stages": [
+    {
+      "candidate_cards_path": null,
+      "failure_kind": null,
+      "failure_signature": null,
+      "finished_at": "2026-04-01T10:32:03.573909+00:00",
+      "mismatch_count": null,
+      "name": "test",
+      "objective": null,
+      "parsed_metrics_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103016-wavepack-directentry-t18-test/stages/01_test/parsed_metrics.json",
+      "profile_raw_artifact_paths": null,
+      "profile_summary_path": null,
+      "result_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103016-wavepack-directentry-t18-test/stages/01_test/result.txt",
+      "return_code": 0,
+      "started_at": "2026-04-01T10:30:16.689673+00:00",
+      "status": "ok",
+      "stderr_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103016-wavepack-directentry-t18-test/stages/01_test/stderr.txt",
+      "stdout_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103016-wavepack-directentry-t18-test/stages/01_test/stdout.txt",
+      "target": "kernelbot-test",
+      "wall_time_seconds": 106.8773967499983,
+      "workflow_url": "https://github.com/gpu-mode/kernelbot/actions/runs/23844215238"
+    }
+  ],
+  "submission_copy": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103016-wavepack-directentry-t18-test/submission.py",
+  "variant": null
+}

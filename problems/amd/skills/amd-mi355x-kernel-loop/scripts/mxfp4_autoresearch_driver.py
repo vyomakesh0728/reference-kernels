@@ -71,17 +71,29 @@ Read and follow these local files first:
 - {repo / 'skills/amd-mi355x-kernel-loop/references/mxfp4-subagent-prompt.md'}
 - {repo / 'skills/amd-mi355x-kernel-loop/references/mxfp4-exact-shape-frontier.md'}
 - {repo / 'skills/amd-mi355x-kernel-loop/references/mxfp4-profile-branch-queue.md'}
+- {repo / 'skills/amd-mi355x-kernel-loop/references/mxfp4-portfolio-ladder.md'}
 
 Current best measured trunk is {best_variant} at {best_geomean:.4f} us.
 
+Optional research sources (KernelGuard-safe only):
+- {repo / 'third_party' / 'autokernel'}
+- {repo / 'third_party' / 'HipKittens'}
+
 Research doctrine:
 - use exactly three sub-agents/scouts
-- every scout must use gpt-5.4 with reasoning_effort=xhigh
+- every scout must use gpt-5.2 with reasoning_effort=xhigh
 - think in an Atom-of-Thoughts style
 - one exact-shape lane only
 - one deleted cost center only
 - if the lane is any A-pack reopen, require reuse/duplication proof before code
 - local exact-shape A-pack feeder deletion is already closed by v121, v122, and v125
+- choose lanes by total geomean leverage across m4/m16/m32/m64/m256, not by one-shape curiosity
+- prefer this order for end-to-end latency rounds:
+  1. compiled direct-entry collapse
+  2. whole helper-launch deletion
+  3. temp-law deletion that does not increase duplicated work
+  4. public-shape constant-body deletion of setup/addressing work
+  5. paper-only A-pack duplication-law research
 - benchmark immediately after a green test
 - profile only after a >=5% geomean win over the current best measured trunk
 
@@ -274,7 +286,7 @@ def main() -> int:
     parser.add_argument("--max-rounds", type=int, default=10)
     parser.add_argument("--poll-seconds", type=float, default=15.0)
     parser.add_argument("--round-timeout-seconds", type=float, default=900.0)
-    parser.add_argument("--model", default="gpt-5.4")
+    parser.add_argument("--model", default="gpt-5.2")
     parser.add_argument("--stop-when-budget-exhausted", action="store_true")
     args = parser.parse_args()
 

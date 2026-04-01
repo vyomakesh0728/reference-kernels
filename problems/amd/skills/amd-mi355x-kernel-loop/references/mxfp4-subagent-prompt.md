@@ -1,7 +1,11 @@
 # `mxfp4_mm` Sub-Agent Prompt Template
 
 Use exactly three sub-agents per round and keep them all on one exact-shape lane.
-Use `gpt-5.4` with `reasoning_effort = xhigh` for every scout. Do not use `gpt-5.4-mini`, and do not use `low`, `medium`, or `high` reasoning for `mxfp4_mm` scout rounds.
+Use `gpt-5.2` with `reasoning_effort = xhigh` for every scout. Do not use `gpt-5.2-mini`, and do not use `low`, `medium`, or `high` reasoning for `mxfp4_mm` scout rounds.
+
+Before choosing the next lane for any end-to-end latency, orchestration, or multi-shape prioritization question, also read:
+
+- `/root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-portfolio-ladder.md`
 
 ## Closed-Loop Objective
 
@@ -13,6 +17,7 @@ Use `gpt-5.4` with `reasoning_effort = xhigh` for every scout. Do not use `gpt-5
 - Do not stop after one green run if the visible-shape gain is small enough to be noise.
 - Do not spend remote quota directly from sub-agents.
 - Bias toward deleting real whole-call buckets such as extra launches, temp tensors, contract repair, hot-loop addressing math, orchestration, or bytes moved for non-math work.
+- Choose lanes by total geomean leverage across the hot exact-shape family (`m4/m16/m32/m64/m256`), not by whether one shape looks attractive in isolation.
 - For any `A-pack` reopen, require an explicit reuse-beats-duplication proof before proposing code. A dominant `A-pack` profile bucket alone is not enough after `v121` and `v122`.
 - For any reopened `A-pack` lane, require the sub-agent to state:
   - `reuse_factor`
@@ -81,6 +86,18 @@ Current bounded-wide-family warning:
 - even if the arithmetic clears, reject the lane unless it also names a legal handoff mechanism stronger than per-CTA LDS and weaker than whole-grid global scratch
 - if no such mechanism is named, route the round back to non-`A-pack` whole-call buckets instead of broadening the ownership rewrite
 
+## Portfolio Ladder Rule
+
+When the active question is end-to-end latency rather than one exact-shape regression, rank the next spend in this order:
+
+1. compiled direct-entry collapse on a hot exact shape
+2. whole helper-launch deletion
+3. temp-law deletion that does not increase duplicated work
+4. public-shape constant-body deletion of setup/addressing work
+5. paper-only `A-pack` duplication-law research
+
+Reject any branch that violates this order unless it has a clearly stronger whole-call deletion story than the earlier ladder items.
+
 ## Raw Motivation Refs
 
 - `/root/reference-kernels/problems/amd/important_papers/amd-instinct-cdna4-instruction-set-architecture.pdf`
@@ -102,6 +119,7 @@ Read this local canon before proposing anything:
 - /root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-cost-center-gate.md
 - /root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-exact-shape-frontier.md
 - /root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-profile-branch-queue.md
+- /root/reference-kernels/problems/amd/skills/amd-mi355x-kernel-loop/references/mxfp4-portfolio-ladder.md
 - /root/reference-kernels/problems/amd/skills/amd-live-reference-correctness/references/mxfp4-mm-live-contract.md
 - /root/reference-kernels/problems/amd/important_papers/amd-instinct-cdna4-instruction-set-architecture.pdf
 - /root/reference-kernels/problems/amd/important_papers/HipKittens Fast and Furious AMD Kernels.pdf

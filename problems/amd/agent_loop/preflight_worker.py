@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import py_compile
 import hashlib
+import subprocess
 import sys
 from typing import Any
 
@@ -79,6 +80,50 @@ class PurityVisitor(ast.NodeVisitor):
             self.issues.append(f"cache decorator/helper `{func.id}` referenced at line {node.lineno}")
         self.generic_visit(node)
 
+def _run_kernelguard(source_path: Path) -> PreflightCheck:
+    env = os.environ.copy()
+    env.setdefault("KERNELGUARD_PROFILE", "default")
+    try:
+        completed = subprocess.run(
+            ["kernelguard", "--api-mode"],
+            input=source_path.read_text(encoding="utf-8"),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+    except FileNotFoundError:
+        return PreflightCheck(
+            "kernelguard",
+            "fail",
+            "kernelguard not found in PATH; install with `pip install kernelguard` or `uv tool install kernelguard`",
+        )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "kernelguard reported issues"
+        return PreflightCheck("kernelguard", "fail", detail)
+    detail = "kernelguard scan passed"
+    payload = completed.stdout.strip()
+    if payload:
+        try:
+            parsed = json.loads(payload)
+            classification = parsed.get("classification")
+            should_filter = parsed.get("should_filter")
+            patterns = parsed.get("matched_patterns") or []
+            pattern_names = [item.get("pattern") for item in patterns if isinstance(item, dict)]
+            pattern_names = [name for name in pattern_names if name]
+            if classification is not None or should_filter is not None or pattern_names:
+                summary = []
+                if classification is not None:
+                    summary.append(f"classification={classification}")
+                if should_filter is not None:
+                    summary.append(f"should_filter={should_filter}")
+                if pattern_names:
+                    summary.append("patterns=" + ",".join(pattern_names[:5]))
+                detail = "kernelguard scan passed (" + "; ".join(summary) + ")"
+        except json.JSONDecodeError:
+            detail = "kernelguard scan passed (non-JSON output)"
+    return PreflightCheck("kernelguard", "ok", detail)
+
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr in {"_tensor_cache_key", "illegal_cache"}:
             self.issues.append(f"suspicious cache helper `{node.attr}` referenced at line {node.lineno}")
@@ -104,6 +149,13 @@ def run_host_preflight(
         report.checks.append(PreflightCheck("py_compile", "ok", "syntax check passed"))
     except py_compile.PyCompileError as exc:
         report.checks.append(PreflightCheck("py_compile", "fail", str(exc)))
+        report.status = "fail"
+        report.purity_status = "fail"
+        return report
+
+    guard_check = _run_kernelguard(source_path)
+    report.checks.append(guard_check)
+    if guard_check.status == "fail":
         report.status = "fail"
         report.purity_status = "fail"
         return report

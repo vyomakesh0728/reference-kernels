@@ -1,0 +1,35 @@
+{
+  "created_at": "2026-04-01T10:48:30.207419+00:00",
+  "family": "closed_loop_coordinator",
+  "gpu": "MI355X",
+  "harness_style": "kernelbench-v3-inspired",
+  "label": "m64_shscale_t19-benchmark",
+  "leaderboard": "amd-mxfp4-mm",
+  "problem": "mxfp4_mm",
+  "source_path": "/Users/v/reference-kernels/problems/amd/fp8-mm/submission.py",
+  "stages": [
+    {
+      "candidate_cards_path": null,
+      "failure_kind": null,
+      "failure_signature": null,
+      "finished_at": "2026-04-01T10:52:19.659040+00:00",
+      "mismatch_count": null,
+      "name": "benchmark",
+      "objective": 14604.989859194287,
+      "parsed_metrics_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-104830-m64-shscale-t19-benchmark/stages/01_benchmark/parsed_metrics.json",
+      "profile_raw_artifact_paths": null,
+      "profile_summary_path": null,
+      "result_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-104830-m64-shscale-t19-benchmark/stages/01_benchmark/result.txt",
+      "return_code": 0,
+      "started_at": "2026-04-01T10:48:30.208069+00:00",
+      "status": "ok",
+      "stderr_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-104830-m64-shscale-t19-benchmark/stages/01_benchmark/stderr.txt",
+      "stdout_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-104830-m64-shscale-t19-benchmark/stages/01_benchmark/stdout.txt",
+      "target": "kernelbot-benchmark",
+      "wall_time_seconds": 229.44055450000087,
+      "workflow_url": "https://github.com/gpu-mode/kernelbot/actions/runs/23844875348"
+    }
+  ],
+  "submission_copy": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-104830-m64-shscale-t19-benchmark/submission.py",
+  "variant": null
+}

@@ -1,0 +1,40 @@
+{
+  "created_at": "2026-04-01T10:39:34.134037+00:00",
+  "family": "closed_loop_coordinator",
+  "gpu": "MI355X",
+  "harness_style": "kernelbench-v3-inspired",
+  "label": "wavepack_directentry_t18-profile_rocprof",
+  "leaderboard": "amd-mxfp4-mm",
+  "problem": "mxfp4_mm",
+  "source_path": "/Users/v/reference-kernels/problems/amd/fp8-mm/submission.py",
+  "stages": [
+    {
+      "candidate_cards_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/profile/candidate_cards.json",
+      "failure_kind": null,
+      "failure_signature": null,
+      "finished_at": "2026-04-01T10:43:26.432099+00:00",
+      "mismatch_count": null,
+      "name": "profile_rocprof",
+      "objective": null,
+      "parsed_metrics_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/parsed_metrics.json",
+      "profile_artifact_zip_paths": [
+        "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/profile_20260401_104326_run0.zip"
+      ],
+      "profile_raw_artifact_paths": [
+        "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/profile_20260401_104326_run0.zip"
+      ],
+      "profile_summary_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/profile/profile_summary.json",
+      "result_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/result.txt",
+      "return_code": 0,
+      "started_at": "2026-04-01T10:39:34.134673+00:00",
+      "status": "ok",
+      "stderr_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/stderr.txt",
+      "stdout_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/stdout.txt",
+      "target": "kernelbot-profile",
+      "wall_time_seconds": 232.29010841700074,
+      "workflow_url": "https://github.com/gpu-mode/kernelbot/actions/runs/23844558849"
+    }
+  ],
+  "submission_copy": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/submission.py",
+  "variant": null
+}

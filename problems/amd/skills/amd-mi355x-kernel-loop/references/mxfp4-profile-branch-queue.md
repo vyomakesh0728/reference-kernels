@@ -2,16 +2,16 @@
 
 ## Source of Truth
 
-Current queue is derived from the latest real MI355X exact-shape profile run on the compounded `v101` trunk:
+Current queue is derived from the latest real MI355X exact-shape profile run on the `t18` benchmark winner:
 
 - run dir:
-  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260325-111357-compound-v101-profile](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260325-111357-compound-v101-profile)
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof)
 - raw zip:
-  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260325-111357-compound-v101-profile/profile_20260325_111743_run0.zip](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260325-111357-compound-v101-profile/profile_20260325_111743_run0.zip)
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/profile_20260401_104326_run0.zip](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/profile_20260401_104326_run0.zip)
 - summary:
-  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260325-111357-compound-v101-profile/stages/01_profile_rocprof/profile/profile_summary.json](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260325-111357-compound-v101-profile/stages/01_profile_rocprof/profile/profile_summary.json)
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/profile/profile_summary.json](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/profile/profile_summary.json)
 - cards:
-  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260325-111357-compound-v101-profile/stages/01_profile_rocprof/profile/candidate_cards.json](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260325-111357-compound-v101-profile/stages/01_profile_rocprof/profile/candidate_cards.json)
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/profile/candidate_cards.json](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/profile/candidate_cards.json)
 
 Operational rule:
 
@@ -21,12 +21,19 @@ Operational rule:
 
 ## Queue Order
 
-1. keep `v116` as the active measured trunk and `v101` as the ranked/profile anchor until `v118` is rerun and, if needed, the winning wide-line trunk is reprofiled
-2. `m16`: annihilate the separate exact `A-pack` launch only with a stronger amortized ownership model; do not inline full per-thread quantization into the MFMA threads and do not use full-panel shared-memory sweep kernels as direct replacements
-3. `m4`: reopen only for the stricter “delete the launch entirely” form of `A-pack` annihilation
-4. treat exact-wide `B-scale` materialization deletion as a resolved positive lane for `m32` and `m256`; do not reopen `A-pack` just because the old queue said wide work should be `A-pack` first
-5. if wide budget stays open, spend it first on a `v118` rerun because it is within the noise gate versus `v116`; only after that choose between a `v116` stability/profile pass and a cheaper exact-`m64` shuffled-scale address path
+1. keep `t20` as the active measured frontier until another branch beats `14.5092 us`
+2. exact `m4` non-`A-pack` fixed-cost cleanup is now near noise after `t20`; keep it but deprioritize further spend on this lane
+3. prioritize exact `m64` address-law deletion (`m64-address-last`) that removes shuffled-scale address rebuild cost without reopening naive `t19` behavior
+4. prioritize high-leverage `m16/m256` whole-bucket deletions before any schedule-polish work
+5. keep exact `m32` closed unless a newer real profile identifies a fresh non-`A-pack` whole bucket
 6. keep `m8` isolated and test-green only
+
+Queue correction after `t20` (`m4` fixed-cost fast-dispatch):
+
+- `t20` passed remote `test` and benchmarked at `14.5092 us`:
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-122947-native-scaled-exact-shape-m4-fixedcost-fastdispatch-t20-benchmark/stages/01_benchmark/parsed_metrics.json](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-122947-native-scaled-exact-shape-m4-fixedcost-fastdispatch-t20-benchmark/stages/01_benchmark/parsed_metrics.json)
+- The gain over `t18` is tiny (about `0.004%`) and `m4` remains `10.0 us`.
+- Operational rule: keep the cleanup, but move serious budget to `m64-address-last` and larger-share lanes (`m16/m256`) instead of spending another m4 fixed-cost micro-slot.
 
 Queue correction after the `v111` remote result:
 
@@ -255,21 +262,53 @@ Macro-cluster follow-up arithmetic:
   - do not open another exact-wide `A-pack` branch whose producer span is below these thresholds
   - any future `A-pack` reopen must be framed as a macro-cluster duplication-law change, not a local cluster-service tweak
 
+Queue correction after the post-`v119` three-scout paper pass:
+
+- the active exact public `m32,k=512` non-`A-pack` branch slot is now closed on paper
+ 
+## Multi-Shape Portfolio Ladder
+
+The active search is now portfolio-first, not `m32`-first.
+
+Operational rule:
+
+- choose the next branch by total geomean leverage across `m4/m16/m32/m64/m256`
+- do not prefer `m32` just because it already has the cleanest direct-contract path
+- prefer branches that simplify the exact-shape call law itself:
+  - compiled direct-entry everywhere
+  - fewer helper launches
+  - fewer temp write+read laws
+  - less per-call runtime shaping
+  - less hot-loop address math on public fixed shapes
+
+Current ladder order:
+
+1. compiled direct-entry and runtime/orchestration collapse on the remaining hot exact shapes
+2. whole helper-launch deletion where the deleted work does not come back as duplicate hot-path work
+3. temp-law deletion outside `A-pack`, or `A-pack` only if a future branch changes total quant count instead of moving it
+4. public-shape constant-body deletion of setup/addressing work
+5. paper-only `A-pack` duplication-law research
+
+Current hot-shape portfolio targets on top of `v119`:
+
+- `m4`: exact path still pays the separate `mxfp4_pack_a_fixed` law and remains highly latency-sensitive; prefer direct-entry/orchestration and helper-law deletion before any body polish
+- `m16`: exact path still pays the separate `mxfp4_pack_a_fixed` law; do not reopen local `A-pack` feeder rewrites, but keep targeting end-to-end exact-path orchestration and non-duplicating helper-law deletions
+- `m32`: keep the current best raw-contract path; only reopen if the branch deletes a whole-call fixed bucket and improves portfolio geomean, not because `m32` is aesthetically clean
+- `m64`: still the only hot shape with both `mxfp4_pack_a_fixed` and row-major `b_scale` repair in the default exact path, so whole-call helper/repair deletion remains legal if it does not overpay in kernel-side setup
+- `m256`: keep the current raw shuffled-scale path and prefer orchestration/runtime shaping collapse over kernel-body polish
+- reason:
+  - `v119` already landed the exact public-`m32,k=512` shuffled-scale remap/address delete that the queue was still reserving
+  - the live `v119` profile now shows exact `m32` as only `A-pack` plus the fixed public body, with `b_pack_share=0`
+  - the remaining tempting `m32` edits are wrapper/view polish or sibling body micro-polish, which do not clear the whole-bucket gate
+- operational rule:
+  - do not open another exact `m32` branch from this queue unless a newer real MI355X profile names a fresh non-`A-pack` whole-call bucket
+  - move the next real remote spend to exact `m4` non-`A-pack` fixed-cost deletion
+
 ## Current Active Program
 
 Use the next budget in this order until a newer real MI355X profile replaces this queue:
 
-1. `m32-nonApack-overhead`
-   - branch class: exact public `m32,k=512` only
-   - deleted cost center: remaining whole-call fixed overhead outside `A-pack` on the winning `v119` path
-   - allowed directions:
-     - direct-entry / wrapper / inflight-retention collapse only if it deletes a measured whole-call bucket
-     - kernel-side constant-body or address-law deletes only if they remove a whole remap/arithmetic bucket already proven live on public `m32`
-   - forbidden:
-     - any `A-pack` reopen
-     - any sibling branch that only polishes the same specialized body without naming a deleted bucket
-
-2. `m4-fixed-cost-delete`
+1. `m4-fixed-cost-delete`
    - branch class: exact `m4` only
    - deleted cost center: non-`A-pack` fixed-cost overhead on the tiny path
    - allowed directions:
@@ -279,16 +318,16 @@ Use the next budget in this order until a newer real MI355X profile replaces thi
      - reopening `m4` `A-pack` by itself
      - broad thin-family ownership changes
 
-3. `m64-address-last`
+2. `m64-address-last`
    - branch class: exact `m64` only
    - deleted cost center: in-kernel shuffled-scale address/rebuild cost
    - allowed directions:
      - only if the branch keeps `m32` and `m256` intact
      - only if the deleted bucket is specifically the exact `m64` address path, not a fresh `A-pack` story
    - note:
-     - `v120` and `v123` proved this is real but portfolio-secondary, so keep it behind `m32` and `m4`
+     - `v120` and `v123` proved this is real but portfolio-secondary, so keep it behind `m4`
 
-4. `Apack-paper-only`
+3. `Apack-paper-only`
    - branch class: research only, no remote spend
    - active question:
      - can a future exact-wide `A-pack` reopen change duplication fundamentally without grid-coop, without collapsing wide parallelism, and without recreating a global temp
@@ -297,6 +336,14 @@ Use the next budget in this order until a newer real MI355X profile replaces thi
      - implementation mechanism is missing
    - operational rule:
      - no code and no remote spend unless a new ownership law answers the missing cluster-scoped handoff mechanism first
+
+4. `m32-nonApack-overhead`
+   - status: paper-vetoed after `v119`
+   - reason:
+     - the live `v119` exact public-`m32,k=512` source already contains the queue’s remap/address-law delete
+     - the live `v119` profile leaves no measured `m32` `b_prep` bucket and no new whole-call wrapper bucket
+   - reopen only if:
+     - a newer real MI355X profile names a fresh exact-`m32` non-`A-pack` whole bucket that is not the same specialized-body polish
 
 ## Any `A-pack` Remote-Spend Gate
 

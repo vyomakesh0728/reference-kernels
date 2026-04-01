@@ -3,13 +3,37 @@
 ## Canon
 
 - Best measured trunk:
-  [/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_exact_shape_m32_directentry_v116/submission.py](/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_exact_shape_m32_directentry_v116/submission.py)
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-122947-native-scaled-exact-shape-m4-fixedcost-fastdispatch-t20-benchmark/submission.py](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-122947-native-scaled-exact-shape-m4-fixedcost-fastdispatch-t20-benchmark/submission.py)
 - Best measured benchmark:
-  `24.0287 us`
+  `14.5092 us`
 - Best ranked trunk:
   [/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_exact_shape_v101/submission.py](/Users/v/reference-kernels/problems/amd/.agent-loop/manual/native_scaled_exact_shape_v101/submission.py)
 - Best ranked score:
   `26.2218 us`
+
+## 2026-04-01 Reset
+
+- `t18` is the new measured frontier:
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103242-wavepack-directentry-t18-benchmark/stages/01_benchmark/parsed_metrics.json](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103242-wavepack-directentry-t18-benchmark/stages/01_benchmark/parsed_metrics.json)
+  - geomean: `14.5097 us`
+  - visible shapes: `m4 10.0`, `m32 10.1 / 10.1`, `m16 20.0`, `m64 23.1`, `m256 19.8`
+- `t18` profile is the active source of truth:
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/profile/profile_summary.json](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/profile/profile_summary.json)
+  - `m4`: `a_pack_share = 0.722`
+  - `m16`: `a_pack_share = 0.500`, `kernel_share = 0.500`
+  - `m32`: `a_pack_share = 0.500`, `kernel_share = 0.500`
+  - `m64`: `a_pack_share = 0.390`, `b_scale_decode_share = 0.455`, `kernel_share = 0.156`
+  - `m256`: `a_pack_share = 0.790`, `kernel_share = 0.210`
+- `t19` is a clean negative on the obvious exact-`m64` shuffled-scale delete follow-up:
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-104830-m64-shscale-t19-benchmark/stages/01_benchmark/parsed_metrics.json](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-104830-m64-shscale-t19-benchmark/stages/01_benchmark/parsed_metrics.json)
+  - geomean regressed to `14.6050 us`
+  - `m64` worsened from `23.1 us` to `24.1 us`
+  - operational rule: do not reopen exact `m64` shuffled-scale deletion unless the branch also deletes the in-kernel address law that paid back the removed `b_scale_decode` bucket
+- `t20` (`m4` fixed-cost fast-dispatch) is a tiny but test-green portfolio improvement:
+  [/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-122947-native-scaled-exact-shape-m4-fixedcost-fastdispatch-t20-benchmark/stages/01_benchmark/parsed_metrics.json](/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-122947-native-scaled-exact-shape-m4-fixedcost-fastdispatch-t20-benchmark/stages/01_benchmark/parsed_metrics.json)
+  - geomean: `14.5092 us` (about `0.004%` over `t18`; effectively noise-level)
+  - `m4` remains `10.0 us`; this lane is now near its practical limit
+  - operational rule: keep this cleanup in trunk, but move serious budget to high-leverage `m64/m16/m256` buckets
 
 ## Exact Dispatch
 
@@ -366,7 +390,10 @@ Mechanism check after the first serious macro-cluster pass:
 Current active optimization split:
 
 - spend remote budget on non-`A-pack` whole-call deletions first:
-  - exact public `m32,k=512` non-`A-pack` fixed-overhead buckets
   - exact `m4` non-`A-pack` fixed-cost buckets
   - exact `m64` address-bucket cleanup only after the higher-leverage lanes
+- exact public `m32,k=512` non-`A-pack` is now closed on paper post-`v119`:
+  - `v119` already landed the exact public-`m32,k=512` remap/address delete that the queue was targeting
+  - the live `v119` profile leaves only `A-pack` plus the fixed public body on exact `m32`, with no fresh `b_prep` bucket to delete
+  - do not open another exact `m32` branch until a newer real MI355X profile names a new non-`A-pack` whole bucket
 - keep `A-pack` as the strategic research target, but paper-only until the missing mechanism changes

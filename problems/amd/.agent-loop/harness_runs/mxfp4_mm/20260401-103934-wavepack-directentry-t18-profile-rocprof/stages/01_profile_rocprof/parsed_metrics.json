@@ -1,0 +1,24 @@
+{
+  "## Profiling k": "1536; m: 256; n: 3072; seed: 7856:",
+  "* CPU": "`AMD EPYC 9575F 64-Core Processor`",
+  "* Device count": "`1`",
+  "* GPU": "`AMD Instinct MI355X`",
+  "* Hostname": "`arc-runner-set-hbp2z-runner-5tvnm`",
+  "* Platform": "`Linux-6.8.0-60-generic-x86_64-with-glibc2.39`",
+  "* Runtime": "`ROCm`",
+  "* Torch": "`2.10.0+rocm7.1`",
+  "> Workflow [23844558849](<https": "//github.com/gpu-mode/kernelbot/actions/runs/23844558849>) completed",
+  "Running on": "",
+  "Self CPU time total": "1.470ms",
+  "Self CUDA time total": "2.278us",
+  "aten": ":view         1.23%      18.130us         1.23%      18.130us       9.065us       0.000us         0.00%       0.000us       0.000us             2",
+  "candidate_cards_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/profile/candidate_cards.json",
+  "check": "pass",
+  "profile_raw_artifact_paths": [
+    "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/profile_20260401_104326_run0.zip"
+  ],
+  "profile_summary_path": "/Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/profile/profile_summary.json",
+  "wall_time_seconds": 232.29010841700074,
+  "workflow_id": 23844558849,
+  "workflow_url": "https://github.com/gpu-mode/kernelbot/actions/runs/23844558849"
+}

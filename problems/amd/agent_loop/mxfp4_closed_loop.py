@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+try:
+    from datetime import UTC  # Python 3.11+
+except ImportError:  # Python <3.11
+    UTC = timezone.utc
 import fcntl
 import json
 from pathlib import Path

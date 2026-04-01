@@ -1,0 +1,123 @@
+{
+  "## Benchmarks": "",
+  "## Program stderr": "",
+  "## Program stdout": "",
+  "* CPU": "`AMD EPYC 9575F 64-Core Processor`",
+  "* Device count": "`1`",
+  "* GPU": "`AMD Instinct MI355X`",
+  "* Hostname": "`arc-runner-set-h82gb-runner-9bxjc`",
+  "* Platform": "`Linux-6.8.0-60-generic-x86_64-with-glibc2.39`",
+  "* Runtime": "`ROCm`",
+  "* Torch": "`2.10.0+rocm7.1`",
+  "/home/runner/aiter/hsa/codegen.py": "86: Pandas4Warning: The copy keyword is deprecated and will be removed in a future version. Copy-on-Write is active in pandas since 3.0 which utilizes a lazy copy mechanism that defers copies until necessary. Use .copy() to make an eager copy if necessary.",
+  "> Workflow [23709458872](<https": "//github.com/gpu-mode/kernelbot/actions/runs/23709458872>) completed",
+  "Running on": "",
+  "[aiter] hipModuleGetFunction": "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128E Success```\"",
+  "[aiter] hipModuleLoad": "/home/runner/aiter/hsa//gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128.co GetFunction: _ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128E",
+  "[aiter] shape is M": "32, N:2880, K:512, not found tuned config in CKGEMM or asmGEMM, will use default config!```",
+  "[aiter] type hints mismatch, override to --> gemm_a4w4_asm(A": "torch.Tensor, B: torch.Tensor, A_scale: torch.Tensor, B_scale: torch.Tensor, out: torch.Tensor, kernelName: str, bias: Optional[torch.Tensor] = None, alpha: float | Optional[typing.SupportsIndex] = 1.0, beta: float | Optional[typing.SupportsIndex] = 0.0, bpreshuffle: Optional[bool] = True, log2_k_split: int | Optional[typing.SupportsIndex] = None) -> torch.Tensor",
+  "[aiter] type hints mismatch, override to --> get_padded_m(M": "int | typing.SupportsIndex, N: int | typing.SupportsIndex, K: int | typing.SupportsIndex, gl: int | typing.SupportsIndex) -> int",
+  "benchmark_case_count": 15,
+  "benchmark_fail_count": 0,
+  "benchmark_geom_mean_ns": 22592.123036560697,
+  "benchmark_mean_of_means_ns": 23716.666666666668,
+  "benchmark_partial_geom_mean_ns": 22592.123036560697,
+  "benchmark_partial_mean_of_means_ns": 23716.666666666668,
+  "benchmark_pass_count": 6,
+  "benchmarks": [
+    {
+      "k": 512,
+      "m": 4,
+      "mean_ns": 16900.0,
+      "n": 2880,
+      "seed": 4565,
+      "status": "pass"
+    },
+    {
+      "k": 7168,
+      "m": 16,
+      "mean_ns": 36100.0,
+      "n": 2112,
+      "seed": 15,
+      "status": "pass"
+    },
+    {
+      "k": 512,
+      "m": 32,
+      "mean_ns": 16800.0,
+      "n": 4096,
+      "seed": 457,
+      "status": "pass"
+    },
+    {
+      "k": 512,
+      "m": 32,
+      "mean_ns": 16800.0,
+      "n": 2880,
+      "seed": 54,
+      "status": "pass"
+    },
+    {
+      "k": 2048,
+      "m": 64,
+      "mean_ns": 29700.0,
+      "n": 7168,
+      "seed": 687,
+      "status": "pass"
+    },
+    {
+      "k": 1536,
+      "m": 256,
+      "mean_ns": 26000.0,
+      "n": 3072,
+      "seed": 7856,
+      "status": "pass"
+    },
+    {
+      "[aiter] type hints mismatch, override to --> get_padded_m(M": "int | typing.SupportsIndex, N: int | typing.SupportsIndex, K: int | typing.SupportsIndex, gl: int | typing.SupportsIndex) -> int",
+      "status": "pending"
+    },
+    {
+      "[aiter] shape is M": "4, N:2880, K:512, not found tuned config in CKGEMM or asmGEMM, will use default config!",
+      "status": "pending"
+    },
+    {
+      "/home/runner/aiter/hsa/codegen.py": "13: Pandas4Warning: 'future.no_silent_downcasting' is deprecated, please refrain from using it.",
+      "status": "pending"
+    },
+    {
+      "/home/runner/aiter/hsa/codegen.py": "86: Pandas4Warning: The copy keyword is deprecated and will be removed in a future version. Copy-on-Write is active in pandas since 3.0 which utilizes a lazy copy mechanism that defers copies until necessary. Use .copy() to make an eager copy if necessary.",
+      "status": "pending"
+    },
+    {
+      "[aiter] type hints mismatch, override to --> gemm_a4w4_asm(A": "torch.Tensor, B: torch.Tensor, A_scale: torch.Tensor, B_scale: torch.Tensor, out: torch.Tensor, kernelName: str, bias: Optional[torch.Tensor] = None, alpha: float | Optional[typing.SupportsIndex] = 1.0, beta: float | Optional[typing.SupportsIndex] = 0.0, bpreshuffle: Optional[bool] = True, log2_k_split: int | Optional[typing.SupportsIndex] = None) -> torch.Tensor",
+      "status": "pending"
+    },
+    {
+      "[aiter] shape is M": "16, N:2112, K:7168, not found tuned config in CKGEMM or asmGEMM, will use default config!",
+      "status": "pending"
+    },
+    {
+      "[aiter] shape is M": "32, N:4096, K:512, not found tuned config in CKGEMM or asmGEMM, will use default config!",
+      "status": "pending"
+    },
+    {
+      "[aiter] shape is M": "32, N:2880, K:512, not found tuned config in CKGEMM or asmGEMM, will use default config!```",
+      "status": "pending"
+    },
+    {
+      "## Program stdout": "",
+      "status": "pending"
+    }
+  ],
+  "check": "pass",
+  "geom_mean_ns": 22592.123036560697,
+  "k": "1536; m: 256; n: 3072; seed: 7856",
+  "mean_of_means_ns": 23716.666666666668,
+  "objective_section": "benchmark",
+  "partial_geom_mean_ns": 22592.123036560697,
+  "partial_mean_of_means_ns": 23716.666666666668,
+  "wall_time_seconds": 200.43803754200053,
+  "workflow_id": 23709458872,
+  "workflow_url": "https://github.com/gpu-mode/kernelbot/actions/runs/23709458872"
+}

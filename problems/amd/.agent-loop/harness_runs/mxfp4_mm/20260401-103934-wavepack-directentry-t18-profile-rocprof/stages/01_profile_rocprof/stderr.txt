@@ -1,0 +1,303 @@
+Submitting to leaderboard: amd-mxfp4-mm
+GPU: MI355X
+Mode: profile
+File: /Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/submission.py
+
+Waiting for results...
+{"status": "processing", "elapsed_time": 0.0}
+{"status": "processing", "elapsed_time": 20.11}
+{"status": "processing", "elapsed_time": 35.11}
+{"status": "processing", "elapsed_time": 50.11}
+{"status": "processing", "elapsed_time": 65.11}
+{"status": "processing", "elapsed_time": 80.34}
+{"status": "processing", "elapsed_time": 95.34}
+{"status": "processing", "elapsed_time": 110.35}
+{"status": "processing", "elapsed_time": 125.86}
+{"status": "processing", "elapsed_time": 140.86}
+
+=== Profiler: rocPROF ===
+STDERR:
+[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[92mSuccessfully preprocessed all matching files.[0m
+[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so
+[W401 10:40:49.095849859 collection.cpp:1148] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+[864.194]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[864.716]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+*** Aborted at 1775040049 (unix time) try "date -d @1775040049" if you are using GNU date ***
+PC: @           0x5da9c7 _PyEval_EvalFrameDefault
+*** SIGTERM (@0x3e90000025b) received by PID 704 (TID 0x7dbb915e1580) from PID 603; stack trace: ***
+    @     0x7dbb9be96ed3 (unknown)
+    @     0x7dbb9cdf7b30 (unknown)
+    @     0x7dbb9ca7dfb4 (unknown)
+    @     0x7dbb9be96ed3 (unknown)
+    @     0x7dbb9ca770c8 (unknown)
+    @     0x7dbb9be3a330 (unknown)
+    @           0x5da9c7 _PyEval_EvalFrameDefault
+    @           0x5d582b PyEval_EvalCode
+    @           0x6087b3 PyRun_StringFlags
+    @           0x6b392e PyRun_SimpleStringFlags
+    @           0x6bc5f1 Py_RunMain
+    @           0x6bc00d Py_BytesMain
+    @     0x7dbb9ca7e4fb (unknown)
+    @     0x7dbb9be1f1ca (unknown)
+    @     0x7dbb9be1f28b __libc_start_main
+    @           0x657445 _start
+[865.666]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[866.945]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+
+
+Saved profile trace to: profile_20260401_104326_run0.zip
+
+=== Profiler: rocPROF ===
+STDERR:
+[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[92mSuccessfully preprocessed all matching files.[0m
+[W401 10:41:01.731534984 collection.cpp:1148] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+[875.830]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[876.343]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+*** Aborted at 1775040061 (unix time) try "date -d @1775040061" if you are using GNU date ***
+PC: @           0x61cb21 (unknown)
+*** SIGTERM (@0x3e900000434) received by PID 1178 (TID 0x7136e9016580) from PID 1076; stack trace: ***
+    @     0x7136f38cbed3 (unknown)
+    @     0x7136f482cb30 (unknown)
+    @     0x7136f44b2fb4 (unknown)
+    @     0x7136f38cbed3 (unknown)
+    @     0x7136f44ac0c8 (unknown)
+    @     0x7136f386f330 (unknown)
+    @           0x61cb21 (unknown)
+    @           0x61c591 (unknown)
+    @           0x5fc503 (unknown)
+    @           0x5e191c _PyEval_EvalFrameDefault
+    @           0x5d582b PyEval_EvalCode
+    @           0x5d33bc (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdc75 PyImport_ImportModuleLevelObject
+    @           0x5d3704 (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdecb PyImport_ImportModuleLevelObject
+    @           0x5dc48f _PyEval_EvalFrameDefault
+    @           0x5d582b PyEval_EvalCode
+    @           0x5d33bc (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdc75 PyImport_ImportModuleLevelObject
+    @           0x5dc48f _PyEval_EvalFrameDefault
+[877.272]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[877.794]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+
+
+Saved profile trace to: profile_20260401_104326_run0.zip
+
+=== Profiler: rocPROF ===
+STDERR:
+[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[92mSuccessfully preprocessed all matching files.[0m
+[W401 10:41:11.611110290 collection.cpp:1148] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+[886.710]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[887.250]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+*** Aborted at 1775040072 (unix time) try "date -d @1775040072" if you are using GNU date ***
+PC: @     0x7e032c8b3d7b __munmap
+*** SIGTERM (@0x3e9000004fd) received by PID 1378 (TID 0x7e0321f7a580) from PID 1277; stack trace: ***
+    @     0x7e032c82fed3 (unknown)
+    @     0x7e032d790b30 (unknown)
+    @     0x7e032d416fb4 (unknown)
+    @     0x7e032c82fed3 (unknown)
+    @     0x7e032d4100c8 (unknown)
+    @     0x7e032c7d3330 (unknown)
+    @     0x7e032c8b3d7b __munmap
+    @           0x608625 (unknown)
+    @           0x5d7619 _PyEval_EvalFrameDefault
+    @           0x5551f6 (unknown)
+    @           0x53b893 PySequence_Tuple
+    @           0x5dccb9 _PyEval_EvalFrameDefault
+    @           0x64f963 (unknown)
+    @           0x54b0ac PyObject_Call
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x5a13a5 (unknown)
+    @           0x5d8124 _PyEval_EvalFrameDefault
+    @           0x5d582b PyEval_EvalCode
+    @           0x5d33bc (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdc75 PyImport_ImportModuleLevelObject
+    @           0x5dc48f _PyEval_EvalFrameDefault
+    @           0x5d582b PyEval_EvalCode
+    @           0x5d33bc (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdc75 PyImport_ImportModuleLevelObject
+[888.058]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[889.329]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+
+
+Saved profile trace to: profile_20260401_104326_run0.zip
+
+=== Profiler: rocPROF ===
+STDERR:
+[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[92mSuccessfully preprocessed all matching files.[0m
+[W401 10:41:23.191496258 collection.cpp:1148] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+[898.490]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[899.036]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+*** Aborted at 1775040084 (unix time) try "date -d @1775040084" if you are using GNU date ***
+PC: @     0x73d9fd3ee4fd poll
+*** SIGTERM (@0x3e9000005c6) received by PID 1579 (TID 0x73d9f2abf580) from PID 1478; stack trace: ***
+    @     0x73d9fd374ed3 (unknown)
+    @     0x73d9fe2d5b30 (unknown)
+    @     0x73d9fdf5bfb4 (unknown)
+    @     0x73d9fd374ed3 (unknown)
+    @     0x73d9fdf550c8 (unknown)
+    @     0x73d9fd318330 (unknown)
+    @     0x73d9fd3ee4fd poll
+    @           0x6d4405 (unknown)
+    @           0x551872 (unknown)
+    @           0x549935 PyObject_Vectorcall
+    @           0x5d733f _PyEval_EvalFrameDefault
+    @           0x64f963 (unknown)
+    @           0x548f35 _PyObject_MakeTpCall
+    @           0x5d733f _PyEval_EvalFrameDefault
+    @           0x64f963 (unknown)
+    @           0x548f35 _PyObject_MakeTpCall
+    @           0x5d733f _PyEval_EvalFrameDefault
+    @           0x5d582b PyEval_EvalCode
+    @           0x5d33bc (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdc75 PyImport_ImportModuleLevelObject
+    @           0x5d3704 (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdecb PyImport_ImportModuleLevelObject
+    @           0x5dc48f _PyEval_EvalFrameDefault
+    @           0x5d582b PyEval_EvalCode
+[899.778]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[900.314]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+
+
+Saved profile trace to: profile_20260401_104326_run0.zip
+
+=== Profiler: rocPROF ===
+STDERR:
+[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[92mSuccessfully preprocessed all matching files.[0m
+[W401 10:41:33.322786104 collection.cpp:1148] Warning: ROCTracer produced duplicate flow start: 2 (function operator())
+[908.422]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[908.963]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+*** Aborted at 1775040094 (unix time) try "date -d @1775040094" if you are using GNU date ***
+PC: @           0x61cb21 (unknown)
+*** SIGTERM (@0x3e9000006bf) received by PID 1829 (TID 0x7cf08a90a580) from PID 1727; stack trace: ***
+    @     0x7cf0951bfed3 (unknown)
+    @     0x7cf096120b30 (unknown)
+    @     0x7cf095da6fb4 (unknown)
+    @     0x7cf0951bfed3 (unknown)
+    @     0x7cf095da00c8 (unknown)
+    @     0x7cf095163330 (unknown)
+    @           0x61cb21 (unknown)
+    @           0x61c591 (unknown)
+    @           0x5fc503 (unknown)
+    @           0x5e191c _PyEval_EvalFrameDefault
+    @           0x5d582b PyEval_EvalCode
+    @           0x5d33bc (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdc75 PyImport_ImportModuleLevelObject
+    @           0x5d3704 (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdecb PyImport_ImportModuleLevelObject
+    @           0x5dc48f _PyEval_EvalFrameDefault
+    @           0x5d582b PyEval_EvalCode
+    @           0x5d33bc (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdc75 PyImport_ImportModuleLevelObject
+    @           0x5dc48f _PyEval_EvalFrameDefault
+[909.724]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[910.258]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+
+
+Saved profile trace to: profile_20260401_104326_run0.zip
+
+=== Profiler: rocPROF ===
+STDERR:
+[aiter] import [module_aiter_enum] under /home/runner/aiter/aiter/jit/module_aiter_enum.so
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[92mSuccessfully preprocessed all matching files.[0m
+[W401 10:41:44.052596439 collection.cpp:1148] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+[919.350]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[919.888]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+*** Aborted at 1775040105 (unix time) try "date -d @1775040105" if you are using GNU date ***
+PC: @     0x742f7c31f4fd poll
+*** SIGTERM (@0x3e900000788) received by PID 2030 (TID 0x742f719f0580) from PID 1928; stack trace: ***
+    @     0x742f7c2a5ed3 (unknown)
+    @     0x742f7d206b30 (unknown)
+    @     0x742f7ce8cfb4 (unknown)
+    @     0x742f7c2a5ed3 (unknown)
+    @     0x742f7ce860c8 (unknown)
+    @     0x742f7c249330 (unknown)
+    @     0x742f7c31f4fd poll
+    @           0x6d4405 (unknown)
+    @           0x551872 (unknown)
+    @           0x549935 PyObject_Vectorcall
+    @           0x5d733f _PyEval_EvalFrameDefault
+    @           0x64f963 (unknown)
+    @           0x548f35 _PyObject_MakeTpCall
+    @           0x5d733f _PyEval_EvalFrameDefault
+    @           0x64f963 (unknown)
+    @           0x548f35 _PyObject_MakeTpCall
+    @           0x5d733f _PyEval_EvalFrameDefault
+    @           0x5d582b PyEval_EvalCode
+    @           0x5d33bc (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdc75 PyImport_ImportModuleLevelObject
+    @           0x5d3704 (unknown)
+    @           0x581e4d (unknown)
+    @           0x5db510 _PyEval_EvalFrameDefault
+    @           0x549d07 (unknown)
+    @           0x54b583 PyObject_CallMethodObjArgs
+    @           0x5fdecb PyImport_ImportModuleLevelObject
+    @           0x5dc48f _PyEval_EvalFrameDefault
+    @           0x5d582b PyEval_EvalCode
+[920.643]       perfetto.cc:47304 Configured tracing session 1, #sources:1, duration:0 ms, #buffers:1, total buffer size:1048576 KB, total sessions:1, uid:0 session name: ""
+[921.180]       perfetto.cc:48888 Tracing session 1 ended, total sessions:0
+
+
+Saved profile trace to: profile_20260401_104326_run0.zip
+
+Results written to: /Users/v/reference-kernels/problems/amd/.agent-loop/harness_runs/mxfp4_mm/20260401-103934-wavepack-directentry-t18-profile-rocprof/stages/01_profile_rocprof/result.txt

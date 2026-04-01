@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MXFP4 Kernel Optimization — Codex Agent Loop</title>
+<link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&f[]=cabinet-grotesk@400,500,700,800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+:root,[data-theme="dark"]{
+  --color-bg:#0d0d0b;--color-surface:#131311;--color-surface-2:#181816;
+  --color-surface-offset:#1d1c1a;--color-surface-dynamic:#252421;
+  --color-divider:#252321;--color-border:#2e2d2b;
+  --color-text:#d4d3d0;--color-text-muted:#828180;--color-text-faint:#4a4948;
+  --color-primary:#4f98a3;--color-primary-hover:#227f8b;
+  --color-primary-highlight:#1e3538;
+  --color-gold:#e8af34;--color-gold-highlight:#3a3020;
+  --color-success:#6daa45;--color-success-highlight:#283320;
+  --color-error:#d163a7;--color-error-highlight:#3a2535;
+  --color-warning:#bb653b;--color-warning-highlight:#3a2518;
+  --color-orange:#fdab43;--color-orange-highlight:#3a2e18;
+  --color-blue:#5591c7;--color-blue-highlight:#1a2535;
+  --color-purple:#a86fdf;--color-purple-highlight:#2e2040;
+  --shadow-sm:0 1px 3px oklch(0 0 0/.3);
+  --shadow-md:0 4px 16px oklch(0 0 0/.4);
+  --shadow-lg:0 16px 48px oklch(0 0 0/.5);
+  --radius-sm:.375rem;--radius-md:.5rem;--radius-lg:.75rem;--radius-xl:1rem;
+  --text-xs:clamp(.75rem,.7rem + .25vw,.875rem);
+  --text-sm:clamp(.875rem,.8rem + .35vw,1rem);
+  --text-base:clamp(1rem,.95rem + .25vw,1.125rem);
+  --text-lg:clamp(1.125rem,1rem + .75vw,1.5rem);
+  --text-xl:clamp(1.5rem,1.2rem + 1.25vw,2.25rem);
+  --text-2xl:clamp(2rem,1.2rem + 2.5vw,3.5rem);
+  --font-display:'Cabinet Grotesk',sans-serif;
+  --font-body:'Satoshi',sans-serif;
+  --space-1:.25rem;--space-2:.5rem;--space-3:.75rem;--space-4:1rem;
+  --space-5:1.25rem;--space-6:1.5rem;--space-8:2rem;--space-10:2.5rem;
+  --space-12:3rem;--space-16:4rem;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-font-smoothing:antialiased;scroll-behavior:smooth;scroll-padding-top:5rem}
+body{min-height:100dvh;font-family:var(--font-body);font-size:var(--text-base);
+  color:var(--color-text);background:var(--color-bg);line-height:1.6}
+img,svg{display:block;max-width:100%}
+p,li{text-wrap:pretty}
+h1,h2,h3{text-wrap:balance;line-height:1.15;font-family:var(--font-display)}
+
+nav{position:sticky;top:0;z-index:100;background:oklch(from var(--color-bg) l c h / .9);
+  backdrop-filter:blur(12px);border-bottom:1px solid var(--color-border);
+  padding:var(--space-3) var(--space-8);display:flex;align-items:center;
+  justify-content:space-between;gap:var(--space-4)}
+.nav-logo{display:flex;align-items:center;gap:var(--space-2);font-family:var(--font-display);
+  font-weight:800;font-size:var(--text-sm);color:var(--color-text);text-decoration:none}
+.nav-logo svg{color:var(--color-primary)}
+.nav-links{display:flex;gap:var(--space-6);list-style:none}
+.nav-links a{font-size:var(--text-sm);color:var(--color-text-muted);text-decoration:none;transition:color .18s}
+.nav-links a:hover{color:var(--color-primary)}
+
+.hero{padding:var(--space-16) var(--space-8) var(--space-12);max-width:1100px;margin:0 auto}
+.hero-eyebrow{font-size:var(--text-xs);font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--color-primary);margin-bottom:var(--space-4)}
+.hero-title{font-size:var(--text-2xl);font-weight:800;line-height:1.05;margin-bottom:var(--space-5);font-family:var(--font-display)}
+.hero-title .dim{color:var(--color-text-faint)}
+.hero-sub{font-size:var(--text-base);color:var(--color-text-muted);max-width:65ch;line-height:1.7;margin-bottom:var(--space-8)}
+.kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:var(--space-3)}
+.kpi{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-lg);padding:var(--space-5) var(--space-6)}
+.kpi-label{font-size:var(--text-xs);color:var(--color-text-muted);font-weight:500;letter-spacing:.06em;text-transform:uppercase;margin-bottom:var(--space-1)}
+.kpi-val{font-size:var(--text-xl);font-weight:800;font-family:var(--font-display);font-variant-numeric:tabular-nums}
+.kpi-delta{font-size:var(--text-xs);color:var(--color-text-faint);margin-top:var(--space-1)}
+.kpi-val.red{color:var(--color-error)}.kpi-val.gold{color:var(--color-gold)}
+.kpi-val.green{color:var(--color-success)}.kpi-val.teal{color:var(--color-primary)}
+
+section{padding:var(--space-12) var(--space-8);max-width:1100px;margin:0 auto}
+.section-eyebrow{font-size:var(--text-xs);font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--color-primary);margin-bottom:var(--space-3)}
+.section-title{font-size:var(--text-xl);font-weight:800;font-family:var(--font-display);margin-bottom:var(--space-2)}
+.section-desc{font-size:var(--text-sm);color:var(--color-text-muted);max-width:72ch;line-height:1.7;margin-bottom:var(--space-8)}
+.divider{border:none;border-top:1px solid var(--color-divider);max-width:1100px;margin:0 auto}
+
+.shapes-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:var(--space-4)}
+.shape-card{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-xl);padding:var(--space-5) var(--space-6);position:relative;overflow:hidden}
+.shape-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:var(--radius-xl) var(--radius-xl) 0 0}
+.shape-card.critical::before{background:var(--color-error)}
+.shape-card.high::before{background:var(--color-orange)}
+.shape-card.medium::before{background:var(--color-gold)}
+.shape-label{font-size:var(--text-xs);font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--color-text-faint);margin-bottom:var(--space-2)}
+.shape-name{font-size:var(--text-lg);font-weight:800;font-family:var(--font-display);margin-bottom:var(--space-3)}
+.shape-latency{font-size:var(--text-xl);font-weight:800;font-variant-numeric:tabular-nums;font-family:var(--font-display)}
+.shape-badge{display:inline-block;font-size:var(--text-xs);font-weight:600;padding:.2em .65em;border-radius:999px;margin-top:var(--space-2)}
+.badge-critical{background:var(--color-error-highlight);color:var(--color-error)}
+.badge-high{background:var(--color-orange-highlight);color:var(--color-orange)}
+.badge-medium{background:var(--color-gold-highlight);color:var(--color-gold)}
+.shape-bar-wrap{margin-top:var(--space-4);height:5px;background:var(--color-surface-dynamic);border-radius:999px}
+.shape-bar{height:100%;border-radius:999px}
+.bar-critical{background:var(--color-error)}.bar-high{background:var(--color-orange)}.bar-medium{background:var(--color-gold)}
+
+.buckets-list{display:flex;flex-direction:column;gap:var(--space-4)}
+.bucket{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-xl);padding:var(--space-6);display:grid;grid-template-columns:3rem 1fr;gap:var(--space-5);align-items:start}
+.bucket-num{width:3rem;height:3rem;border-radius:var(--radius-lg);display:flex;align-items:center;justify-content:center;font-size:var(--text-sm);font-weight:800;font-family:var(--font-display);flex-shrink:0}
+.bucket-num.b1{background:var(--color-blue-highlight);color:var(--color-blue)}
+.bucket-num.b2{background:var(--color-purple-highlight);color:var(--color-purple)}
+.bucket-num.b3{background:var(--color-primary-highlight);color:var(--color-primary)}
+.bucket-num.b4{background:var(--color-gold-highlight);color:var(--color-gold)}
+.bucket-num.b5{background:var(--color-success-highlight);color:var(--color-success)}
+.bucket-title{font-size:var(--text-base);font-weight:700;font-family:var(--font-display);margin-bottom:var(--space-2)}
+.bucket-desc{font-size:var(--text-sm);color:var(--color-text-muted);line-height:1.65;margin-bottom:var(--space-3)}
+.bucket-tags{display:flex;flex-wrap:wrap;gap:var(--space-2)}
+.tag{font-size:var(--text-xs);font-weight:500;padding:.2em .7em;border-radius:999px;background:var(--color-surface-offset);color:var(--color-text-muted);border:1px solid var(--color-border)}
+
+.apack-block{background:color-mix(in oklch,var(--color-error) 8%,var(--color-surface));border:1px solid color-mix(in oklch,var(--color-error) 30%,var(--color-border));border-radius:var(--radius-xl);padding:var(--space-6)}
+.apack-title{font-size:var(--text-base);font-weight:700;font-family:var(--font-display);color:var(--color-error);margin-bottom:var(--space-3);display:flex;align-items:center;gap:var(--space-2)}
+.apack-rules,.apack-legal-rules{list-style:none;display:flex;flex-direction:column;gap:var(--space-2)}
+.apack-rules li,.apack-legal-rules li{font-size:var(--text-sm);color:var(--color-text-muted);padding-left:var(--space-5);position:relative}
+.apack-rules li::before{content:'✕';position:absolute;left:0;color:var(--color-error);font-weight:700}
+.apack-legal{margin-top:var(--space-4)}
+.apack-legal-title{font-size:var(--text-xs);font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--color-success);margin-bottom:var(--space-2)}
+.apack-legal-rules li::before{content:'✓';position:absolute;left:0;color:var(--color-success);font-weight:700}
+
+.diagram-wrap{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-xl);padding:var(--space-6);overflow-x:auto}
+.mermaid svg{max-width:100%!important;height:auto!important}
+
+.loop-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:var(--space-4)}
+.loop-step{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-xl);padding:var(--space-5) var(--space-6)}
+.step-header{display:flex;align-items:center;gap:var(--space-3);margin-bottom:var(--space-3)}
+.step-icon{width:2rem;height:2rem;border-radius:var(--radius-md);display:flex;align-items:center;justify-content:center;font-size:.85rem}
+.step-num{font-size:var(--text-xs);font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--color-text-faint)}
+.step-name{font-size:var(--text-sm);font-weight:700;font-family:var(--font-display)}
+.step-desc{font-size:var(--text-sm);color:var(--color-text-muted);line-height:1.65}
+
+.prompt-wrap{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-xl);overflow:hidden}
+.prompt-header{background:var(--color-surface-2);border-bottom:1px solid var(--color-border);padding:var(--space-4) var(--space-6);display:flex;align-items:center;justify-content:space-between}
+.prompt-header-title{font-size:var(--text-sm);font-weight:700;font-family:var(--font-display);display:flex;align-items:center;gap:var(--space-2)}
+.prompt-dots{display:flex;gap:var(--space-1)}
+.dot{width:12px;height:12px;border-radius:50%}
+.dot-r{background:#ff5f57}.dot-y{background:#ffbd2e}.dot-g{background:#28c940}
+.copy-btn{font-size:var(--text-xs);font-weight:600;padding:.3em .9em;border-radius:var(--radius-sm);background:var(--color-primary-highlight);color:var(--color-primary);border:1px solid var(--color-primary-highlight);cursor:pointer;transition:background .18s,color .18s}
+.copy-btn:hover{background:var(--color-primary);color:var(--color-bg)}
+.prompt-body{padding:var(--space-6);max-height:520px;overflow-y:auto}
+.prompt-body pre{font-family:ui-monospace,'SF Mono','Fira Code',monospace;font-size:.8rem;line-height:1.75;color:var(--color-text);white-space:pre-wrap;word-break:break-word}
+.prompt-body::-webkit-scrollbar{width:5px}
+.prompt-body::-webkit-scrollbar-track{background:transparent}
+.prompt-body::-webkit-scrollbar-thumb{background:var(--color-border);border-radius:999px}
+
+.pri-table{width:100%;border-collapse:collapse}
+.pri-table th{font-size:var(--text-xs);font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--color-text-faint);padding:var(--space-3) var(--space-4);text-align:left;border-bottom:1px solid var(--color-border)}
+.pri-table td{font-size:var(--text-sm);padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--color-divider);vertical-align:top}
+.pri-table tr:last-child td{border-bottom:none}
+.pri-table tr:hover td{background:var(--color-surface-offset)}
+.p-badge{display:inline-block;font-size:10px;font-weight:700;padding:.15em .55em;border-radius:999px;letter-spacing:.05em}
+.p1{background:var(--color-error-highlight);color:var(--color-error)}
+.p2{background:var(--color-orange-highlight);color:var(--color-orange)}
+.p3{background:var(--color-gold-highlight);color:var(--color-gold)}
+.p4{background:var(--color-blue-highlight);color:var(--color-blue)}
+.p5{background:var(--color-purple-highlight);color:var(--color-purple)}
+
+footer{padding:var(--space-8);text-align:center;color:var(--color-text-faint);font-size:var(--text-xs);border-top:1px solid var(--color-divider)}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:var(--color-bg)}
+::-webkit-scrollbar-thumb{background:var(--color-border);border-radius:3px}
+@media(max-width:768px){nav{padding:var(--space-3) var(--space-4)}.nav-links{display:none}section,.hero{padding:var(--space-8) var(--space-4)}}
+</style>
+</head>
+<body>
+
+<nav>
+  <a class="nav-logo" href="#">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+    MXFP4 Optimizer
+  </a>
+  <ul class="nav-links">
+    <li><a href="#shapes">Shapes</a></li>
+    <li><a href="#buckets">Buckets</a></li>
+    <li><a href="#loop">Loop</a></li>
+    <li><a href="#diagram">Diagram</a></li>
+    <li><a href="#prompt">Prompt</a></li>
+  </ul>
+</nav>
+
+<div class="hero">
+  <div class="hero-eyebrow">Codex Agent — Autonomous Kernel Optimization</div>
+  <h1 class="hero-title">Drive MXFP4 geomean<br><span class="dim">from 23 μs → </span>7 μs</h1>
+  <p class="hero-sub">Portfolio-first optimization loop across all shapes (m4 / m16 / m32 / m64 / m256). Every iteration attacks a named bucket, benefits multiple shapes, and must prove geomean improvement — not just single-shape wins.</p>
+  <div class="kpi-row">
+    <div class="kpi"><div class="kpi-label">v130 Best</div><div class="kpi-val gold">22.90 μs</div><div class="kpi-delta">Previous best baseline</div></div>
+    <div class="kpi"><div class="kpi-label">v132 Current</div><div class="kpi-val red">23.06 μs</div><div class="kpi-delta">Slight regression vs v130</div></div>
+    <div class="kpi"><div class="kpi-label">Target</div><div class="kpi-val green">≤ 7.00 μs</div><div class="kpi-delta">~3.3× improvement needed</div></div>
+    <div class="kpi"><div class="kpi-label">Active Base</div><div class="kpi-val teal">v130</div><div class="kpi-delta">native_scaled_exact_m4_k512_constbody</div></div>
+    <div class="kpi"><div class="kpi-label">Hottest Shape</div><div class="kpi-val red">m16</div><div class="kpi-delta">38.6 μs — highest leverage</div></div>
+    <div class="kpi"><div class="kpi-label">A-Pack</div><div class="kpi-val" style="color:var(--color-warning)">Research</div><div class="kpi-delta">Paper-only — no impl changes</div></div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<section id="shapes">
+  <div class="section-eyebrow">Portfolio</div>
+  <h2 class="section-title">All Shapes — Current Latency</h2>
+  <p class="section-desc">Every branch must show geomean improvement across this full portfolio. Single-shape wins that regress others are discarded.</p>
+  <div class="shapes-grid">
+    <div class="shape-card critical">
+      <div class="shape-label">Priority: Critical</div>
+      <div class="shape-name">m16</div>
+      <div class="shape-latency" style="color:var(--color-error)">38.6 μs</div>
+      <span class="shape-badge badge-critical">Fattest unfinished shape</span>
+      <div class="shape-bar-wrap"><div class="shape-bar bar-critical" style="width:100%"></div></div>
+    </div>
+    <div class="shape-card high">
+      <div class="shape-label">Priority: High</div>
+      <div class="shape-name">m64</div>
+      <div class="shape-latency" style="color:var(--color-orange)">30.1 μs</div>
+      <span class="shape-badge badge-high">Fragile — profiler reason only</span>
+      <div class="shape-bar-wrap"><div class="shape-bar bar-high" style="width:78%"></div></div>
+    </div>
+    <div class="shape-card high">
+      <div class="shape-label">Priority: High</div>
+      <div class="shape-name">m256</div>
+      <div class="shape-latency" style="color:var(--color-orange)">27.3 μs</div>
+      <span class="shape-badge badge-high">Direct-entry + setup delete</span>
+      <div class="shape-bar-wrap"><div class="shape-bar bar-high" style="width:71%"></div></div>
+    </div>
+    <div class="shape-card medium">
+      <div class="shape-label">Priority: Medium</div>
+      <div class="shape-name">m4</div>
+      <div class="shape-latency" style="color:var(--color-gold)">17.0 μs</div>
+      <span class="shape-badge badge-medium">Best shape — preserve v130</span>
+      <div class="shape-bar-wrap"><div class="shape-bar bar-medium" style="width:44%"></div></div>
+    </div>
+    <div class="shape-card medium">
+      <div class="shape-label">Priority: Medium</div>
+      <div class="shape-name">m32 (4096)</div>
+      <div class="shape-latency" style="color:var(--color-gold)">16.7 μs</div>
+      <span class="shape-badge badge-medium">Strong raw-B path, preserve</span>
+      <div class="shape-bar-wrap"><div class="shape-bar bar-medium" style="width:43%"></div></div>
+    </div>
+    <div class="shape-card medium">
+      <div class="shape-label">Priority: Medium</div>
+      <div class="shape-name">m32 (2880)</div>
+      <div class="shape-latency" style="color:var(--color-gold)">16.7 μs</div>
+      <span class="shape-badge badge-medium">Strong raw-B path, preserve</span>
+      <div class="shape-bar-wrap"><div class="shape-bar bar-medium" style="width:43%"></div></div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section id="buckets">
+  <div class="section-eyebrow">Optimization Buckets</div>
+  <h2 class="section-title">5 Buckets — Work All, Not One</h2>
+  <p class="section-desc">Every branch must name the bucket it attacks, the shapes it benefits, and why it moves geomean. No random merges.</p>
+  <div class="buckets-list">
+    <div class="bucket"><div class="bucket-num b1">B1</div><div><div class="bucket-title">Launch Overhead</div><div class="bucket-desc">Identify helper/wrapper launches still present on each exact hot shape. Delete only if the work does not re-appear as duplicate compute. Target: zero gratuitous kernel launch roundtrips.</div><div class="bucket-tags"><span class="tag">all shapes</span><span class="tag">wrapper launch</span><span class="tag">direct dispatch</span></div></div></div>
+    <div class="bucket"><div class="bucket-num b2">B2</div><div><div class="bucket-title">Temp Write/Read Laws</div><div class="bucket-desc">Rank temps by per-call bytes across m4/m16/m32/m64/m256. Attack the largest non-A-pack temp reads/writes first. Eliminate intermediate buffers that round-trip through memory without MFMA benefit.</div><div class="bucket-tags"><span class="tag">all shapes</span><span class="tag">intermediate buffers</span><span class="tag">memory traffic</span></div></div></div>
+    <div class="bucket"><div class="bucket-num b3">B3</div><div><div class="bucket-title">Runtime Shaping</div><div class="bucket-desc">Remove Python-owned prep/routing where it still exists. Unify hot exact-shape dispatch around compiled direct-entry only. Zero Python-side branching on hot paths.</div><div class="bucket-tags"><span class="tag">all shapes</span><span class="tag">Python routing</span><span class="tag">compiled dispatch</span></div></div></div>
+    <div class="bucket"><div class="bucket-num b4">B4</div><div><div class="bucket-title">Setup / Addressing</div><div class="bucket-desc">Clone public shapes where fixed dimensions allow deleting generic remap/loop/setup work. v130 proved constant-body + public-shape is real. Do this for m16 next (treat like m4 in v130), then m256. Keep raw-b_scale_sh path and direct-entry.</div><div class="bucket-tags"><span class="tag">m16 first</span><span class="tag">m256 next</span><span class="tag">constant-body</span><span class="tag">public-shape</span></div></div></div>
+    <div class="bucket"><div class="bucket-num b5">B5</div><div><div class="bucket-title">Non-Math Data Movement</div><div class="bucket-desc">Preserve direct-contract raw-B consumption where already positive. Do NOT reopen A-pack ownership without paper-first proof. Minimize bytes on hot path that aren't MFMA inputs.</div><div class="bucket-tags"><span class="tag">raw-B contract</span><span class="tag">A-pack research only</span><span class="tag">MFMA inputs</span></div></div></div>
+  </div>
+
+  <div style="margin-top:var(--space-8)">
+    <div class="apack-block">
+      <div class="apack-title">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        A-Pack — No Implementation Changes Allowed
+      </div>
+      <ul class="apack-rules">
+        <li>Per-CTA re-quantization of any kind</li>
+        <li>Fixed small CTA sweep patterns</li>
+        <li>Heavy block-local owner patterns</li>
+        <li>Any local delete that does not break the duplication law</li>
+      </ul>
+      <div class="apack-legal">
+        <div class="apack-legal-title">Legal only if ALL 3 proven on paper first:</div>
+        <ul class="apack-legal-rules">
+          <li>True duplication-law break (not local re-quant)</li>
+          <li>Legal mechanism that preserves most of the original tile grid</li>
+          <li>Proof that total quant work drops across the full tile grid</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section id="loop">
+  <div class="section-eyebrow">Agent Protocol</div>
+  <h2 class="section-title">Optimize → Benchmark → Repeat</h2>
+  <p class="section-desc">Each iteration is atomic. Never bundle unrelated changes. Commit winners, discard losers, document everything, loop until ≤7 μs.</p>
+  <div class="loop-steps">
+    <div class="loop-step"><div class="step-header"><div class="step-icon" style="background:var(--color-blue-highlight);color:var(--color-blue)">①</div><div><div class="step-num">Step 1</div><div class="step-name">Analyze</div></div></div><div class="step-desc">Read current benchmark result. Rank buckets by estimated savings × shapes affected. Confirm no A-pack or m64 violations before planning.</div></div>
+    <div class="loop-step"><div class="step-header"><div class="step-icon" style="background:var(--color-purple-highlight);color:var(--color-purple)">②</div><div><div class="step-num">Step 2</div><div class="step-name">Plan</div></div></div><div class="step-desc">Name the bucket, shapes, and mechanism. Estimate geomean delta conservatively. Write one-paragraph justification before touching any code.</div></div>
+    <div class="loop-step"><div class="step-header"><div class="step-icon" style="background:var(--color-primary-highlight);color:var(--color-primary)">③</div><div><div class="step-num">Step 3</div><div class="step-name">Implement</div></div></div><div class="step-desc">Branch from active base file. Make the smallest change that tests the hypothesis. No bundled unrelated changes. One bucket per branch.</div></div>
+    <div class="loop-step"><div class="step-header"><div class="step-icon" style="background:var(--color-gold-highlight);color:var(--color-gold)">④</div><div><div class="step-num">Step 4</div><div class="step-name">Benchmark</div></div></div><div class="step-desc">Run full harness. Collect geomean + all per-shape latencies. Verify no invalid output, no timeout. Compare to previous best geomean.</div></div>
+    <div class="loop-step"><div class="step-header"><div class="step-icon" style="background:var(--color-success-highlight);color:var(--color-success)">⑤</div><div><div class="step-num">Step 5</div><div class="step-name">Evaluate</div></div></div><div class="step-desc">Improves → commit new base. Regresses → discard. Neutral (&lt;0.05 μs) → keep only if no shape regressed. Always record delta table.</div></div>
+    <div class="loop-step"><div class="step-header"><div class="step-icon" style="background:var(--color-warning-highlight);color:var(--color-warning)">⑥</div><div><div class="step-num">Step 6</div><div class="step-name">Decide</div></div></div><div class="step-desc">If geomean ≤ 7 μs → DONE, report final version + all shape latencies. Else → return to Step 1 with next highest-value bucket.</div></div>
+    <div class="loop-step"><div class="step-header"><div class="step-icon" style="background:var(--color-error-highlight);color:var(--color-error)">⑦</div><div><div class="step-num">Step 7</div><div class="step-name">Document</div></div></div><div class="step-desc">Log: version tag, bucket attacked, shapes targeted, geomean before→after, per-shape delta table, what worked/didn't, next planned bucket.</div></div>
+  </div>
+
+  <div style="margin-top:var(--space-10)">
+    <h3 style="font-size:var(--text-base);font-weight:700;font-family:var(--font-display);margin-bottom:var(--space-4)">First-Iteration Priority Order</h3>
+    <div style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-xl);overflow:hidden">
+      <table class="pri-table">
+        <thead><tr><th>#</th><th>Task</th><th>Bucket</th><th>Shapes</th><th>Expected Yield</th></tr></thead>
+        <tbody>
+          <tr><td><span class="p-badge p1">P1</span></td><td style="font-weight:600">m16 constant-body + public-shape setup deletion</td><td>B4 Setup</td><td>m16</td><td style="color:var(--color-success)">38.6 → ~30 μs</td></tr>
+          <tr><td><span class="p-badge p2">P2</span></td><td style="font-weight:600">Cross-shape temp audit (rank by bytes × freq)</td><td>B2 Temps</td><td>all shapes</td><td style="color:var(--color-success)">multi-shape</td></tr>
+          <tr><td><span class="p-badge p3">P3</span></td><td style="font-weight:600">Launch wrapper audit per hot shape</td><td>B1 Launch</td><td>all shapes</td><td style="color:var(--color-success)">multi-shape</td></tr>
+          <tr><td><span class="p-badge p4">P4</span></td><td style="font-weight:600">m256 direct-entry + setup delete</td><td>B4 Setup</td><td>m256</td><td style="color:var(--color-success)">27.3 → ~22 μs</td></tr>
+          <tr><td><span class="p-badge p5">P5</span></td><td style="font-weight:600">m32 residual Python routing audit</td><td>B1+B3</td><td>m32 both</td><td style="color:var(--color-success)">marginal</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section id="diagram">
+  <div class="section-eyebrow">Visual Architecture</div>
+  <h2 class="section-title">Agent Loop — Flow Diagram</h2>
+  <p class="section-desc">Full decision tree from analysis through benchmark to commit or discard. Guard rails for A-pack and m64 fragility enforced at the Plan step.</p>
+  <div class="diagram-wrap">
+    <div class="mermaid">
+flowchart TD
+    START([Start v130 base 22.9us]) --> ANALYZE
+    ANALYZE[Analyze\nRead benchmark + rank buckets\nby savings x shapes affected] --> PLAN
+    PLAN[Plan\nName bucket + shapes + mechanism\nEstimate geomean delta] --> GUARD
+    GUARD{Guard Check\nA-pack rules?\nm64 fragility?} -->|Violations| REJECT[Reject Plan\nRevise or pick different bucket]
+    REJECT --> ANALYZE
+    GUARD -->|All clear| IMPLEMENT
+    IMPLEMENT[Implement\nBranch from active base\nSmallest change - no bundling] --> BENCH
+    BENCH[Benchmark\nRun full harness\nCollect geomean + per-shape] --> VALID
+    VALID{Output valid?\nNo timeouts?} -->|Invalid| DISCARD_V[Discard\nFix correctness first]
+    DISCARD_V --> IMPLEMENT
+    VALID -->|Valid| EVAL
+    EVAL{Geomean\nimproved?} -->|Yes ge 0.05us| COMMIT
+    EVAL -->|Neutral lt 0.05us| NEUTRAL{Any shape\nregressed?}
+    EVAL -->|Regressed| DISCARD[Discard\nDocument what failed]
+    NEUTRAL -->|Yes| DISCARD
+    NEUTRAL -->|No| COMMIT
+    DISCARD --> DOC
+    COMMIT[Commit\nNew active base + tag version] --> DOC
+    DOC[Document\nVersion - Bucket - Shapes\nGeomean delta - Per-shape table] --> DONE_CHECK
+    DONE_CHECK{Geomean\nle 7 us?} -->|Yes| DONE([DONE - Report final version])
+    DONE_CHECK -->|No| ANALYZE
+
+    style START fill:#1e3538,stroke:#4f98a3,color:#d4d3d0
+    style DONE fill:#283320,stroke:#6daa45,color:#d4d3d0
+    style GUARD fill:#3a2018,stroke:#bb653b,color:#d4d3d0
+    style REJECT fill:#2e1a2a,stroke:#d163a7,color:#d4d3d0
+    style DISCARD fill:#2e1a2a,stroke:#d163a7,color:#d4d3d0
+    style DISCARD_V fill:#2e1a2a,stroke:#d163a7,color:#d4d3d0
+    style COMMIT fill:#283320,stroke:#6daa45,color:#d4d3d0
+    style EVAL fill:#1a2535,stroke:#5591c7,color:#d4d3d0
+    style VALID fill:#1a2535,stroke:#5591c7,color:#d4d3d0
+    style DONE_CHECK fill:#3a2018,stroke:#e8af34,color:#d4d3d0
+    style NEUTRAL fill:#3a2018,stroke:#e8af34,color:#d4d3d0
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section id="prompt">
+  <div class="section-eyebrow">Codex Prompt</div>
+  <h2 class="section-title">Full Agent Prompt — Copy &amp; Run</h2>
+  <p class="section-desc">Paste directly into Codex. The agent implements the loop autonomously until geomean ≤ 7 μs is achieved or all buckets are exhausted.</p>
+  <div class="prompt-wrap">
+    <div class="prompt-header">
+      <div style="display:flex;align-items:center;gap:var(--space-4)">
+        <div class="prompt-dots"><div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div></div>
+        <div class="prompt-header-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          codex_agent_prompt.md
+        </div>
+      </div>
+      <button class="copy-btn" onclick="copyPrompt()">Copy</button>
+    </div>
+    <div class="prompt-body">
+      <pre id="promptText"># MXFP4 Kernel Optimization — Autonomous Agent Loop
+
+## Mission
+Drive geomean latency from ~23 us to <= 7 us.
+Active base: .agent-loop/manual/native_scaled_exact_shape_m4_k512_constbody_v130/submission.py
+Benchmark harness: .agent-loop/harness_runs/mxfp4_mm/
+
+Run the optimize -> benchmark -> evaluate loop INDEFINITELY until geomean <= 7 us.
+Never stop early. Never focus on a single shape only.
+
+## Shape Portfolio (optimize ALL shapes every iteration)
+- m16:       38.6 us  [CRITICAL — fattest unfinished shape]
+- m64:       30.1 us  [HIGH — only open with measured profiler reason]
+- m256:      27.3 us  [HIGH]
+- m4:        17.0 us  [MEDIUM — preserve v130 gains]
+- m32 4096:  16.7 us  [MEDIUM]
+- m32 2880:  16.7 us  [MEDIUM]
+
+Every branch MUST name: which bucket, which shapes benefit, why geomean improves.
+A branch that only improves one shape while regressing another is REJECTED.
+
+## 5 Optimization Buckets (attack all, not one)
+B1 Launch:     Delete wrapper launches; target zero gratuitous roundtrips per hot shape
+B2 Temp Laws:  Rank temps by bytes x freq; eliminate non-A-pack intermediate buffers
+B3 Runtime:    Remove Python prep/routing; compiled direct-entry only on hot paths
+B4 Setup:      Constant-body + public-shape for m16 first (treat like m4 in v130), then m256
+B5 Data Mvmt:  Preserve raw-B contract; minimize non-MFMA bytes on hot path
+
+## A-Pack Rules — NO implementation changes
+REJECT: per-CTA re-quant, fixed small CTA sweep, heavy block-local owner
+LEGAL only if ALL 3 proven on paper:
+  1. True duplication-law break (not local re-quant)
+  2. Legal mechanism preserving most of the original tile grid
+  3. Proof that total quant work drops across the full tile grid
+
+## m64 Rule
+Do NOT merge m64 changes without a measured profiler or exact-contract reason.
+v131 and v132 showed m64 is too fragile for naive merges.
+
+## Loop Protocol
+LOOP {
+  1. ANALYZE   — read benchmark, rank buckets by (savings x shapes affected)
+  2. PLAN      — name bucket + shapes + mechanism; check A-pack + m64 guards
+  3. IMPLEMENT — branch from active base, one bucket per branch, smallest change
+  4. BENCHMARK — run full harness, collect geomean + all per-shape latencies
+  5. EVALUATE  — improve => commit new base; regress => discard; neutral => keep if no regression
+  6. DECIDE    — geomean <= 7 us => STOP and report; else => back to step 1
+  7. DOCUMENT  — version, bucket, shapes, geomean delta, per-shape delta table, next bucket
+}
+
+## First-Iteration Priority Order
+P1: m16 constant-body + public-shape setup deletion        (B4) — target 38.6 -> ~30 us
+P2: Cross-shape temp audit ranked by bytes x call freq     (B2) — multi-shape gain
+P3: Launch wrapper audit per hot exact shape               (B1) — multi-shape gain
+P4: m256 direct-entry + setup delete                       (B4) — target 27.3 -> ~22 us
+P5: m32 residual Python routing audit                      (B1+B3) — marginal overhead
+
+## Winning Branch Criteria
+[X] Names the bucket clearly
+[X] Improves >= 2 shapes
+[X] Moves geomean >= 0.2 us
+[X] Does NOT regress any shape > 0.1 us
+[X] Does NOT touch A-pack code
+[X] Passes benchmark harness clean (valid output, no timeout)
+
+## Stop Condition
+Geomean <= 7.0 us AND all shapes pass correctness validation.
+
+If stuck above 7 us after exhausting B1-B5:
+  Enter A-pack paper mode:
+  - Derive m16 tile grid duplication law on paper
+  - No code changes until a legal mechanism is proven
+  - Focus question: can m16 reduce A-pack duplication without
+    collapsing thin-shape parallelism?</pre>
+    </div>
+  </div>
+</section>
+
+<footer>MXFP4 Kernel Optimization · Codex Agent Loop · v132 → target ≤ 7 μs · Portfolio-first optimization</footer>
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    background: '#131311',
+    primaryColor: '#1e3538',
+    primaryTextColor: '#d4d3d0',
+    primaryBorderColor: '#4f98a3',
+    lineColor: '#4a4948',
+    secondaryColor: '#1a2535',
+    tertiaryColor: '#283320',
+    clusterBkg: '#181816',
+    fontFamily: "'Satoshi', sans-serif",
+    fontSize: '13px'
+  }
+});
+function copyPrompt() {
+  const text = document.getElementById('promptText').innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    btn.textContent = 'Copied!';
+    btn.style.background = 'var(--color-success)';
+    btn.style.color = 'var(--color-bg)';
+    setTimeout(() => { btn.textContent = 'Copy'; btn.style.background = ''; btn.style.color = ''; }, 2000);
+  });
+}
+</script>
+</body>
+</html>

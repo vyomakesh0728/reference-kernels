@@ -1,0 +1,71 @@
+[
+  {
+    "deleted_cost_center": "generic mxfp4_pack_a_fixed on exact m4",
+    "expected_upside_source": "kernelbot profile shows the exact m4 path is dominated by tiny-path materialization, not by the MFMA body",
+    "forbidden_edits": [
+      "do not reopen the broken v79 launch structure",
+      "do not rewrite m8 or m16 in the same branch"
+    ],
+    "shape": "m4",
+    "success_gate": "m4 < 18.5 us",
+    "touched_symbols_or_regions": [
+      "mxfp4/exact_m4",
+      "mxfp4/exact_m4/a_pack"
+    ],
+    "why_larger_than_noise": "a_pack_share=0.722, b_scale_decode_share=0.000, kernel_share=0.278; the prep buckets dwarf the compute body, so deleting exact m4 A-pack is larger than noise"
+  },
+  {
+    "deleted_cost_center": "no_actionable_candidate",
+    "expected_upside_source": "profile evidence does not isolate a legal whole-bucket deletion yet",
+    "forbidden_edits": [
+      "do not open a branch without a named whole cost center"
+    ],
+    "shape": "m16",
+    "success_gate": "none",
+    "touched_symbols_or_regions": [
+      "mxfp4/exact_m16"
+    ],
+    "why_larger_than_noise": "kernelbot profile did not isolate a legal whole-bucket deletion: a_pack_share=0.500, b_scale_decode_share=0.000, b_pack_share=0.000, kernel_share=0.500"
+  },
+  {
+    "deleted_cost_center": "no_actionable_candidate",
+    "expected_upside_source": "profile evidence does not isolate a legal whole-bucket deletion yet",
+    "forbidden_edits": [
+      "do not open a branch without a named whole cost center"
+    ],
+    "shape": "m32",
+    "success_gate": "none",
+    "touched_symbols_or_regions": [
+      "mxfp4/exact_m32"
+    ],
+    "why_larger_than_noise": "kernelbot profile shows divergent m32 case composition, so the lane should stay closed until a stronger structural hypothesis exists"
+  },
+  {
+    "deleted_cost_center": "no_actionable_candidate",
+    "expected_upside_source": "profile evidence does not isolate a legal whole-bucket deletion yet",
+    "forbidden_edits": [
+      "do not open a branch without a named whole cost center"
+    ],
+    "shape": "m64",
+    "success_gate": "none",
+    "touched_symbols_or_regions": [
+      "mxfp4/exact_m64"
+    ],
+    "why_larger_than_noise": "kernelbot profile did not isolate a legal whole-bucket deletion: a_pack_share=0.390, b_scale_decode_share=0.455, b_pack_share=0.000, kernel_share=0.156"
+  },
+  {
+    "deleted_cost_center": "Python-side exact m256 wrapper materialization and exact-wide B repack",
+    "expected_upside_source": "kernelbot profile shows exact m256 still spends as much time packing inputs as it does in the MFMA body",
+    "forbidden_edits": [
+      "do not open CTA-order or wave scheduling before direct-body deletions fail twice",
+      "do not touch m64 in the same branch"
+    ],
+    "shape": "m256",
+    "success_gate": "m256 < 27.8 us before any ranked spend",
+    "touched_symbols_or_regions": [
+      "mxfp4/exact_m256",
+      "mxfp4/exact_m256/b_prep"
+    ],
+    "why_larger_than_noise": "a_pack_share=0.790, b_pack_share=0.000, kernel_share=0.210; exact m256 still has a large direct-entry/materialize bucket to delete before any scheduling work"
+  }
+]
