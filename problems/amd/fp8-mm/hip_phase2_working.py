@@ -529,7 +529,7 @@ __device__ __forceinline__ uint8_t mxfp4_scale_byte_32(const __hip_bfloat16* a_s
     for (int i = 0; i < 32; ++i) {
         amax = fmaxf(amax, fabsf(static_cast<float>(a_src[i])));
     }
-    if (amax <= 0.0f) {
+    if (!(amax > 0.0f)) {
         return 0;
     }
     const unsigned int rounded_bits = (__builtin_bit_cast(unsigned int, amax) + 0x200000u) & 0xFF800000u;
@@ -547,15 +547,19 @@ __device__ __forceinline__ int mxfp4_pack_scale_lane(uint8_t scale_byte) {
 __device__ __forceinline__ void mxfp4_pack_a_group32(
     const __hip_bfloat16* a_src,
     unsigned char* out_bytes,
-    uint8_t* out_scale
+    uint8_t* out_scale,
+    int m
 ) {
     const uint8_t scale_byte = mxfp4_scale_byte_32(a_src);
     *out_scale = scale_byte;
     const float scale_f = fp4_scale_from_e8m0(scale_byte);
-    const int scale_unbiased = static_cast<int>(scale_byte) - 127;
-    const float quant_scale = ldexpf(1.0f, -scale_unbiased);
-    const bool use_builtin_bf16 = (USE_FP4_BUILTIN_BF16_PACK != 0) && (HAS_CVT_SCALE_FP4_BF16 != 0);
-    const bool use_builtin_f32 = (USE_FP4_BUILTIN_PACK != 0) && (HAS_CVT_SCALE_FP4_F32 != 0);
+    float quant_scale = 1.0f;
+    if (scale_byte != 0) {
+        const int scale_unbiased = static_cast<int>(scale_byte) - 127;
+        quant_scale = ldexpf(1.0f, -scale_unbiased);
+    }
+    const bool use_builtin_bf16 = (USE_FP4_BUILTIN_BF16_PACK != 0) && (m == 16) && (HAS_CVT_SCALE_FP4_BF16 != 0);
+    const bool use_builtin_f32 = (USE_FP4_BUILTIN_PACK != 0) && (m == 16) && (HAS_CVT_SCALE_FP4_F32 != 0);
 
     #pragma unroll
     for (int i = 0; i < 16; ++i) {
