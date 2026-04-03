@@ -14,10 +14,39 @@ MLA decode attention. DeepSeek R1 forward_absorb path.
 - Output: (total_q, 16, 512) bf16
 - Tolerance: rtol=1e-01, atol=1e-01
 
-## Current Status: ~60-69 µs geomean, rank ~38/88. #1 is 29 µs.
-- **Production:** `submission.py` = `best_aiter_config.py` (aiter-only, ~60 µs claimed)
-- **HIP WIP:** `hip_bf16_mfma_wip.py` (correct but ~1109 µs—16× slower, needs work)
-- **Gap to #1:** need ~2× speedup from current best
+## Current Status: 66 µs geomean, rank ~38/88. #1 is 29 µs.
+- **Production:** `submission.py` = aiter fp8 with aggressive kv8k config (~66 µs)
+- **HIP WIP:** Dead path (load_inline >17 min compile timeout)
+- **Gap to #1:** need ~2.3× speedup from current best
+
+## 2026-04-02: tl.dot_scaled WORKS on gfx950!
+
+**BREAKTHROUGH: Fixed tensor layout for `tl.dot_scaled`**
+
+Previous tests failed with "Reduction dimension should pack the same number of elements".
+Fixed by studying Triton's test_matmul.py:
+- **B tensor**: Generate (N, K), pack along K → (N, K//2), transpose → (K//2, N)
+- **B_scale**: Shape (N, K//32) - NOT transposed!
+- **rhs_k_pack=True** for K-packed FP4 data
+
+**Test result** (workflow 23896940925):
+```
+DOT_SCALED V3: SUCCESS! C sum: -430.52777099609375
+```
+
+**Critical insight for bf16 × mxfp4:**
+- Triton uses **software emulation** (upcasts mxfp4 to bf16)
+- Still get **2× bandwidth savings** from reading mxfp4
+- But **no native FP4 compute** - would need fp8×mxfp4 or mxfp4×mxfp4
+
+**Challenge for MLA:**
+- QK_HEAD_DIM=576 is NOT power of 2
+- `tl.dot()` on AMD needs power-of-2 dims
+- aiter handles this with 18 MFMA tiles (576/32=18)
+
+**Files:**
+- `test_dotscaled_v3.py` - working dot_scaled test
+- `triton_mxfp4_qk.py` - WIP MLA QK kernel
 
 ## Novel paths to #1 (pick one)
 1. **Single HIP kernel, zero Python dispatch** — fuse stage1+reduce, pre-allocate everything, one `hipLaunchKernel`

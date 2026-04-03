@@ -1,22 +1,9 @@
 #!POPCORN leaderboard amd-mixed-mla
 #!POPCORN gpu MI355X
-"""Aggressive aiter policy tuned for current harness behavior.
-
-Key findings:
-- Keep kv=1024 path as a16w8 with low splits (good small/medium behavior)
-- For kv=8192, force a8w8 + ns=32 across all batches
-- On recent benchmark runs this lowered geomean vs prior mixed config
-
-The wall: bs=256,kv=8k remains ~312us.
-Roofline floor: ~150-219us (just reading fp8 KV at 8TB/s).
-Gap: ~100us from kernel efficiency + overhead.
-
-Next steps beyond aiter:
-1. Custom HIP kernel with fused QK^T+softmax+V (eliminates split-K materialization)
-2. mxfp4 KV with V_MFMA_SCALE_F32_16X16X128_F8F6F4 (2x bandwidth savings)
-"""
+"""Deep probe of torch.ops.aiter namespace to find .default accessors."""
 
 import torch
+import sys
 from task import input_t, output_t
 
 NUM_HEADS = 16
@@ -24,6 +11,7 @@ NUM_KV_HEADS = 1
 QK_HEAD_DIM = 576
 V_HEAD_DIM = 512
 SM_SCALE = 1.0 / (QK_HEAD_DIM**0.5)
+
 from aiter import dtypes as aiter_dtypes
 from aiter import get_mla_metadata_info_v1, get_mla_metadata_v1
 from aiter.mla import mla_decode_fwd
@@ -31,10 +19,78 @@ from aiter.ops.quant import dynamic_per_tensor_quant
 
 FP8_DTYPE = aiter_dtypes.fp8
 _cache = {}
+_probed = [False]
+
+
+def _deep_probe():
+    """Deep probe of torch.ops.aiter namespace."""
+    if _probed[0]:
+        return
+    _probed[0] = True
+
+    print("=== DEEP PROBE START ===", file=sys.stderr)
+
+    # List all ops in torch.ops.aiter
+    if hasattr(torch.ops, "aiter"):
+        aiter_ns = torch.ops.aiter
+        ops = [n for n in dir(aiter_ns) if not n.startswith("_")]
+        print(f"torch.ops.aiter has {len(ops)} ops:", file=sys.stderr)
+        for op_name in sorted(ops):
+            op = getattr(aiter_ns, op_name)
+            has_default = hasattr(op, "default")
+            print(
+                f"  {op_name}: type={type(op).__name__}, .default={has_default}",
+                file=sys.stderr,
+            )
+            if has_default:
+                print(
+                    f"    -> torch.ops.aiter.{op_name}.default AVAILABLE!",
+                    file=sys.stderr,
+                )
+
+    # Check if the low-level ops are registered
+    print("\n=== Checking for specific MLA ops ===", file=sys.stderr)
+
+    # Try to import and check the actual C++ bindings
+    try:
+        from aiter.ops import mla as mla_ops
+
+        print(f"aiter.ops.mla module: {dir(mla_ops)}", file=sys.stderr)
+    except Exception as e:
+        print(f"aiter.ops.mla import failed: {e}", file=sys.stderr)
+
+    # Check the jit modules
+    try:
+        import aiter.jit.module_mla_asm as mla_asm
+
+        print(f"module_mla_asm: {dir(mla_asm)}", file=sys.stderr)
+        if hasattr(mla_asm, "mla_decode_stage1_asm_fwd"):
+            func = mla_asm.mla_decode_stage1_asm_fwd
+            print(f"mla_decode_stage1_asm_fwd type: {type(func)}", file=sys.stderr)
+    except Exception as e:
+        print(f"module_mla_asm check failed: {e}", file=sys.stderr)
+
+    # Check quant ops
+    print("\n=== Checking quant ops ===", file=sys.stderr)
+    try:
+        from aiter.ops import quant as quant_ops
+
+        print(
+            f"aiter.ops.quant module: {[n for n in dir(quant_ops) if not n.startswith('_')]}",
+            file=sys.stderr,
+        )
+
+        # Check if dynamic_per_tensor_quant is in torch.ops
+        if hasattr(torch.ops, "aiter"):
+            quant_related = [n for n in dir(torch.ops.aiter) if "quant" in n.lower()]
+            print(f"torch.ops.aiter quant ops: {quant_related}", file=sys.stderr)
+    except Exception as e:
+        print(f"quant ops check failed: {e}", file=sys.stderr)
+
+    print("=== DEEP PROBE END ===", file=sys.stderr)
 
 
 def _get_config(bs, kvl):
-    """Aggressive split policy: keep 1k path, force 8k path to a8w8+ns32."""
     if kvl <= 1024:
         if bs <= 32:
             return (8, False, 2, True)
@@ -110,9 +166,14 @@ def custom_kernel(data: input_t) -> output_t:
     q, kv_data, qo_indptr, kv_indptr, config = data
     bs = int(config["batch_size"])
     kvl = int(config["kv_seq_len"])
+
+    if not _probed[0]:
+        _deep_probe()
+
     ns, use_a8w8, ps, fm = _get_config(bs, kvl)
     kv_fp8, kv_scale = kv_data["fp8"]
     kv_4d = kv_fp8.view(kv_fp8.shape[0], 1, NUM_KV_HEADS, kv_fp8.shape[-1])
+
     if use_a8w8:
         bkey = ("dq", q.numel())
         if bkey not in _cache:
@@ -126,6 +187,7 @@ def custom_kernel(data: input_t) -> output_t:
     else:
         qv = q.view(-1, NUM_HEADS, QK_HEAD_DIM)
         qs = None
+
     c = _get_or_build(
         bs, kvl, qv.dtype, kv_fp8.dtype, qo_indptr, kv_indptr, ns, q.device, ps, fm
     )

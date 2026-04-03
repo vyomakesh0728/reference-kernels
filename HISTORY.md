@@ -31,6 +31,138 @@ Log **failed attempts** and **why**—that saves more time than only logging win
 
 ## Log
 
+### 2026-04-02 — mixed-mla: Write-through (ns=1) TESTED — HYPOTHESIS WRONG
+
+| Field | Content |
+|--------|--------|
+| **Problem** | mixed-mla |
+| **Goal** | Test if ns=1 (no split-K reduce) improves small kv=1024 shapes |
+| **Techniques** | 1) Set num_kv_splits=1 for kv≤1024; 2) Benchmarked all 8 shapes |
+| **Code / commit** | `writethrough_test.py`, `writethrough_ns2.py` |
+| **Evidence** | bs=4,kv=1024: **80µs (ns=1) vs 27µs (ns=8) → 3× WORSE**; bs=32,kv=1024: 81µs vs 31µs → 2.6× worse |
+| **Popcorn** | `test` ✅ · `benchmark` ✅ |
+| **Result** | **HYPOTHESIS WRONG** - ns=1 dramatically hurts performance |
+| **What didn't work** | Write-through concept assumes reduce overhead > parallelism benefit. Reality: split-K provides critical GPU parallelism even for small sequences (64 vs 512 concurrent outputs) |
+| **Rule / spec tension** | none |
+| **Learnings** | 1) **Split-K is about parallelism, not just throughput**; 2) Even small kv=1024 benefits from ns=8; 3) FlashInfer's "write-through" may work differently (instruction-level, not split-level) |
+| **Next bet** | Focus on Triton mxfp4 path — all dispatch overhead approaches are blocked |
+| **Artifacts** | `writethrough_test.py` benchmark results |
+
+---
+
+### 2026-04-02 — mixed-mla: HIP graphs BLOCKED by harness
+
+| Field | Content |
+|--------|--------|
+| **Problem** | mixed-mla |
+| **Goal** | Use HIP graph capture to eliminate Python dispatch overhead |
+| **Techniques** | 1) Tested torch.cuda.graph(); 2) Tested torch.cuda.Event(enable_timing=True); 3) Tested torch.cuda.Stream() |
+| **Code / commit** | `dispatch_overhead_analysis.py`, `hip_graph_test.py` |
+| **Evidence** | Harness error: "Your code seems to be doing work on another stream" — blocks ALL stream/graph usage |
+| **Popcorn** | `test` ❌ (harness rejection) |
+| **Result** | **HIP graphs NOT VIABLE** - harness does static analysis and blocks stream operations |
+| **What didn't work** | 1) torch.cuda.graph() — blocked; 2) torch.cuda.Event(enable_timing=True) — blocked; 3) torch.cuda.Stream() — blocked |
+| **Rule / spec tension** | Harness restriction not documented, discovered empirically |
+| **Learnings** | 1) **Harness blocks all stream usage** including graph capture; 2) Cannot eliminate dispatch overhead via graph replay; 3) Only path is a custom kernel that avoids Python dispatch entirely |
+| **Next bet** | Triton kernel (single fused attention) or accept aiter's Python overhead |
+| **Artifacts** | `dispatch_overhead_analysis.py` |
+
+---
+
+### 2026-04-02 — mixed-mla: Pre-compiled .co file approach RESEARCH
+
+| Field | Content |
+|--------|--------|
+| **Problem** | mixed-mla |
+| **Goal** | Research feasibility of loading pre-compiled .co files via hipModuleLoad to bypass Python dispatch overhead |
+| **Techniques** | 1) Analyzed Popcorn submission format (task.yml); 2) Researched HIP Python interface (hipModuleLoad, hipModuleLaunchKernel); 3) Reverse-engineered aiter's .co loading from asm_mla_decode_fwd.cpp; 4) Located aiter .co files at `/home/runner/aiter/hsa/gfx950/mla/*.co` |
+| **Code / commit** | Created `hip_module_load_prototype.py` with research findings |
+| **Evidence** | task.yml: `files: [{"name": "submission.py", "source": "@SUBMISSION@"}]` - **only 1 Python file allowed**; aiter kernel naming: `mla_a8w8_qh16_qseqlen1_gqaratio16_ps.co` |
+| **Popcorn** | n/a (research only) |
+| **Result** | **NOT VIABLE as primary approach** - cannot ship .co files with submission |
+| **What didn't work** | 1) Shipping .co files: submission format only accepts single .py file; 2) Embedding .co in Python: base64-encoded binary still needs hipModuleLoadData; 3) Direct hipModuleLoad of aiter's files: requires exact kernel function names + ABI matching |
+| **Rule / spec tension** | Submission format explicitly limits files to submission.py |
+| **Learnings** | 1) **aiter .co location**: `/home/runner/aiter/hsa/gfx950/mla/*.co`; 2) **Kernel names**: mla_a8w8_qh16_qseqlen1_gqaratio16_ps (pattern: mla_{a/bf16}{quant}w{quant}_qh{heads}_..._ps); 3) **HIP Python API**: hip.hipModuleLoadData(bytes) + hip.hipModuleGetFunction(module, b"name"); 4) **Kernel args**: 20+ args including q, kv, indptrs, scales, strides, output; 5) **Estimated savings if worked**: 250µs per inference (270µs CPU → ~20µs) |
+| **Next bet** | Alternative approach: Try Triton mxfp4 path (tl.dot_scaled works!) or focus on pure aiter tuning |
+| **Artifacts** | `hip_module_load_prototype.py` - contains full research summary and prototype code |
+
+---
+
+### 2026-04-02 — mixed-mla: dispatch overhead research (parallel agents)
+
+| Field | Content |
+|--------|--------|
+| **Problem** | mixed-mla |
+| **Goal** | Eliminate 270µs Python dispatch overhead (wall=293µs, GPU=24µs) |
+| **Techniques** | 1) Probed torch.ops.aiter namespace; 2) Researched FlashInfer/ThunderMLA megakernel; 3) Parallel agent investigation of 3 approaches |
+| **Code / commit** | `aiter_default_bypass.py`, `aiter_ops_probe.py` (probing files) |
+| **Evidence** | torch.ops.aiter has only 5 utility ops (check_numa, get_cu_num, get_gfx, get_module, name) - MLA ops NOT registered as torch.ops |
+| **Popcorn** | `test` ✅ (probing submissions) |
+| **Result** | **.default bypass NOT viable** - aiter MLA uses custom JIT modules, not torch.library |
+| **What didn't work** | torch.ops.aiter doesn't contain MLA ops; only utility functions registered |
+| **Learnings** | 1) aiter uses JIT-compiled .so modules (module_mla_asm.so, module_mla_reduce.so); 2) MLA functions are Python wrappers around JIT modules; 3) ThunderMLA megakernel approach could eliminate overhead but requires HIP kernel |
+| **Next bet** | Parallel research: (1) Pre-compiled .co direct loading, (2) HIP graphs isolation, (3) Write-through for small kv |
+| **Artifacts** | Parallel agents running for each approach |
+
+---
+
+### 2026-04-02 — mixed-mla: tl.dot_scaled tensor layout FIXED, working on gfx950
+
+| Field | Content |
+|--------|--------|
+| **Problem** | mixed-mla |
+| **Goal** | Fix `tl.dot_scaled` tensor layout to enable mxfp4 KV path |
+| **Techniques** | 1) Studied Triton's test_matmul.py patterns; 2) Fixed B tensor shape to (K//2, N) packed along K; 3) Fixed B_scale shape to (N, K//32) NOT transposed; 4) Used K=128 for native CDNA4 MFMA |
+| **Code / commit** | Created `test_dotscaled_v3.py` with correct tensor layouts |
+| **Evidence** | `popcorn-cli submit --mode test` workflow `23896940925`: "DOT_SCALED V3: SUCCESS! C sum: -430.52777099609375" |
+| **Popcorn** | `test` ✅ 4/4 (aiter still passes, dot_scaled compiled!) |
+| **Result** | **`tl.dot_scaled` WORKS on gfx950!** Correct tensor layout: B as (K//2, N) packed, B_scale as (N, K//32) |
+| **What didn't work** | Previous tests had wrong B layout (should be transposed from (N, K) packed) |
+| **Rule / spec tension** | none |
+| **Learnings** | 1) **B tensor**: Generate (N, K), pack along K dim → (N, K//2), then transpose → (K//2, N); 2) **B_scale**: Shape is (N, K//32), NOT transposed; 3) **rhs_k_pack=True** for K-packed data; 4) For bf16 × mxfp4, Triton uses software emulation (upcast to bf16) - 2× BW savings but no native FP4 compute |
+| **Next bet** | 1) Build full Triton MLA kernel using mxfp4 KV with correct dot_scaled layout; 2) Test fp8 × mxfp4 which might use native scaled MFMA; 3) Benchmark mxfp4 path vs current 66µs aiter fp8 |
+| **Artifacts** | `test_dotscaled_v3.py`, `triton_mxfp4_qk.py` (WIP) |
+
+---
+
+### 2026-04-02 — mixed-mla: mxfp4 path investigation (taking motivation from mxfp4-mm)
+
+| Field | Content |
+|--------|--------|
+| **Problem** | mixed-mla |
+| **Goal** | Investigate mxfp4 KV path for MLA, inspired by mxfp4-mm's 13.87µs using native FP4 MFMA |
+| **Techniques** | 1) Analyzed mxfp4-mm's `aiter.gemm_a4w4` approach; 2) Studied CDNA4 ISA `V_MFMA_SCALE_F32_16X16X128_F8F6F4`; 3) Researched Triton `tl.dot_scaled` for bf16 × mxfp4 |
+| **Code / commit** | Created `triton_mxfp4_mla.py`, `triton_dotscaled_test.py` (experimental) |
+| **Evidence** | CDNA4 ISA shows native FP4 MFMA with E8M0 scales; Triton docs confirm `tl.dot_scaled` supports `e2m1` format with bf16 lhs |
+| **Popcorn** | `test` ✅ (workflow 23894715745) - dot_scaled compilation test |
+| **Result** | **`tl.dot_scaled` EXISTS on gfx950!** Failed with shape error, not missing function: "Reduction dimension should pack the same number of elements; (lhs: ['constexpr[16]', 'constexpr[64]'] vs rhs: ['constexpr[64]', 'constexpr[16]'])". This means the API is available - we just need correct tensor layouts. |
+| **What didn't work** | 1) `aiter.gemm_a4w4` can't be used directly (MLA needs fused attention, not separate GEMMs); 2) Software mxfp4 dequant is 30-68x slower (confirmed dead); 3) vLLM PR #30177 for FP4 MLA BMM is stale/unmerged; 4) First `dot_scaled` test had wrong tensor layout (K dimension packing issue) |
+| **Rule / spec tension** | none |
+| **Learnings** | 1) mxfp4-mm succeeds because aiter has native FP4 GEMM kernel; 2) MLA fails because aiter has no mxfp4 MLA kernel; 3) `tl.dot_scaled` in Triton supports bf16 × mxfp4 and could work for FlashAttention-style kernel; 4) Need to test if gfx950 Triton lowers `tl.dot_scaled` to native MFMA |
+| **Next bet** | 1) Fix `tl.dot_scaled` tensor layout (K-packing issue); 2) For bf16 Q × mxfp4 K, Triton upcasts to bf16 (software emulation) - 2x BW savings but no native FP4 compute; 3) Consider mxfp4 Q × mxfp4 K for native MFMA path (requires Q quantization) |
+| **Artifacts** | `triton_mxfp4_mla.py`, `triton_dotscaled_test.py`, CDNA4 ISA reference |
+
+---
+
+### 2026-04-01 — mixed-mla: aggressive kv8k config sweep, promoted ns32 8k policy
+
+| Field | Content |
+|--------|--------|
+| **Problem** | mixed-mla |
+| **Goal** | Cut geomean by attacking the slow 8k shapes (`bs=32/64/256, kv=8192`) with a higher split policy |
+| **Techniques** | 1) Tried non-persistent modes to delete metadata overhead; 2) Benchmarked all-a8w8 persistent; 3) Promoted hybrid: keep `kv=1024` policy, force `kv=8192` to `(ns=32, a8w8, ps=1, fast_mode=False)` |
+| **Code / commit** | Updated `problems/amd_202602/mixed-mla/submission.py`; exploratory files: `aiter_nonpersist_explicit_ns.py`, `aiter_kv8k_all_a8w8_ns32.py` |
+| **Evidence** | Commands run: `popcorn-cli submit --gpu MI355X --leaderboard amd-mixed-mla --mode test --no-tui problems/amd_202602/mixed-mla/submission.py`; `popcorn-cli submit --gpu MI355X --leaderboard amd-mixed-mla --mode benchmark --no-tui problems/amd_202602/mixed-mla/submission.py`; `popcorn-cli submit --gpu MI355X --leaderboard amd-mixed-mla --mode benchmark --no-tui problems/amd_202602/mixed-mla/aiter_kv8k_all_a8w8_ns32.py` |
+| **Popcorn** | `test` ✅ · `benchmark` ✅ (submission improved vs same-session baseline) |
+| **Result** | Same-session baseline (`submission.py`, workflow `23854187328`) geomean **69.65 us**; updated submission (workflow `23855740669`) geomean **66.35 us** (**~4.7% faster**). Per-shape means after promotion: `26.5, 37.6, 31.0, 82.7, 39.7, 136, 87.3, 312` us. |
+| **What didn't work** | 1) Non-persistent hybrid auto (`aiter_nonpersist_auto_v2.py`) failed heuristic lookup (`q_type:bf16 kv_type:fp8 ... ps:0`), workflow `23852912157`; 2) Non-persistent auto all-a8w8 (`aiter_nonpersistent_auto.py`) failed with `RuntimeError: step must be nonzero`, workflow `23852978281`; 3) Non-persistent explicit splits passed but regressed badly (geomean **77.16 us**, workflow `23853325443`); 4) Persistent all-a8w8 regressed overall (geomean **74.39 us**, workflow `23853889728`). |
+| **Rule / spec tension** | none |
+| **Learnings** | 1) Current harness/aiter build appears fragile for non-persistent auto paths; 2) For this environment, raising 8k split count to 32 helps all 8k shapes in persistent mode; 3) Biggest remaining cost center is still `bs=256, kv=8192` (~312 us). |
+| **Next bet** | Keep this config as trunk and do a focused 8k-only sweep around `{ns=24,32,40}` + selective `a16w8` fallback only for `bs=4, kv=8192` to test if we can keep small-shape wins while reducing quant overhead. |
+| **Artifacts** | [Workflow 23852912157](https://github.com/gpu-mode/kernelbot/actions/runs/23852912157), [Workflow 23852978281](https://github.com/gpu-mode/kernelbot/actions/runs/23852978281), [Workflow 23853325443](https://github.com/gpu-mode/kernelbot/actions/runs/23853325443), [Workflow 23853889728](https://github.com/gpu-mode/kernelbot/actions/runs/23853889728), [Workflow 23854187328](https://github.com/gpu-mode/kernelbot/actions/runs/23854187328), [Workflow 23855740669](https://github.com/gpu-mode/kernelbot/actions/runs/23855740669) |
+
+---
+
 ### 2026-03-31 — mixed-mla: aiter num_splits tuning (no improvement)
 
 | Field | Content |

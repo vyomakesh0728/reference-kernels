@@ -1,19 +1,19 @@
 #!POPCORN leaderboard amd-mixed-mla
 #!POPCORN gpu MI355X
-"""Aggressive aiter policy tuned for current harness behavior.
+"""Write-through optimization: use num_kv_splits=1 for small KV sequences.
 
-Key findings:
-- Keep kv=1024 path as a16w8 with low splits (good small/medium behavior)
-- For kv=8192, force a8w8 + ns=32 across all batches
-- On recent benchmark runs this lowered geomean vs prior mixed config
+Hypothesis: For kv=1024, the reduce kernel adds unnecessary overhead.
+Setting ns=1 should eliminate reduce entirely ("write-through" to final output).
 
-The wall: bs=256,kv=8k remains ~312us.
-Roofline floor: ~150-219us (just reading fp8 KV at 8TB/s).
-Gap: ~100us from kernel efficiency + overhead.
+Config strategy:
+- kv <= 1024: ns=1 (no split-K, write-through)
+- kv = 8192: ns=32 (split-K for parallelism)
 
-Next steps beyond aiter:
-1. Custom HIP kernel with fused QK^T+softmax+V (eliminates split-K materialization)
-2. mxfp4 KV with V_MFMA_SCALE_F32_16X16X128_F8F6F4 (2x bandwidth savings)
+This should improve the 4 small shapes:
+- (bs=4, kv=1024)
+- (bs=32, kv=1024)
+- (bs=64, kv=1024)
+- (bs=256, kv=1024)
 """
 
 import torch
@@ -34,13 +34,18 @@ _cache = {}
 
 
 def _get_config(bs, kvl):
-    """Aggressive split policy: keep 1k path, force 8k path to a8w8+ns32."""
+    """Write-through config: ns=1 for small kv, ns=32 for large kv.
+
+    Returns: (num_splits, use_a8w8, page_size, fast_mode)
+
+    Key change: kv<=1024 uses ns=1 (write-through, no reduce kernel)
+    """
     if kvl <= 1024:
-        if bs <= 32:
-            return (8, False, 2, True)
-        if bs <= 64:
-            return (4, False, 2, True)
-        return (4, False, 2, True)
+        # Write-through: ns=1 eliminates reduce kernel entirely
+        # Still use a16w8 (bf16 Q) to skip quantization overhead
+        # page_size=1, fast_mode=True for low-latency path
+        return (1, False, 1, True)
+    # Large sequences need split-K for parallelism
     return (32, True, 1, False)
 
 
