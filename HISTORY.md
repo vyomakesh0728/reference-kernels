@@ -31,6 +31,25 @@ Log **failed attempts** and **why**—that saves more time than only logging win
 
 ## Log
 
+### 2026-04-03 — mixed-mla: tl.dot_scaled K=128 WORKS for mxfp4 QK
+
+| Field | Content |
+|--------|--------|
+| **Problem** | mixed-mla |
+| **Goal** | Confirm tl.dot_scaled works for MLA QK computation with mxfp4 KV |
+| **Techniques** | 1) Used K=128 tiles (K=64 causes Triton compiler crash); 2) Matched test_dotscaled_v3.py patterns |
+| **Code / commit** | `triton_mxfp4_dotscaled.py` |
+| **Evidence** | "DOTSCALED MLA: SUCCESS! Out sum: 117.9604" (workflow 23935657534) |
+| **Popcorn** | `test` ✅ 4/4 |
+| **Result** | **K=128 tl.dot_scaled WORKS on gfx950!** |
+| **What didn't work** | K=64 tiles crash Triton: "PassManager::run failed" during LLVM IR generation |
+| **Rule / spec tension** | none |
+| **Learnings** | 1) **Native dtypes**: `torch.float4_e2m1fn_x2`, `torch.float8_e8m0fnu`; 2) **K=128 required** for gfx950 MFMA; 3) **576 = 4×128 + 64** - need padding or partial tile handling; 4) **Scale padded**: (total_kv, 24) not (total_kv, 18) |
+| **Next bet** | Build full MLA kernel: pad Q to 640 (5×128), integrate softmax + V |
+| **Artifacts** | `triton_mxfp4_dotscaled.py` |
+
+---
+
 ### 2026-04-02 — mixed-mla: Write-through (ns=1) TESTED — HYPOTHESIS WRONG
 
 | Field | Content |
