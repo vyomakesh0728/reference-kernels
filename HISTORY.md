@@ -31,6 +31,44 @@ Log **failed attempts** and **why**—that saves more time than only logging win
 
 ## Log
 
+### 2026-04-03 — mixed-mla: Triton mxfp4 full kernel BLOCKED by indexing limitations
+
+| Field | Content |
+|--------|--------|
+| **Problem** | mixed-mla |
+| **Goal** | Build full Triton MLA kernel with mxfp4 KV |
+| **Techniques** | 1) K=128 tl.dot_scaled tiles work; 2) Tried software dequant + online softmax; 3) Multiple kernel iterations |
+| **Code / commit** | `triton_mxfp4_simple.py`, `triton_mxfp4_mla_v2.py`, `triton_mxfp4_v3.py` |
+| **Evidence** | Compilation errors: `unsupported tensor index: [0::2]`, `v_contrib_lo[j:j+1]` |
+| **Popcorn** | `test` ❌ (compilation failures) |
+| **Result** | **BLOCKED** - Triton's indexing limitations prevent efficient fp4 interleave handling |
+| **What didn't work** | 1) Slice indexing `[0::2]` not supported; 2) Constexpr loop indexing `[j:j+1]` not supported; 3) V accumulation via tl.where per element is O(512×16×16) per KV block |
+| **Rule / spec tension** | none |
+| **Learnings** | 1) **Triton indexing severely limited**: no slices, no loop-variable indexing; 2) **Native fp4 types cause KeyError**: must view as uint8; 3) **V accumulation is the hard part**: interleaved lo/hi nibbles need explicit loads, not vectorized ops |
+| **Next bet** | 1) Accept aiter fp8 as practical ceiling (~66µs); 2) Or try non-interleaved dequant (store v_lo, v_hi contiguously then accumulate); 3) Or explore pre-transposed mxfp4 data |
+| **Artifacts** | triton_mxfp4_*.py files showing various approaches |
+
+---
+
+### 2026-04-03 — mixed-mla: Triton mxfp4 building blocks ALL WORKING
+
+| Field | Content |
+|--------|--------|
+| **Problem** | mixed-mla |
+| **Goal** | Build Triton MLA kernel with mxfp4 KV for 2× bandwidth savings |
+| **Techniques** | 1) K=128 tl.dot_scaled tiles; 2) Transposed layout; 3) Tiled accumulation; 4) uint8 view of native fp4 dtypes |
+| **Code / commit** | `triton_mxfp4_dotscaled.py`, `triton_mxfp4_qk_test.py`, `triton_mxfp4_tiled.py`, `triton_mxfp4_full.py`, `triton_mxfp4_mla_v1.py` |
+| **Evidence** | "TILED QK: SUCCESS! Out sum=196.4985"; "HARNESS TEST: SUCCESS!"; "DOTSCALED MLA: SUCCESS!" |
+| **Popcorn** | `test` ✅ 4/4 all variants |
+| **Result** | **ALL BUILDING BLOCKS WORK!** Full kernel WIP |
+| **What didn't work** | K=64 tiles crash Triton compiler ("PassManager::run failed") |
+| **Rule / spec tension** | none |
+| **Learnings** | 1) **K=128 required** for gfx950 tl.dot_scaled; 2) **Native dtypes**: `torch.float4_e2m1fn_x2`, `torch.float8_e8m0fnu`; 3) **uint8 view works**: same shape; 4) **576 = 4×128 + 64**: need partial tile or padding; 5) **512 = 4×128**: V dimension is clean!; 6) **Scale padded**: (kv_len, 24) not (kv_len, 18) |
+| **Next bet** | Complete full MLA kernel: implement proper QK dot product with tl.dot_scaled, add V accumulation, benchmark vs aiter |
+| **Artifacts** | 5 test/WIP files demonstrating each component |
+
+---
+
 ### 2026-04-03 — mixed-mla: tl.dot_scaled K=128 WORKS for mxfp4 QK
 
 | Field | Content |

@@ -1,0 +1,25 @@
+---
+description: Mandatory workflow and iteration memory for reference-kernels (Popcorn, HISTORY.md).
+globs: "**/*"
+alwaysApply: true
+---
+
+# reference-kernels agent bootstrap
+
+On **new session** or after **context compaction**:
+
+1. Read repo **`AGENTS.md`** (Popcorn loop, `HISTORY.md` protocol).
+2. Read **`HISTORY.md`** for latest iteration, numbers, and "don't repeat" notes.
+3. For mixed-mla hackathon context, read **`CLAUDE.md`** when touching that problem.
+4. For low-level kernel work, read **`docs/mi355x_isa_reference.md`** (MFMA, memory ops, novel techniques).
+
+**Popcorn:** always **`test` before `benchmark`**; use **`leaderboard`** only when publishing (rate-limited). Benchmark does **not** print geomean—compute from per-shape means if needed.
+
+After material changes or Popcorn runs, **append `HISTORY.md`** using the template at the top of that file. Each entry should include where possible:
+
+- **What didn't work** (dead ends, not only wins)
+- **Evidence** (exact `popcorn-cli` lines, workflow URLs, mismatch_ratio / timings / geomean)
+- **Rule / spec tension** (doc vs code)
+- **Next bet** (one line for the next session)
+
+**Codex / other agents:** repo root **`codex.md`** points to `AGENTS.md`.
