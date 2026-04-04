@@ -1,0 +1,147 @@
+{
+  "date": "2026-04-03",
+  "repo": "/Users/v/reference-kernels/problems/amd",
+  "anchor": {
+    "submission_matches_anchor": true,
+    "anchor_file": "fp8-mm/submission_anchor_13p406.py",
+    "live_file": "fp8-mm/submission.py",
+    "benchmark_artifact": ".agent-loop/harness_runs/mxfp4_mm/20260402-120426-p0p5-runtime-collapse-owned-scaleflat-r1-benchmark/stages/01_benchmark/parsed_metrics.json",
+    "profile_artifact": ".agent-loop/harness_runs/mxfp4_mm/20260402-143032-baseline-recheck-profile-r1-harness/stages/01_profile_rocprof/profile/profile_summary.json",
+    "benchmark_geomean_us": 13.406361750228412
+  },
+  "shape_metrics": [
+    {
+      "shape": "m4",
+      "m": 4,
+      "n": 2880,
+      "k": 512,
+      "bench_us": 9.9,
+      "self_cuda_us": 2.918,
+      "a_pack_us": 2.079,
+      "kernel_us": 0.839,
+      "wall_minus_self_us": 6.982
+    },
+    {
+      "shape": "m16",
+      "m": 16,
+      "n": 2112,
+      "k": 7168,
+      "bench_us": 19.6,
+      "self_cuda_us": 2.598,
+      "a_pack_us": 2.119,
+      "kernel_us": 0.479,
+      "wall_minus_self_us": 17.002
+    },
+    {
+      "shape": "m32_n2880",
+      "m": 32,
+      "n": 2880,
+      "k": 512,
+      "bench_us": 9.98,
+      "self_cuda_us": 2.438,
+      "a_pack_us": 1.959,
+      "kernel_us": 0.479,
+      "wall_minus_self_us": 7.542
+    },
+    {
+      "shape": "m32_n4096",
+      "m": 32,
+      "n": 4096,
+      "k": 512,
+      "bench_us": 10.1,
+      "self_cuda_us": 2.078,
+      "a_pack_us": 1.599,
+      "kernel_us": 0.479,
+      "wall_minus_self_us": 8.022
+    },
+    {
+      "shape": "m64",
+      "m": 64,
+      "n": 7168,
+      "k": 2048,
+      "bench_us": 18.1,
+      "self_cuda_us": 0.958,
+      "a_pack_us": 0.479,
+      "kernel_us": 0.479,
+      "wall_minus_self_us": 17.142
+    },
+    {
+      "shape": "m256",
+      "m": 256,
+      "n": 3072,
+      "k": 1536,
+      "bench_us": 16.4,
+      "self_cuda_us": 0.958,
+      "a_pack_us": 0.479,
+      "kernel_us": 0.479,
+      "wall_minus_self_us": 15.442
+    }
+  ],
+  "live_exact_path_audit": {
+    "python_workspace_alloc_per_call": true,
+    "output_carved_from_workspace": true,
+    "standalone_a_pack_launch_per_call": true,
+    "standalone_b_prep_launch_on_public_exact_path": false,
+    "b_shuffle_used_on_public_exact_path": false,
+    "notes": [
+      "All public exact shapes still run two GPU launches inside owned-workspace wrappers: A-pack then exact compute.",
+      "Public exact paths already bypass old generic B repack/unshuffle helper launches and consume raw b_q plus raw shuffled b_scale_sh.",
+      "Top-level contract still includes b_shuffle, but exact fast paths ignore it."
+    ]
+  },
+  "dead_or_exhausted_lanes": [
+    "exact_public_graph_replay_r1 is dead on runner: empty HIP graphs and catastrophic benchmark regression",
+    "host-only wrapper collapse lanes such as nocheck / cpp-return were noise-to-worse",
+    "m4 one-shot producer-consumer ready-flag design is dead",
+    "m32 single-CTA serial single-launch sweep is dead and catastrophic",
+    "pure kernel-body-only tuning cannot plausibly bridge 13.406us to <=7us"
+  ],
+  "open_non_apack_lanes": [
+    {
+      "rank": 1,
+      "branch": "m16_exact_bfeed_direct_contract_k7168_n2112",
+      "deleted_cost_center": "raw row-major B feed with worst inter-lane stride plus per-step shuffled-scale decode on exact m16",
+      "why_large": "m16 has the weakest latency hiding, the largest B stride, and the largest wall-vs-self gap among thin shapes",
+      "major_risk": "caller-provided b_shuffle contract may not map to a directly consumable exact-kernel feed layout",
+      "fast_falsifier": "if the replacement still needs a per-call B pack kernel, kill the branch unless that layout is already supplied by the caller"
+    },
+    {
+      "rank": 2,
+      "branch": "m256_exact_breuse_direct_contract_k1536_n3072",
+      "deleted_cost_center": "8x raw-B reread across y-tiles plus repeated scale decode",
+      "why_large": "grid.y=8 gives real B reuse economics on the live exact m256 path",
+      "major_risk": "one-shot B prep can overpay if not truly amortized by reuse",
+      "fast_falsifier": "if measured B-prep traffic is not amortized by the reread reduction, kill it"
+    },
+    {
+      "rank": 3,
+      "branch": "m64_exact_breuse_direct_contract_k2048_n7168",
+      "deleted_cost_center": "2x raw-B reread across y-tiles",
+      "why_large": "still a real reuse bucket, but weaker than m256",
+      "major_risk": "pack/setup cost can exceed the two-pass reread saving",
+      "fast_falsifier": "if pack/setup traffic exceeds removed reread traffic, kill it"
+    },
+    {
+      "rank": 4,
+      "branch": "m4_m16_vectorload_partialzero_cleanup",
+      "deleted_cost_center": "scalar byte copies and unnecessary register clearing in thin exact kernels",
+      "why_large": "m32/m64/m256 already use a better vector-load pattern that m4/m16 still lack",
+      "major_risk": "too small alone",
+      "fast_falsifier": "no measurable reduction in vector loads or register pressure"
+    },
+    {
+      "rank": 5,
+      "branch": "wide_post_bfeed_l2lds_staging_32x32x64",
+      "deleted_cost_center": "repeated VGPR-mediated B ingress after a B-direct win exists",
+      "why_large": "only becomes credible after a usable wide-shape B contract is in place",
+      "major_risk": "LDS staging without real reuse just adds traffic and pressure",
+      "fast_falsifier": "no measured reduction in B reread or live-range pressure"
+    }
+  ],
+  "critical_contract_findings": [
+    "Do not assume b_scale_sh is row-major [n,16]; benchmark-mode live layout is opaque.",
+    "The in-repo helper _get_b_preshuffled_mfma_fp4(b_q) returns shape [n/16, k_half*16], so it is not a drop-in stand-in for the currently visible top-level b_shuffle contract.",
+    "Any b_shuffle-based lane must verify the actual runner contract before remote spend."
+  ],
+  "bottom_line": "Stop spending on helper A-pack micro-variants. The best no-A-pack research direction is B-feed law and wide-shape B reuse, led by exact m16 for thin-shape B bandwidth/coalescing and exact m256 for B reuse economics. Pure kernel-body tuning is too small to reach <=7us from the current 13.406us anchor."
+}

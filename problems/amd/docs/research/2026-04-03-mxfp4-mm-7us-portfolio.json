@@ -1,0 +1,301 @@
+{
+  "date": "2026-04-03",
+  "problem": "mxfp4-mm",
+  "goal_us_geomean": 7.0,
+  "anchor": {
+    "file": "fp8-mm/submission.py",
+    "anchor_copy": "fp8-mm/submission_anchor_13p406.py",
+    "benchmark_artifact": ".agent-loop/harness_runs/mxfp4_mm/20260402-120426-p0p5-runtime-collapse-owned-scaleflat-r1-benchmark/stages/01_benchmark/parsed_metrics.json",
+    "profile_artifact": ".agent-loop/harness_runs/mxfp4_mm/20260402-143032-baseline-recheck-profile-r1-harness/stages/01_profile_rocprof/profile/profile_summary.json",
+    "benchmark_geomean_us": 13.406361750228413
+  },
+  "live_findings": {
+    "public_exact_paths_use_owned_workspace": true,
+    "public_exact_paths_still_launch_standalone_a_pack": true,
+    "public_exact_paths_mostly_deleted_old_b_side_temps": true,
+    "b_shuffle_present_in_live_contract_but_unused_by_exact_fast_paths": true,
+    "unused_b_shuffle_helper": "fp8-mm/submission.py:3631-3638"
+  },
+  "shape_metrics": [
+    {
+      "shape": "m4",
+      "m": 4,
+      "k": 512,
+      "n": 2880,
+      "bench_us": 9.9,
+      "gpu_self_us": 2.918,
+      "delta_us": 6.982,
+      "dominant_bucket": "a_pack",
+      "a_pack_us": 2.079,
+      "kernel_us": 0.839,
+      "target_needed_for_7us_geomean_us": 5.17
+    },
+    {
+      "shape": "m16",
+      "m": 16,
+      "k": 7168,
+      "n": 2112,
+      "bench_us": 19.6,
+      "gpu_self_us": 2.598,
+      "delta_us": 17.002,
+      "dominant_bucket": "a_pack",
+      "a_pack_us": 2.119,
+      "kernel_us": 0.479,
+      "target_needed_for_7us_geomean_us": 10.23
+    },
+    {
+      "shape": "m32_n2880",
+      "m": 32,
+      "k": 512,
+      "n": 2880,
+      "bench_us": 9.98,
+      "gpu_self_us": 2.438,
+      "delta_us": 7.542,
+      "dominant_bucket": "a_pack",
+      "a_pack_us": 1.959,
+      "kernel_us": 0.479,
+      "target_needed_for_7us_geomean_us": 5.21
+    },
+    {
+      "shape": "m32_n4096",
+      "m": 32,
+      "k": 512,
+      "n": 4096,
+      "bench_us": 10.1,
+      "gpu_self_us": 2.078,
+      "delta_us": 8.022,
+      "dominant_bucket": "a_pack",
+      "a_pack_us": 1.599,
+      "kernel_us": 0.479,
+      "target_needed_for_7us_geomean_us": 5.27
+    },
+    {
+      "shape": "m64",
+      "m": 64,
+      "k": 2048,
+      "n": 7168,
+      "bench_us": 18.1,
+      "gpu_self_us": 0.958,
+      "delta_us": 17.142,
+      "dominant_bucket": "split_a_pack_kernel",
+      "a_pack_us": 0.479,
+      "kernel_us": 0.479,
+      "target_needed_for_7us_geomean_us": 9.45
+    },
+    {
+      "shape": "m256",
+      "m": 256,
+      "k": 1536,
+      "n": 3072,
+      "bench_us": 16.4,
+      "gpu_self_us": 0.958,
+      "delta_us": 15.442,
+      "dominant_bucket": "split_a_pack_kernel",
+      "a_pack_us": 0.479,
+      "kernel_us": 0.479,
+      "target_needed_for_7us_geomean_us": 8.56
+    }
+  ],
+  "dead_lanes": [
+    {
+      "lane": "host_or_wrapper_only_runtime_collapse",
+      "status": "dead_or_too_small",
+      "evidence": "../../HISTORY.md:153-168"
+    },
+    {
+      "lane": "helper_arithmetic_micro_variants",
+      "status": "dead",
+      "evidence": "../../HISTORY.md:85-100,119-134"
+    },
+    {
+      "lane": "m4_one_shot_ready_flag_producer_consumer",
+      "status": "dead",
+      "evidence": "../../HISTORY.md:102-117"
+    },
+    {
+      "lane": "per_cta_fused_a_pack",
+      "status": "structurally_dead",
+      "evidence": "../../HISTORY.md:34-66,225-240,320-335"
+    }
+  ],
+  "isa_backed_thesis": {
+    "keep_scaled_mfma_families": [
+      "V_MFMA_SCALE_F32_16X16X128_F8F6F4",
+      "V_MFMA_SCALE_F32_32X32X64_F8F6F4"
+    ],
+    "relevant_convert_builtins": [
+      "V_CVT_SCALEF32_PK_FP4_BF16",
+      "V_CVT_SCALEF32_PK_BF16_FP4"
+    ],
+    "key_references": [
+      "important_papers/amd-instinct-cdna4-instruction-set-architecture.txt:6151-6157",
+      "important_papers/amd-instinct-cdna4-instruction-set-architecture.txt:6825-6859",
+      "important_papers/amd-instinct-cdna4-instruction-set-architecture.txt:26026-26038",
+      "important_papers/amd-instinct-cdna4-instruction-set-architecture.txt:26102-26115",
+      "important_papers/amd-instinct-cdna4-instruction-set-architecture.txt:10246-10254",
+      "important_papers/amd-instinct-cdna4-instruction-set-architecture.txt:11428-11451",
+      "important_papers/amd-instinct-cdna4-instruction-set-architecture.txt:7342-7346",
+      "important_papers/amd-instinct-cdna4-instruction-set-architecture.txt:8814-8847"
+    ]
+  },
+  "patch_ladder": [
+    {
+      "rank": 1,
+      "name": "m32_singlelaunch_bpreshuffle_nodup_apack_k512",
+      "deleted_cost_center": "standalone A-pack launch + a_packed/a_scale temp law on public m32; residual raw-B address shaping by switching to live b_shuffle",
+      "shapes": [
+        "m32_n2880",
+        "m32_n4096"
+      ],
+      "touched_regions": [
+        "fp8-mm/submission.py:3812-3826",
+        "fp8-mm/submission.py:2986-3043",
+        "fp8-mm/submission.py:3631-3638",
+        "fp8-mm/hip_phase2_working.py:421,466-473"
+      ],
+      "why_larger_than_noise": "Hits two benchmark cases and deletes the common two-launch law while using the dormant live b_shuffle contract.",
+      "expected_gain_range_us": [
+        3.5,
+        5.5
+      ],
+      "geomean_gain_range_us": [
+        1.4,
+        2.2
+      ],
+      "major_risk": "Needless per-call B temp, high VGPR pressure, or accidental per-CTA A duplication would erase the one-launch win.",
+      "fast_falsifiers": [
+        "If the branch requires new per-call shuffle_weight/materialized B temp, kill it.",
+        "If self CUDA exceeds ~2.7 us, the single-launch thesis is probably gone."
+      ]
+    },
+    {
+      "rank": 2,
+      "name": "m16_singlelaunch_bpreshuffle_nodup_apack_k7168_n2112",
+      "deleted_cost_center": "standalone A-pack launch family on the worst thin-shape gap",
+      "shapes": [
+        "m16"
+      ],
+      "touched_regions": [
+        "fp8-mm/submission.py:3797-3811",
+        "fp8-mm/submission.py:1700-1754"
+      ],
+      "why_larger_than_noise": "m16 is still massively above its GPU-self floor and recent smaller patches did not move it materially.",
+      "expected_gain_range_us": [
+        7.0,
+        10.0
+      ],
+      "geomean_gain_range_us": [
+        1.2,
+        1.8
+      ],
+      "major_risk": "Any implementation that degenerates into per-CTA fused-A or direct decode duplicated across N tiles will replay the dead fused-A family.",
+      "fast_falsifiers": [
+        "If self CUDA exceeds ~3.3 us, kill or redesign quickly."
+      ]
+    },
+    {
+      "rank": 3,
+      "name": "m64_singlelaunch_bpreshuffle_nodup_apack_k2048_n7168",
+      "deleted_cost_center": "standalone A-pack launch + A temp law on public m64",
+      "shapes": [
+        "m64"
+      ],
+      "touched_regions": [
+        "fp8-mm/submission.py:3827-3841",
+        "fp8-mm/submission.py:3097-3150"
+      ],
+      "why_larger_than_noise": "m64 has an enormous wall/self gap while the public path still pays two launches per call.",
+      "expected_gain_range_us": [
+        6.0,
+        8.0
+      ],
+      "geomean_gain_range_us": [
+        1.0,
+        1.5
+      ],
+      "major_risk": "Decode-heavy direct kernel loses occupancy or address simplicity."
+    },
+    {
+      "rank": 4,
+      "name": "m256_singlelaunch_bpreshuffle_nodup_apack_k1536_n3072",
+      "deleted_cost_center": "standalone A-pack launch + A temp law on public m256",
+      "shapes": [
+        "m256"
+      ],
+      "touched_regions": [
+        "fp8-mm/submission.py:3842-3856",
+        "fp8-mm/submission.py:3208-3262"
+      ],
+      "why_larger_than_noise": "m256 shows the same signature as m64: public B-side path is already flattened, but total wall time is still far above GPU self.",
+      "expected_gain_range_us": [
+        5.0,
+        7.0
+      ],
+      "geomean_gain_range_us": [
+        0.8,
+        1.3
+      ],
+      "major_risk": "Register pressure / occupancy cliff."
+    },
+    {
+      "rank": 5,
+      "name": "m4_singlelaunch_bpreshuffle_nodup_apack_k512",
+      "deleted_cost_center": "standalone A-pack launch + a_packed/a_scale temp law on public m4",
+      "shapes": [
+        "m4"
+      ],
+      "touched_regions": [
+        "fp8-mm/submission.py:3778-3796",
+        "fp8-mm/submission.py:1799-1852"
+      ],
+      "why_larger_than_noise": "m4 still spends most of its total wall time outside the current compute body, but prior one-shot synchronization designs were structurally wrong.",
+      "expected_gain_range_us": [
+        3.0,
+        5.0
+      ],
+      "geomean_gain_range_us": [
+        0.5,
+        0.9
+      ],
+      "major_risk": "Thin launch-front-end tax remains dominant even after A-pack deletion."
+    },
+    {
+      "rank": 6,
+      "name": "wide_post_delete_body_retune_32x32x64",
+      "deleted_cost_center": "residual per-iteration scale unpack/address recompute after A-pack launch deletion on wide shapes",
+      "shapes": [
+        "m32_n2880",
+        "m32_n4096",
+        "m64",
+        "m256"
+      ],
+      "touched_regions": [
+        "wide exact MFMA helpers",
+        "wide scale-load helpers"
+      ],
+      "why_larger_than_noise": "Only becomes worthwhile after structural feed-law deletion turns kernel share into the dominant bucket.",
+      "expected_gain_range_us": [
+        0.4,
+        1.0
+      ],
+      "major_risk": "Body-only polish before structural deletion simply replays an already-dead class of small-step work."
+    }
+  ],
+  "recommended_order": [
+    "m32_singlelaunch_bpreshuffle_nodup_apack_k512",
+    "m16_singlelaunch_bpreshuffle_nodup_apack_k7168_n2112",
+    "m64_singlelaunch_bpreshuffle_nodup_apack_k2048_n7168",
+    "m256_singlelaunch_bpreshuffle_nodup_apack_k1536_n3072",
+    "m4_singlelaunch_bpreshuffle_nodup_apack_k512",
+    "wide_post_delete_body_retune_32x32x64"
+  ],
+  "do_not_retry_next": [
+    "standalone helper arithmetic micro-edits",
+    "host-only workspace/view cleanup as main thesis",
+    "python-side exact-path CUDAGraph/HIP graph replay on the current kernelbot MI355X runner",
+    "per-CTA fused A-pack without a non-duplicating handoff law",
+    "producer/consumer ready-flag one-shot schemes",
+    "lane-permute-only campaigns before feed-law deletion",
+    "MFMA-family churn while wall/self gap is dominated by non-body cost"
+  ]
+}

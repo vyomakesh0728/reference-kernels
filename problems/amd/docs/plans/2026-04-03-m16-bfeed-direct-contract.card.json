@@ -1,0 +1,52 @@
+{
+  "shape": "exact public m16 benchmark case (m16_n2112_k7168)",
+  "regime_tag": "m16_bfeed_direct_contract_k7168_n2112",
+  "deleted_cost_center": "per-iteration raw row-major B feed and shuffled-scale recomputation inside the exact public m16 kernel body",
+  "expected_upside_band": {
+    "m16_case_us": "-1.8 to -3.0 us if live b_shuffle is directly consumable without a new B temp",
+    "geomean_us": "-0.22 to -0.45 us",
+    "kill_if": "any new per-call B materialization or helper launch is required"
+  },
+  "why_larger_than_noise": [
+    "current m16 benchmark wall is 19.6 us while fresh profile self is only 2.598 us",
+    "exact m16 still reads raw row-major b_q with inter-lane B stride of 3584 B",
+    "exact m16 runs 56 MFMA steps and still recovers scale addresses with /224 and %224 style arithmetic each step",
+    "launch grid is only 132 x 1, so poor B feed hurts more than on wide shapes",
+    "live contract evidence says b_shuffle == shuffle_weight(b_q_input, layout=(16,16)) and stays at shape (2112, 3584), so there is a grounded path to better B feed without touching A-pack or creating a new B temp"
+  ],
+  "exact_symbols_touched": [
+    "fp8-mm/submission.py:3797-3811 custom_kernel exact public m16 dispatch",
+    "fp8-mm/submission.py:1700-1754 mxfp4_mm_hip_mfma_scale_exact_m16_direct_entry_public_k7168_n2112_owned_workspace",
+    "fp8-mm/submission.py:1292-1305 pack_scale_e8m0x4_lane_from_shuffled_exact_m16_k7168_fast",
+    "fp8-mm/submission.py:1308-1375 mxfp4_mm_kernel_mfma_scale_exact_m16_k7168_n2112",
+    "CPP_WRAPPER / HIP host defs / INLINE_EXPORT_FUNCTIONS / Python callsites"
+  ],
+  "profile_evidence": [
+    ".agent-loop/harness_runs/mxfp4_mm/20260402-120426-p0p5-runtime-collapse-owned-scaleflat-r1-benchmark/stages/01_benchmark/parsed_metrics.json",
+    ".agent-loop/harness_runs/mxfp4_mm/20260402-143032-baseline-recheck-profile-r1-harness/stages/01_profile_rocprof/profile/profile_summary.json",
+    ".agent-loop/harness_runs/mxfp4_mm/20260402-143032-baseline-recheck-profile-r1-harness/stages/01_profile_rocprof/profile/candidate_cards.json",
+    "skills/amd-live-reference-correctness/references/mxfp4-mm-live-contract.md",
+    ".agent-loop/problems/mxfp4_mm/manual/b_shuffle_probe/result.txt"
+  ],
+  "kill_criteria": [
+    "kill immediately if live runner b_shuffle is not directly consumable by exact m16 without a new per-call B temp",
+    "kill if the prototype keeps raw row-major B and only micro-polishes copies",
+    "do not remote-spend unless there is a believable path to m16 <= 17.5 us",
+    "reject if benchmarked m16 does not improve by at least about 2.1 us from 19.6 us",
+    "reject if any non-m16 scored shape regresses by more than 0.1 us",
+    "reject on any correctness failure"
+  ],
+  "vetoes": [
+    "do not touch A-pack helper logic or ownership law",
+    "do not create a new per-call B helper launch",
+    "do not touch other exact shapes in the first pass",
+    "do not reopen AITER, graph replay, serial sweeps, or cooperative-grid sync",
+    "do not mix this branch with MFMA-family switches or workspace-cache experiments"
+  ],
+  "success_gate": {
+    "m16_case_us": "<= 17.5 us",
+    "geomean_us": "<= 13.15 us",
+    "other_shapes_regression_limit_us": 0.1,
+    "correctness": "test + benchmark must pass"
+  }
+}
