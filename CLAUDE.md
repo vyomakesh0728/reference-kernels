@@ -14,9 +14,12 @@ MLA decode attention. DeepSeek R1 forward_absorb path.
 - Output: (total_q, 16, 512) bf16
 - Tolerance: rtol=1e-01, atol=1e-01
 
-## Current Status: 66 µs geomean, rank ~38/88. #1 is 29 µs.
-- **Production:** `submission.py` = aiter fp8 with aggressive kv8k config (~66 µs)
-- **HIP WIP:** Dead path (load_inline >17 min compile timeout)
+## Current Status: 68 µs geomean, rank ~38/88. #1 is 19 µs.
+- **Production:** `submission.py` = aiter fp8 with aggressive kv8k config (~68 µs)
+- **HIP CONFIRMED WORKING:** `load_inline` compiles in ~30s with `PYTORCH_ROCM_ARCH=gfx950`
+- **Teammate's mxfp4-mm** uses `load_inline` successfully — same pattern works for MLA
+- **bf16 KV** passes correctness easily (tolerance rtol/atol=0.1)
+- **Scalar HIP kernel** works but 50-400× slower than aiter (no MFMA utilization)
 - **Gap to #1:** need ~2.3× speedup from current best
 
 ## 2026-04-02: tl.dot_scaled WORKS on gfx950!
