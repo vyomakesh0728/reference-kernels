@@ -1,19 +1,12 @@
 #!POPCORN leaderboard amd-mixed-mla
 #!POPCORN gpu MI355X
-"""Aggressive aiter policy tuned for current harness behavior.
+"""Tuned aiter config — per-shape optimized split counts and modes.
 
-Key findings:
-- Keep kv=1024 path as a16w8 with low splits (good small/medium behavior)
-- For kv=8192, force a8w8 + ns=32 across all batches
-- On recent benchmark runs this lowered geomean vs prior mixed config
-
-The wall: bs=256,kv=8k remains ~312us.
-Roofline floor: ~150-219us (just reading fp8 KV at 8TB/s).
-Gap: ~100us from kernel efficiency + overhead.
-
-Next steps beyond aiter:
-1. Custom HIP kernel with fused QK^T+softmax+V (eliminates split-K materialization)
-2. mxfp4 KV with V_MFMA_SCALE_F32_16X16X128_F8F6F4 (2x bandwidth savings)
+Tried configs based on benchmark data:
+- bs=4: a16w8 (skip Q quant), higher splits for parallelism
+- bs=32: a16w8 for kv=1024, a8w8 for kv=8192
+- bs=64: similar to bs=32
+- bs=256: a8w8, moderate splits
 """
 
 import torch
@@ -34,14 +27,21 @@ _cache = {}
 
 
 def _get_config(bs, kvl):
-    """Aggressive split policy: keep 1k path, force 8k path to a8w8+ns32."""
+    """Per-shape tuned config: (num_splits, use_a8w8, page_size, fast_mode)."""
     if kvl <= 1024:
         if bs <= 32:
             return (8, False, 2, True)
         if bs <= 64:
             return (4, False, 2, True)
         return (4, False, 2, True)
-    return (32, True, 1, False)
+    else:
+        if bs <= 4:
+            return (32, False, 2, True)
+        if bs <= 32:
+            return (16, True, 1, False)
+        if bs <= 64:
+            return (16, True, 1, False)
+        return (32, True, 1, False)
 
 
 def _get_or_build(bs, kvl, qd, kvd, qo, kvi, ns, dev, ps, fm):

@@ -34,7 +34,6 @@ _MODULE = None
 
 CPP_WRAPPER = """
 void mla_ns16(torch::Tensor q, torch::Tensor kv, torch::Tensor kv_scale, torch::Tensor out, torch::Tensor kv_indptr, torch::Tensor sb, torch::Tensor sl, torch::Tensor sc, int bs, float sm);
-void mla_ns32(torch::Tensor q, torch::Tensor kv, torch::Tensor kv_scale, torch::Tensor out, torch::Tensor kv_indptr, torch::Tensor sb, torch::Tensor sl, torch::Tensor sc, int bs, float sm);
 """
 
 HIP_SRC = r"""
@@ -325,10 +324,9 @@ void mla_ns##NS(torch::Tensor q, torch::Tensor kv, torch::Tensor kv_scale, \
 }
 
 LAUNCH_MLA(16)
-LAUNCH_MLA(32)
 """
 
-EXPORT_FUNCTIONS = ["mla_ns16", "mla_ns32"]
+EXPORT_FUNCTIONS = ["mla_ns16"]
 
 
 def _module():
@@ -342,13 +340,7 @@ def _module():
             cpp_sources=[CPP_WRAPPER],
             cuda_sources=[HIP_SRC],
             functions=EXPORT_FUNCTIONS,
-            extra_cuda_cflags=[
-                "--offload-arch=gfx950",
-                "-std=c++20",
-                "-O2",
-                "-mllvm",
-                "-amdgpu-early-inline-all=true",
-            ],
+            extra_cuda_cflags=["--offload-arch=gfx950", "-std=c++20", "-O2"],
             build_directory=str(build_root),
             verbose=False,
         )
@@ -356,12 +348,7 @@ def _module():
 
 
 def _get_num_splits(bs, kvl):
-    if kvl <= 1024:
-        return 16
-    else:
-        if bs <= 4:
-            return 32
-        return 16
+    return 16
 
 
 def _get_bufs(bs, num_splits, dev):
@@ -384,9 +371,6 @@ def _get_bufs(bs, num_splits, dev):
     return _cache[key]
 
 
-_DISPATCH = {16: "mla_ns16", 32: "mla_ns32"}
-
-
 def custom_kernel(data: input_t) -> output_t:
     q, kv_data, qo_indptr, kv_indptr, config = data
     bs = int(config["batch_size"])
@@ -400,8 +384,7 @@ def custom_kernel(data: input_t) -> output_t:
     bufs["sc"].zero_()
 
     mod = _module()
-    fn = getattr(mod, _DISPATCH[ns])
-    fn(
+    mod.mla_ns16(
         q_reshaped,
         kv_fp8.view(-1),
         kv_scale,

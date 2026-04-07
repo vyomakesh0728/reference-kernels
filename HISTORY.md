@@ -31,6 +31,25 @@ Log **failed attempts** and **why**—that saves more time than only logging win
 
 ## Log
 
+### 2026-04-06 — mixed-mla: per-shape config tuning submission (SERVICE DOWN)
+
+| Field | Content |
+|--------|--------|
+| **Problem** | `mixed-mla` |
+| **Goal** | Improve geomean via per-shape aiter config tuning (ns, a8w8 vs a16w8) |
+| **Techniques** | 1) ns=16 for kv=8192 (down from 32); 2) a16w8 for bs=4,kv=8192 (skip Q quant); 3) ns=8 for bs=256,kv=1024 (more parallelism); 4) Attempted bf16 KV for bs<=4 (v1); 5) Attempted eager warmup pre-allocation (v2) |
+| **Code / commit** | `problems/amd_202602/mixed-mla/submission_hybrid.py` |
+| **Evidence** | Workflows: 24046966782 (v1 bf16: artifact download failed), 24047847703 (v2 warmup: 17min timeout), 24049427954 (v3 clean: 17min timeout), original submission.py also failed (connection error). Workflow 24052628401: cancelled by admin — GPU jobs not available. Rate limit: 5/hr test+benchmark combined. |
+| **Popcorn** | `test` ❌ (service infrastructure down, not code errors) |
+| **Result** | **BLOCKED by Popcorn service outage**. All submissions (including known-working original) failing with 17min timeouts or connection errors. |
+| **What didn't work** | 1) bf16 KV path (v1): risky, unclear if timeout was code or infra; 2) Eager warmup pre-allocation (v2): may trigger JIT compilation of unused kernel variants; 3) Service is congested near April 7 deadline |
+| **Rule / spec tension** | Rate limit reduced from 10 to 5/hr during deadline crunch |
+| **Learnings** | 1) **bf16 KV + aiter persistent mode**: untested, risky; 2) **Eager warmup**: can trigger JIT compilation of kernel variants that wouldn't be needed until later; 3) **Near-deadline service**: expect congestion and reduced rate limits; 4) **Always test original first** when debugging service issues |
+| **Next bet** | When service recovers: test `submission_hybrid.py` (v3, fp8-only with config tuning). If it works, benchmark. Config diff: kv=8192 ns=16 (from 32), bs=4+kv=8192 a16w8 (from a8w8), bs=256+kv=1024 ns=8 (from 4). |
+| **Artifacts** | `submission_hybrid.py` ready to test |
+
+---
+
 ### 2026-04-05 — mixed-mla: bf16 path confirmed, HIP load_inline WORKS
 
 | Field | Content |

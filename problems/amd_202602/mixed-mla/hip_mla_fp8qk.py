@@ -38,7 +38,10 @@ _cache = {}
 _MODULE = None
 
 CPP_WRAPPER = """
+void mla_ns4(torch::Tensor q_fp8, torch::Tensor q_scale, torch::Tensor kv, torch::Tensor kv_scale, torch::Tensor out, torch::Tensor kv_indptr, torch::Tensor sb, torch::Tensor sl, torch::Tensor sc, int bs, float sm);
+void mla_ns8(torch::Tensor q_fp8, torch::Tensor q_scale, torch::Tensor kv, torch::Tensor kv_scale, torch::Tensor out, torch::Tensor kv_indptr, torch::Tensor sb, torch::Tensor sl, torch::Tensor sc, int bs, float sm);
 void mla_ns16(torch::Tensor q_fp8, torch::Tensor q_scale, torch::Tensor kv, torch::Tensor kv_scale, torch::Tensor out, torch::Tensor kv_indptr, torch::Tensor sb, torch::Tensor sl, torch::Tensor sc, int bs, float sm);
+void mla_ns32(torch::Tensor q_fp8, torch::Tensor q_scale, torch::Tensor kv, torch::Tensor kv_scale, torch::Tensor out, torch::Tensor kv_indptr, torch::Tensor sb, torch::Tensor sl, torch::Tensor sc, int bs, float sm);
 """
 
 HIP_SRC = r"""
@@ -307,10 +310,13 @@ void mla_ns##NS(torch::Tensor q_fp8, torch::Tensor q_scale, torch::Tensor kv, to
         sc.data_ptr<int>(), sm); \
 }
 
+LAUNCH_MLA(4)
+LAUNCH_MLA(8)
 LAUNCH_MLA(16)
+LAUNCH_MLA(32)
 """
 
-EXPORT_FUNCTIONS = ["mla_ns16"]
+EXPORT_FUNCTIONS = ["mla_ns4", "mla_ns8", "mla_ns16", "mla_ns32"]
 
 
 def _module():
@@ -324,7 +330,7 @@ def _module():
             cpp_sources=[CPP_WRAPPER],
             cuda_sources=[HIP_SRC],
             functions=EXPORT_FUNCTIONS,
-            extra_cuda_cflags=["--offload-arch=gfx950", "-std=c++20", "-O0"],
+            extra_cuda_cflags=["--offload-arch=gfx950", "-std=c++20", "-O3"],
             build_directory=str(build_root),
             verbose=False,
         )
@@ -332,7 +338,18 @@ def _module():
 
 
 def _get_num_splits(bs, kvl):
-    return 16
+    if kvl <= 1024:
+        if bs <= 4:
+            return 16
+        if bs <= 64:
+            return 4
+        return 4
+    else:
+        if bs <= 4:
+            return 32
+        if bs <= 64:
+            return 16
+        return 8
 
 
 def _get_bufs(bs, num_splits, dev):
@@ -355,7 +372,7 @@ def _get_bufs(bs, num_splits, dev):
     return _cache[key]
 
 
-_DISPATCH = {16: "mla_ns16"}
+_DISPATCH = {4: "mla_ns4", 8: "mla_ns8", 16: "mla_ns16", 32: "mla_ns32"}
 
 
 def custom_kernel(data: input_t) -> output_t:
